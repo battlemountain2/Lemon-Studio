@@ -1191,6 +1191,32 @@ impl App {
         }
     }
 
+    fn atomic_save(target: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        let parent = target.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let temp_name = format!(
+            ".{}.tmp.{}",
+            target.file_name().and_then(|n| n.to_str()).unwrap_or("project"),
+            std::process::id()
+        );
+        let temp_path = parent.join(temp_name);
+        let write_res = (|| -> std::io::Result<()> {
+            let mut f = std::fs::File::create(&temp_path)?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+            Ok(())
+        })();
+        if let Err(e) = write_res {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e);
+        }
+        if let Err(e) = std::fs::rename(&temp_path, target) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e);
+        }
+        Ok(())
+    }
+
     pub(crate) fn save_to(&mut self, target: PathBuf) {
         // Sampler channels keep their sample in Lemon Sampler: copy it to the channel so the FLP stores it.
         for row in self.state.hosted_rows.clone() {
@@ -1249,7 +1275,7 @@ impl App {
         let result = os_flp::project::apply(&proj, &mut file)
             .map_err(|e| e.to_string())
             .and_then(|()| file.to_bytes().map_err(|e| e.to_string()))
-            .and_then(|b| std::fs::write(&target, b).map_err(|e| e.to_string()));
+            .and_then(|b| Self::atomic_save(&target, &b).map_err(|e| e.to_string()));
         s.message = Some(match result {
             Ok(()) if lost.is_empty() => format!("Saved {}", target.display()),
             Ok(()) => format!("Saved {} (not stored yet: {})", target.display(), lost.join(", ")),

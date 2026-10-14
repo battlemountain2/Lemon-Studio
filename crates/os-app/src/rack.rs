@@ -1306,12 +1306,24 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             None
         }
         RCmd::CutItself(r) => {
+            let used: std::collections::HashSet<u32> = s
+                .project
+                .channels
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != r)
+                .flat_map(|(_, c)| [c.misc.cut, c.misc.cut_by])
+                .filter(|&g| g > 0)
+                .collect();
+            let max_cut = s.project.channels.iter().map(|c| c.misc.cut.max(c.misc.cut_by)).max().unwrap_or(0);
             if let Some(ch) = s.project.channels.get_mut(r) {
                 if ch.misc.cut > 0 && ch.misc.cut == ch.misc.cut_by {
                     ch.misc.cut = 0;
                     ch.misc.cut_by = 0;
                 } else {
-                    let grp = (r as u32) + 1;
+                    let grp = (1..=99)
+                        .find(|g| !used.contains(g))
+                        .unwrap_or(max_cut + 1);
                     ch.misc.cut = grp;
                     ch.misc.cut_by = grp;
                 }

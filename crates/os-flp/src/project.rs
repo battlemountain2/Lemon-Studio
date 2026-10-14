@@ -246,6 +246,7 @@ struct ChannelLoc {
     zipped: Option<usize>,
     locked: Option<usize>,
     group: Option<usize>,
+    cut_groups: Option<usize>,
     /// Last event 94 (layer child); the zip flag follows it or the target (104).
     last_child: Option<usize>,
 }
@@ -558,6 +559,7 @@ fn scan_channel(events: &[Event], start: usize, end: usize) -> ChannelLoc {
             id::CH_ZIPPED => c.zipped = Some(k),
             id::CH_LOCKED => c.locked = Some(k),
             id::CH_GROUP => c.group = Some(k),
+            id::CH_CUT_GROUPS => c.cut_groups = Some(k),
             id::CH_LAYER_CHILD => c.last_child = Some(k),
             _ => {}
         }
@@ -615,7 +617,7 @@ pub fn load(file: &FlpFile) -> Result<Project, ProjectError> {
             .map(|d| decode_text(d, TextEnc::Ansi))
             .unwrap_or_default(),
         ppq: header.ppq().unwrap_or(96),
-        tempo: l.tempo.map(|i| f64::from(int(&events[i])) / 1000.0),
+        tempo: l.tempo.map(|i| (f64::from(int(&events[i])) / 1000.0).clamp(10.0, 999.0)),
         info: ProjectInfo {
             title: text(l.title),
             author: text(l.author),
@@ -1783,6 +1785,17 @@ pub fn apply(project: &Project, file: &mut FlpFile) -> Result<(), ProjectError> 
                 None => inserts.push((loc.end, Event::new(id::CH_GROUP, Value::U32(ch.rack.group)))),
             }
         }
+        if (ch.misc.cut, ch.misc.cut_by) != (old.misc.cut, old.misc.cut_by) {
+            let v = (ch.misc.cut & 0xffff) | ((ch.misc.cut_by & 0xffff) << 16);
+            match (loc.cut_groups, v) {
+                (Some(i), _) => set_int(&mut events[i], v),
+                (None, 0) => {}
+                (None, _) => {
+                    let at = loc.levels.or(loc.target).map_or(loc.end, |i| i + 1);
+                    inserts.push((at, Event::new(id::CH_CUT_GROUPS, Value::U32(v))));
+                }
+            }
+        }
         // A sampler's sample (Lemon Sampler loads one): event 196 replaced, or added right after event 20 where FL
         // writes it (spec: flp/events/channels.md). Clearing a sample is not written yet (the old path stays).
         if ch.sample_path != old.sample_path {
@@ -2616,6 +2629,10 @@ fn channel_block_events(ch: &Channel, auto: Option<&Automation>, enc: TextEnc) -
         b.push(Event::new(id::AUTO_DATA, Value::var(encode_automation(a))));
     }
     b.push(Event::new(id::CH_LOCKED, Value::U8(u8::from(ch.rack.locked))));
+    if ch.misc.cut != 0 || ch.misc.cut_by != 0 {
+        let v = (ch.misc.cut & 0xffff) | ((ch.misc.cut_by & 0xffff) << 16);
+        b.push(Event::new(id::CH_CUT_GROUPS, Value::U32(v)));
+    }
     if let Some(p) = &ch.sample_path {
         b.push(Event::new(id::SAMPLE_PATH, Value::var(encode_text(p, enc))));
     }
@@ -3856,5 +3873,41 @@ mod tests {
         let mut again = file.clone();
         apply(&back, &mut again).unwrap();
         assert_eq!(again.to_bytes().unwrap(), file.to_bytes().unwrap());
+    }
+
+    #[test]
+    fn cut_groups_survive_create_and_apply() {
+        let mut p = Project::default();
+        let mut ch1 = sampler(0, "Kick", 1);
+        ch1.misc.cut = 7;
+        ch1.misc.cut_by = 7;
+
+        let mut ch2 = sampler(1, "Clap", 2);
+        ch2.misc.cut = 3;
+        ch2.misc.cut_by = 5;
+
+        p.channels = vec![ch1, ch2];
+
+        // 1. Test create -> load round trip
+        let mut file = FlpFile::parse(&create(&p).unwrap().to_bytes().unwrap()).unwrap();
+        let loaded = load(&file).unwrap();
+        assert_eq!(loaded.channels[0].misc.cut, 7);
+        assert_eq!(loaded.channels[0].misc.cut_by, 7);
+        assert_eq!(loaded.channels[1].misc.cut, 3);
+        assert_eq!(loaded.channels[1].misc.cut_by, 5);
+
+        // 2. Test apply updates cut groups
+        let mut modified = loaded.clone();
+        modified.channels[0].misc.cut = 0;
+        modified.channels[0].misc.cut_by = 0;
+        modified.channels[1].misc.cut = 12;
+        modified.channels[1].misc.cut_by = 12;
+
+        apply(&modified, &mut file).unwrap();
+        let reloaded = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
+        assert_eq!(reloaded.channels[0].misc.cut, 0);
+        assert_eq!(reloaded.channels[0].misc.cut_by, 0);
+        assert_eq!(reloaded.channels[1].misc.cut, 12);
+        assert_eq!(reloaded.channels[1].misc.cut_by, 12);
     }
 }

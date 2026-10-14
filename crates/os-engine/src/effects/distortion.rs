@@ -57,11 +57,45 @@ impl Distortion {
         Self::new(DistMode::Bitcrush, 1.5, bits, downsample, 0.9, mix)
     }
 
-    pub fn from_state(name: &str, _state: &[u8], _sample_rate: u32) -> Self {
+    pub fn to_state(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(28);
+        b.extend_from_slice(b"LMDS");
+        let mode_val: u32 = match self.mode {
+            DistMode::Overdrive => 0,
+            DistMode::HardClip => 1,
+            DistMode::Foldback => 2,
+            DistMode::Bitcrush => 3,
+        };
+        b.extend_from_slice(&mode_val.to_le_bytes());
+        b.extend_from_slice(&self.drive.to_le_bytes());
+        b.extend_from_slice(&self.bits.to_le_bytes());
+        b.extend_from_slice(&self.downsample.to_le_bytes());
+        b.extend_from_slice(&self.post_gain.to_le_bytes());
+        b.extend_from_slice(&self.mix.to_le_bytes());
+        b
+    }
+
+    pub fn from_state(name: &str, state: &[u8], _sample_rate: u32) -> Self {
+        if state.len() >= 28 && &state[0..4] == b"LMDS" {
+            let mode_val = u32::from_le_bytes(state[4..8].try_into().unwrap());
+            let mode = match mode_val {
+                1 => DistMode::HardClip,
+                2 => DistMode::Foldback,
+                3 => DistMode::Bitcrush,
+                _ => DistMode::Overdrive,
+            };
+            let f = |start: usize| f32::from_le_bytes(state[start..start + 4].try_into().unwrap());
+            let drive = f(8);
+            let bits = f(12);
+            let downsample = u32::from_le_bytes(state[16..20].try_into().unwrap());
+            let post_gain = f(20);
+            let mix = f(24);
+            return Self::new(mode, drive, bits, downsample, post_gain, mix);
+        }
         let lower = name.to_lowercase();
-        if lower.contains("bitcrush") || lower.contains("squeeze") {
+        if lower.contains("bitcrush") {
             Self::bitcrusher(8.0, 4, 1.0)
-        } else if lower.contains("waveshaper") || lower.contains("fast dist") {
+        } else if lower.contains("waveshaper") {
             Self::waveshaper(3.5, 0.8)
         } else {
             Self::overdrive(3.0, 0.75)

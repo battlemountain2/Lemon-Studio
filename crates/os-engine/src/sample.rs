@@ -64,31 +64,26 @@ fn stamp(path: &Path) -> Option<Stamp> {
     std::fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok()))
 }
 
-/// Loads a built-in procedural sample if `path` names one.
+/// Loads a built-in procedural sample if `path` names one with the explicit `builtin:` prefix.
 pub fn load_builtin(path: &Path) -> Option<Arc<Sample>> {
     let s = path.to_str()?;
-    let lower = s.to_lowercase();
-    if s.starts_with("builtin:")
-        || lower.contains("808 kick")
-        || lower.contains("808 clap")
-        || lower.contains("808 hat")
-        || lower.contains("808 snare")
-    {
-        if lower.contains("kick") {
-            static KICK: OnceLock<Arc<Sample>> = OnceLock::new();
-            return Some(KICK.get_or_init(|| crate::drums::kick_808(44100)).clone());
-        } else if lower.contains("clap") {
-            static CLAP: OnceLock<Arc<Sample>> = OnceLock::new();
-            return Some(CLAP.get_or_init(|| crate::drums::clap_808(44100)).clone());
-        } else if lower.contains("hat") {
-            static HAT: OnceLock<Arc<Sample>> = OnceLock::new();
-            return Some(HAT.get_or_init(|| crate::drums::hat_808(44100)).clone());
-        } else if lower.contains("snare") {
-            static SNARE: OnceLock<Arc<Sample>> = OnceLock::new();
-            return Some(SNARE.get_or_init(|| crate::drums::snare_808(44100)).clone());
-        }
+    let id = s.strip_prefix("builtin:")?;
+    let lower = id.to_lowercase();
+    if lower == "808 kick.wav" || lower == "808 kick" || lower == "kick" {
+        static KICK: OnceLock<Arc<Sample>> = OnceLock::new();
+        Some(KICK.get_or_init(|| crate::drums::kick_808(44100)).clone())
+    } else if lower == "808 clap.wav" || lower == "808 clap" || lower == "clap" {
+        static CLAP: OnceLock<Arc<Sample>> = OnceLock::new();
+        Some(CLAP.get_or_init(|| crate::drums::clap_808(44100)).clone())
+    } else if lower == "808 hat.wav" || lower == "808 hat" || lower == "hat" {
+        static HAT: OnceLock<Arc<Sample>> = OnceLock::new();
+        Some(HAT.get_or_init(|| crate::drums::hat_808(44100)).clone())
+    } else if lower == "808 snare.wav" || lower == "808 snare" || lower == "snare" {
+        static SNARE: OnceLock<Arc<Sample>> = OnceLock::new();
+        Some(SNARE.get_or_init(|| crate::drums::snare_808(44100)).clone())
+    } else {
+        None
     }
-    None
 }
 
 /// `load`, shared: while any holder keeps a decoded file alive, loading the same unchanged file again returns that
@@ -119,22 +114,7 @@ pub fn load(path: &Path) -> Result<Sample, SampleError> {
     if let Some(s) = load_builtin(path) {
         return Ok((*s).clone());
     }
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(source) => {
-            let lower = path.to_string_lossy().to_lowercase();
-            if lower.contains("kick") {
-                return Ok((*crate::drums::kick_808(44100)).clone());
-            } else if lower.contains("clap") {
-                return Ok((*crate::drums::clap_808(44100)).clone());
-            } else if lower.contains("hat") {
-                return Ok((*crate::drums::hat_808(44100)).clone());
-            } else if lower.contains("snare") {
-                return Ok((*crate::drums::snare_808(44100)).clone());
-            }
-            return Err(SampleError::Io { path: path.to_owned(), source });
-        }
-    };
+    let bytes = std::fs::read(path).map_err(|source| SampleError::Io { path: path.to_owned(), source })?;
     let decode_err = |message: String| SampleError::Decode { path: path.to_owned(), message };
     if let Some(vw) = vorbis_in_wav(&bytes) {
         let mut s = decode(vw.ogg.to_vec(), Some("ogg")).map_err(decode_err)?;
@@ -276,10 +256,6 @@ pub struct SampleLibrary {
     cache: HashMap<String, Option<Arc<Sample>>>,
     /// Built-in tones by output rate (the engine's empty-sampler fallback), built once.
     pub(crate) tones: HashMap<u32, Arc<Sample>>,
-    pub(crate) kick_tones: HashMap<u32, Arc<Sample>>,
-    pub(crate) clap_tones: HashMap<u32, Arc<Sample>>,
-    pub(crate) hat_tones: HashMap<u32, Arc<Sample>>,
-    pub(crate) snare_tones: HashMap<u32, Arc<Sample>>,
     /// Paths that couldn't be resolved or decoded, with the reason.
     pub failures: Vec<(String, String)>,
     /// Stretched copies made so far: (source, length in frames, pitch factor bits, copy).
@@ -364,23 +340,15 @@ impl SampleLibrary {
         }
         let loaded = match self.resolve(project_path) {
             None => {
-                if let Some(s) = load_builtin(Path::new(project_path)) {
-                    Some(s)
-                } else {
-                    self.failures.push((project_path.into(), "factory folder not set".into()));
-                    None
-                }
+                self.failures.push((project_path.into(), "factory folder not set".into()));
+                None
             }
             // Shared with the other users of the file (plugin instances, playlist waveforms).
             Some(p) => match load_shared(&p) {
                 Ok(s) => Some(s),
                 Err(e) => {
-                    if let Some(s) = load_builtin(&p) {
-                        Some(s)
-                    } else {
-                        self.failures.push((project_path.into(), e.to_string()));
-                        None
-                    }
+                    self.failures.push((project_path.into(), e.to_string()));
+                    None
                 }
             },
         };
@@ -443,5 +411,45 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert!(!Arc::ptr_eq(&c, &d), "a changed file is decoded again");
         assert_eq!(d.frames(), 960);
+    }
+
+    #[test]
+    fn builtin_samples_strictly_require_prefix() {
+        assert!(load_builtin(Path::new("builtin:808 Kick.wav")).is_some());
+        assert!(load_builtin(Path::new("builtin:808 Clap.wav")).is_some());
+        assert!(load_builtin(Path::new("builtin:808 Hat.wav")).is_some());
+        assert!(load_builtin(Path::new("builtin:808 Snare.wav")).is_some());
+
+        // Regular paths containing drum keywords must NEVER be treated as built-in
+        assert!(load_builtin(Path::new("/path/to/808 kick.wav")).is_none());
+        assert!(load_builtin(Path::new("C:\\Samples\\hat.wav")).is_none());
+        assert!(load_builtin(Path::new("what-vocal.wav")).is_none());
+        assert!(load_builtin(Path::new("snare_drum_sample.wav")).is_none());
+    }
+
+    #[test]
+    fn missing_files_return_io_error_without_hijacking() {
+        let missing = Path::new("/nonexistent/what-vocal.wav");
+        assert!(matches!(load(missing), Err(SampleError::Io { .. })));
+
+        let missing_kick = Path::new("/nonexistent/808 kick.wav");
+        assert!(matches!(load(missing_kick), Err(SampleError::Io { .. })));
+
+        let missing_hat = Path::new("/nonexistent/hat.wav");
+        assert!(matches!(load(missing_hat), Err(SampleError::Io { .. })));
+    }
+
+    #[test]
+    fn real_file_with_drum_name_decodes_actual_bytes() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("test_808_kick_{}.wav", std::process::id()));
+        // 48 kHz, 32 stereo frames (64 interleaved samples) of 0.33 f32
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&path).unwrap(), 48000, &[0.33; 64]).unwrap();
+        let s = load(&path).expect("decodes real wav");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(s.rate, 48000, "must preserve real file rate, not procedural 44.1 kHz");
+        assert_eq!(s.frames(), 32, "must preserve real file length, not procedural 808 duration");
+        assert!((s.left[0] - 0.33).abs() < 1e-4);
     }
 }

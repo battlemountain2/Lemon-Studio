@@ -222,7 +222,7 @@ const OPTIONS: &[Item] = &[
     it("Enable MIDI master sync", "").tick(),
     head("Switches"),
     it("Typing keyboard to piano", "Ctrl+T").on().tick(),
-    it("Metronome", "Ctrl+M").tick(),
+    it("Metronome", "Ctrl+M").on().tick(),
     it("Recording precount", "Ctrl+P").tick(),
     it("Start on input", "Ctrl+I").tick(),
     it("Blend recorded notes", "Ctrl+B").tick(),

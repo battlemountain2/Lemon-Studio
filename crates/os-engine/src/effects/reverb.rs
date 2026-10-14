@@ -100,7 +100,27 @@ impl Reverb {
         Self::new(sample_rate, 0.6, 0.25, 1.0, 0.35)
     }
 
-    pub fn from_state(_state: &[u8], sample_rate: u32) -> Self {
+    pub fn to_state(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(20);
+        b.extend_from_slice(b"LMR1");
+        let room = ((self.room_size - 0.7) / 0.28).clamp(0.0, 1.0);
+        let damp = (self.damping / 0.4).clamp(0.0, 1.0);
+        b.extend_from_slice(&room.to_le_bytes());
+        b.extend_from_slice(&damp.to_le_bytes());
+        b.extend_from_slice(&self.width.to_le_bytes());
+        b.extend_from_slice(&self.wet.to_le_bytes());
+        b
+    }
+
+    pub fn from_state(state: &[u8], sample_rate: u32) -> Self {
+        if state.len() >= 20 && &state[0..4] == b"LMR1" {
+            let f = |start: usize| f32::from_le_bytes(state[start..start + 4].try_into().unwrap());
+            let room_size = f(4);
+            let damping = f(8);
+            let width = f(12);
+            let mix = f(16);
+            return Self::new(sample_rate, room_size, damping, width, mix);
+        }
         Self::default_fx(sample_rate)
     }
 }

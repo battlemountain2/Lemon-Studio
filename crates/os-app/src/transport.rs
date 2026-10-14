@@ -793,7 +793,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     _ => {
                         if live.is_none() {
                             if let Some(p) = &live_project {
-                                match Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, &mut library, shared.clone(), &inst, At::default()) {
+                                match Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, &mut library, shared.clone(), &inst, At::default(), false) {
                                     Ok(s) => live = Some(s),
                                     Err(e) => report(&shared, e),
                                 }
@@ -820,7 +820,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             Ok(Cmd::PreviewFor(project, limit)) => {
                 preview = None;
                 preview_until = limit.map(|d| Instant::now() + d);
-                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default()) {
+                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default(), false) {
                     Ok(s) => preview = Some(s),
                     Err(e) => report(&shared, e),
                 }
@@ -828,7 +828,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             Ok(Cmd::PreviewSong(project)) => {
                 preview = None;
                 preview_until = None;
-                match Session::start(&project, PlayMode::Song, Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default()) {
+                match Session::start(&project, PlayMode::Song, Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default(), false) {
                     Ok(s) => preview = Some(s),
                     Err(e) => report(&shared, e),
                 }
@@ -842,7 +842,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     let running = session.as_ref().is_some_and(|s| !s.paused());
                     if !running && live.is_none() {
                         if let Some(p) = live_project.as_ref().or(Some(&*project)) {
-                            match Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, &mut library, shared.clone(), &inst, At::default()) {
+                            match Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, &mut library, shared.clone(), &inst, At::default(), false) {
                                 Ok(s) => live = Some(s),
                                 Err(e) => report(&shared, e),
                             }
@@ -864,7 +864,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 }
                 preview = None;
                 preview_until = None;
-                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default()) {
+                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default(), false) {
                     Ok(s) => preview = Some(s),
                     Err(e) => report(&shared, e),
                 }
@@ -883,11 +883,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 reset_instruments(&inst);
                 reset_pending = false;
                 live_project = Some((*project).clone());
-                match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, At { tick: start, paused: false }) {
+                match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, At { tick: start, paused: false }, metronome_on) {
                     Ok(s) => {
-                        if let Ok(mut e) = s.engine.lock() {
-                            e.set_metronome(metronome_on);
-                        }
                         session = Some(s);
                     }
                     Err(e) => {
@@ -915,11 +912,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     let (project, mode, generation) = (old.project.clone(), old.mode, old.generation);
                     drop(old);
                     reset_instruments(&inst);
-                    match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at) {
+                    match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at, metronome_on) {
                         Ok(s) => {
-                            if let Ok(mut e) = s.engine.lock() {
-                                e.set_metronome(metronome_on);
-                            }
                             session = Some(s);
                         }
                         Err(e) => {
@@ -1046,12 +1040,13 @@ impl Session {
 
     /// Opens a stream with the audio settings and starts it at `at` (playback: the position is published at once).
     #[allow(clippy::too_many_arguments)]
-    fn start(project: &Project, mode: PlayMode, kind: Kind, generation: u64, library: &mut SampleLibrary, shared: Arc<Shared>, inst: &Instruments, at: At) -> Result<Session, String> {
+    fn start(project: &Project, mode: PlayMode, kind: Kind, generation: u64, library: &mut SampleLibrary, shared: Arc<Shared>, inst: &Instruments, at: At, metronome: bool) -> Result<Session, String> {
         let song = kind == Kind::Song;
         let out = crate::audio_cfg::output(&crate::audio_cfg::AudioCfg::current())?;
         let (device, format, mut config) = (out.device, out.format, out.config);
         let rate = config.sample_rate;
         let mut e = Engine::new(project, library, rate, mode);
+        e.set_metronome(metronome);
         // Pattern playback loops on the bar line.
         e.set_looping(song && matches!(mode, PlayMode::Pattern(_)));
         if kind == Kind::Live {

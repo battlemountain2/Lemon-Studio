@@ -610,6 +610,8 @@ struct Route {
 /// (0..12800) and its dry level as it glides (spec: audio/mixer.md "An effect slot").
 struct FxSlot {
     slot: usize,
+    name: String,
+    state: Vec<u8>,
     on: bool,
     mix: i32,
     dry: Glide,
@@ -619,8 +621,8 @@ struct FxSlot {
 }
 
 impl FxSlot {
-    fn new(slot: usize, on: bool, mix: i32, fx: Fx) -> FxSlot {
-        FxSlot { slot, on, mix, dry: Glide::new(os_dsp::mixer::dry_level(mix)), fresh: false, fx }
+    fn new(slot: usize, name: String, state: Vec<u8>, on: bool, mix: i32, fx: Fx) -> FxSlot {
+        FxSlot { slot, name, state, on, mix, dry: Glide::new(os_dsp::mixer::dry_level(mix)), fresh: false, fx }
     }
 }
 
@@ -849,6 +851,8 @@ pub struct Engine {
     metronome_phase: f32,
     metronome_env: f32,
     metronome_freq: f32,
+    beat_ticks: u64,
+    bar_ticks: u64,
     pub report: EngineReport,
 }
 
@@ -869,8 +873,11 @@ const TAIL_LIMIT_SECONDS: f64 = 600.0;
 impl Engine {
     pub fn new(project: &Project, library: &mut SampleLibrary, rate: u32, mode: PlayMode) -> Self {
         let mut report = EngineReport::default();
-        let tempo = project.tempo.unwrap_or(140.0);
-        let ppq = project.ppq.max(1);
+        let tempo = project.tempo.filter(|&t| t.is_finite() && t > 0.0).map(|t| t.clamp(10.0, 999.0)).unwrap_or(130.0);
+        let ppq = project.ppq.clamp(1, 960);
+        let (num, den) = project.time_signature.unwrap_or((4, 4));
+        let beat_ticks = (u64::from(ppq) * 4 / u64::from(den.max(1))).max(1);
+        let bar_ticks = (beat_ticks * u64::from(num.max(1))).max(1);
         let n_tracks = project.mixer.len().max(1);
 
         let mut channels: Vec<ChannelState> = project
@@ -891,20 +898,9 @@ impl Engine {
                             s
                         }
                         // Lemon Studio choice: an empty sampler channel plays a built-in tone so new
-                        // projects make sound (FL's empty sampler is silent). Drum channels play 808 drums.
+                        // projects make sound (FL's empty sampler is silent).
                         None if ch.kind == ChannelKind::Sampler => {
-                            let name = ch.name.as_deref().unwrap_or("").to_lowercase();
-                            if name.contains("kick") {
-                                Some(library.kick_tones.entry(rate).or_insert_with(|| crate::drums::kick_808(rate)).clone())
-                            } else if name.contains("clap") {
-                                Some(library.clap_tones.entry(rate).or_insert_with(|| crate::drums::clap_808(rate)).clone())
-                            } else if name.contains("hat") {
-                                Some(library.hat_tones.entry(rate).or_insert_with(|| crate::drums::hat_808(rate)).clone())
-                            } else if name.contains("snare") {
-                                Some(library.snare_tones.entry(rate).or_insert_with(|| crate::drums::snare_808(rate)).clone())
-                            } else {
-                                Some(library.tones.entry(rate).or_insert_with(|| fallback_tone(rate)).clone())
-                            }
+                            Some(library.tones.entry(rate).or_insert_with(|| fallback_tone(rate)).clone())
                         }
                         None => None,
                     }
@@ -1008,7 +1004,7 @@ impl Engine {
                         let Some(slot) = slot else { continue };
                         match crate::effects::from_slot(&slot.name, &slot.state, rate) {
                             Some(fx) => {
-                                effects.push(FxSlot::new(k, m.slot_on[k], mix_level(m.slot_mix[k]), Fx::Own(fx)));
+                                effects.push(FxSlot::new(k, slot.name.clone(), slot.state.clone(), m.slot_on[k], mix_level(m.slot_mix[k]), Fx::Own(fx)));
                                 report.effects_active += 1;
                             }
                             None => report.effects_bypassed += 1,
@@ -1239,6 +1235,8 @@ impl Engine {
             metronome_phase: 0.0,
             metronome_env: 0.0,
             metronome_freq: 1000.0,
+            beat_ticks,
+            bar_ticks,
             report,
         }
     }
@@ -1281,7 +1279,7 @@ impl Engine {
         }
         t.effects.retain(|e| e.slot != slot);
         let at = t.effects.partition_point(|e| e.slot < slot);
-        t.effects.insert(at, FxSlot::new(slot, t.slot_on[slot], t.slot_mix[slot], Fx::Hosted(fx)));
+        t.effects.insert(at, FxSlot::new(slot, format!("hosted-{slot}"), vec![], t.slot_on[slot], t.slot_mix[slot], Fx::Hosted(fx)));
     }
 
     /// Ticks hosted plugins missed since the last call (each one still busy elsewhere after the tick's wait), heard as
@@ -1608,6 +1606,10 @@ impl Engine {
         // The main volume glides from where it was.
         self.main_glide = old.main_glide;
         self.exporting = old.exporting;
+        self.metronome = old.metronome;
+        self.metronome_phase = old.metronome_phase;
+        self.metronome_env = old.metronome_env;
+        self.metronome_freq = old.metronome_freq;
         if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
             for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
                 new.gains = o.gains;
@@ -1617,11 +1619,10 @@ impl Engine {
                         a.glide = b.glide;
                     }
                 }
-                // Own effects keep their state (delay lines, envelopes) when the slot layout is unchanged; the new
-                // slot LEDs and mix levels apply.
-                let same = new.effects.len() == o.effects.len() && new.effects.iter().zip(&o.effects).all(|(a, b)| a.slot == b.slot);
-                if same {
-                    for (a, b) in new.effects.iter_mut().zip(&mut o.effects) {
+                // Own effects keep their state (delay lines, envelopes) when the effect plugin identity and state match;
+                // the new slot LEDs and mix levels apply. If the plugin type or state changed, keep the clean new effect.
+                for a in &mut new.effects {
+                    if let Some(b) = o.effects.iter_mut().find(|b| b.slot == a.slot && b.name == a.name && b.state == a.state) {
                         a.dry = b.dry;
                         if let (Fx::Own(_), Fx::Own(_)) = (&a.fx, &b.fx) {
                             std::mem::swap(&mut a.fx, &mut b.fx);
@@ -1870,11 +1871,9 @@ impl Engine {
         self.mix(len, &song);
         self.out.clear();
         self.out.extend_from_slice(&self.bus[0][..len * 2]);
-        if self.metronome && !self.exporting && self.ppq > 0 {
-            let beat_ticks = u64::from(self.ppq);
-            if tick % beat_ticks == 0 {
-                let bar_ticks = beat_ticks * 4;
-                if tick % bar_ticks == 0 {
+        if self.metronome && !self.exporting && self.beat_ticks > 0 {
+            if tick % self.beat_ticks == 0 {
+                if tick % self.bar_ticks == 0 {
                     self.metronome_freq = 1600.0;
                     self.metronome_env = 0.5;
                 } else {
@@ -1884,7 +1883,7 @@ impl Engine {
                 self.metronome_phase = 0.0;
             }
             if self.metronome_env > 1e-4 {
-                let decay = (-1.0 / (0.012 * self.rate as f32)).exp();
+                let decay = (-1.0 / (0.015 * self.rate as f32)).exp();
                 let phase_inc = self.metronome_freq / self.rate as f32;
                 for f in self.out.chunks_exact_mut(2) {
                     if self.metronome_env <= 1e-4 {
@@ -3059,6 +3058,81 @@ mod tests {
             patterns: vec![Pattern { number: 1, notes, controls, ..Pattern::default() }],
             ..Project::default()
         }
+    }
+
+    #[test]
+    fn continue_from_does_not_preserve_stale_effect_when_slot_type_changes() {
+        use os_model::{MixerTrack, SlotPlugin};
+
+        let mut proj_delay = project(vec![], vec![]);
+        let mut track_delay = MixerTrack::new(0);
+        track_delay.slots[0] = Some(SlotPlugin { name: "Lemon Delay".into(), state: vec![] });
+        proj_delay.mixer = vec![track_delay];
+
+        let mut proj_reverb = project(vec![], vec![]);
+        let mut track_reverb = MixerTrack::new(0);
+        track_reverb.slots[0] = Some(SlotPlugin { name: "Lemon Reverb".into(), state: vec![] });
+        proj_reverb.mixer = vec![track_reverb];
+
+        let mut lib = SampleLibrary::default();
+        let mut old_engine = Engine::new(&proj_delay, &mut lib, 44100, PlayMode::Song);
+        assert_eq!(old_engine.tracks[0].effects[0].name, "Lemon Delay");
+
+        let mut new_engine = Engine::new(&proj_reverb, &mut lib, 44100, PlayMode::Song);
+        assert_eq!(new_engine.tracks[0].effects[0].name, "Lemon Reverb");
+
+        new_engine.continue_from(&mut old_engine);
+
+        // Crucial F05 verification: after continue_from, the new engine must have Lemon Reverb,
+        // and must NOT have swapped in the old Lemon Delay!
+        assert_eq!(new_engine.tracks[0].effects[0].name, "Lemon Reverb");
+    }
+
+    #[test]
+    fn metronome_clicks_at_tick_zero_and_respects_meter() {
+        let mut p = project(vec![], vec![]);
+        p.time_signature = Some((3, 4));
+        p.ppq = 96;
+        let mut lib = SampleLibrary::default();
+        let mut engine = Engine::new(&p, &mut lib, 44100, PlayMode::Song);
+        engine.set_metronome(true);
+
+        // Advance tick 0 (downbeat accent)
+        let (buf, tick, _) = engine.next_tick().unwrap();
+        assert_eq!(tick, 0);
+        assert!(buf.iter().any(|&s| s.abs() > 0.05), "tick 0 must produce an audible click");
+        assert_eq!(engine.metronome_freq, 1600.0, "downbeat accent is 1600 Hz");
+
+        // Advance to tick 96 (beat 1, regular beat 1000 Hz)
+        for _ in 1..96 {
+            engine.next_tick().unwrap();
+        }
+        let (_, tick, _) = engine.next_tick().unwrap();
+        assert_eq!(tick, 96);
+        assert_eq!(engine.metronome_freq, 1000.0, "beat 1 is 1000 Hz");
+
+        // Advance to tick 192 (beat 2, regular beat 1000 Hz)
+        for _ in 97..192 {
+            engine.next_tick().unwrap();
+        }
+        let (_, tick, _) = engine.next_tick().unwrap();
+        assert_eq!(tick, 192);
+        assert_eq!(engine.metronome_freq, 1000.0, "beat 2 is 1000 Hz");
+
+        // Advance to tick 288 (bar 1, downbeat accent 1600 Hz in 3/4 time)
+        for _ in 193..288 {
+            engine.next_tick().unwrap();
+        }
+        let (_, tick, _) = engine.next_tick().unwrap();
+        assert_eq!(tick, 288);
+        assert_eq!(engine.metronome_freq, 1600.0, "downbeat of next bar in 3/4 is 1600 Hz");
+
+        // Exporting engine (render_ticks) must NOT output metronome clicks even if metronome is enabled
+        let mut export_engine = Engine::new(&p, &mut lib, 44100, PlayMode::Song);
+        export_engine.set_metronome(true);
+        let mut out = Vec::new();
+        export_engine.render_ticks(1, &mut out);
+        assert!(out.iter().all(|&s| s == 0.0), "export must never output metronome click");
     }
 
     /// Records note events and outputs a constant 1.0 while any note is held.

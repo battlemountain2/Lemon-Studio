@@ -7,12 +7,13 @@ pub struct Delay {
     buf_r: Vec<f32>,
     pos: usize,
     delay_len: usize,
-    feedback: f32,
-    damping: f32,
+    pub delay_ms: f32,
+    pub feedback: f32,
+    pub damping: f32,
     filter_l: f32,
     filter_r: f32,
-    ping_pong: bool,
-    mix: f32,
+    pub ping_pong: bool,
+    pub mix: f32,
 }
 
 impl Delay {
@@ -24,6 +25,7 @@ impl Delay {
             buf_r: vec![0.0; max_samples],
             pos: 0,
             delay_len,
+            delay_ms,
             feedback: feedback.clamp(0.0, 0.98),
             damping: damping.clamp(0.0, 1.0),
             filter_l: 0.0,
@@ -38,7 +40,27 @@ impl Delay {
         Self::new(sample_rate, 375.0, 0.45, 0.3, true, 0.4)
     }
 
-    pub fn from_state(_state: &[u8], sample_rate: u32) -> Self {
+    pub fn to_state(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(24);
+        b.extend_from_slice(b"LMD1");
+        b.extend_from_slice(&self.delay_ms.to_le_bytes());
+        b.extend_from_slice(&self.feedback.to_le_bytes());
+        b.extend_from_slice(&self.damping.to_le_bytes());
+        b.extend_from_slice(&(if self.ping_pong { 1.0f32 } else { 0.0f32 }).to_le_bytes());
+        b.extend_from_slice(&self.mix.to_le_bytes());
+        b
+    }
+
+    pub fn from_state(state: &[u8], sample_rate: u32) -> Self {
+        if state.len() >= 24 && &state[0..4] == b"LMD1" {
+            let f = |start: usize| f32::from_le_bytes(state[start..start + 4].try_into().unwrap());
+            let time_ms = f(4);
+            let feedback = f(8);
+            let damping = f(12);
+            let ping_pong = f(16) != 0.0;
+            let mix = f(20);
+            return Self::new(sample_rate, time_ms, feedback, damping, ping_pong, mix);
+        }
         Self::default_fx(sample_rate)
     }
 }

@@ -4,8 +4,11 @@
 // spec: audio/timing.md ("Samples per tick", "The tick clock", "Tempo that changes")
 
 /// Samples per tick at `bpm`: the tempo is held as a single, the division is done in doubles.
+/// Bounded to supported tempo range 10.0..=999.0 to protect against division by zero, NaN, and infinite tick sizes.
 pub fn samples_per_tick(rate: u32, ppq: u16, bpm: f64) -> f64 {
-    f64::from(rate) * 60.0 / (f64::from(bpm as f32) * f64::from(ppq.max(1)))
+    let bpm = if bpm.is_finite() && bpm > 0.0 { bpm.clamp(10.0, 999.0) } else { 130.0 };
+    let ppq = ppq.clamp(1, 960);
+    f64::from(rate) * 60.0 / (f64::from(bpm as f32) * f64::from(ppq))
 }
 
 /// The running tick clock of one pass through a song or pattern.
@@ -146,5 +149,21 @@ mod tests {
         c.set_tempo(44100, 96, 60.0);
         let (_, b) = c.advance();
         assert_eq!((a, b), (230, 459));
+    }
+
+    #[test]
+    fn invalid_or_zero_tempo_does_not_overflow_clock() {
+        let zero_bpm = samples_per_tick(44100, 96, 0.0);
+        assert!(zero_bpm.is_finite() && zero_bpm > 0.0);
+
+        let nan_bpm = samples_per_tick(44100, 96, f64::NAN);
+        assert!(nan_bpm.is_finite() && nan_bpm > 0.0);
+
+        let inf_bpm = samples_per_tick(44100, 96, f64::INFINITY);
+        assert!(inf_bpm.is_finite() && inf_bpm > 0.0);
+
+        let mut clock = Clock::new(44100, 0, 0.0);
+        let (_, len) = clock.advance();
+        assert!(len > 0 && len < 44100 * 10);
     }
 }
