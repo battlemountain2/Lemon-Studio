@@ -438,6 +438,8 @@ pub struct PlaylistState {
     pub last_header: Option<(u16, std::time::Instant)>,
     /// Last left click on an audio clip (clip, time): a second one soon after opens its sampler.
     pub last_clip: Option<(usize, std::time::Instant)>,
+    /// Last left click on a picker item (source, time): double-click opens it (e.g. pattern in piano roll).
+    pub last_pick: Option<(ClipSource, std::time::Instant)>,
     /// Waveform cache by sample path (`None` = could not be loaded).
     pub waves: RefCell<HashMap<String, Option<Rc<Wave>>>>,
     /// A project is loading and its files decode off the UI thread: waveforms wait (spec: ui/project-loading.md).
@@ -471,6 +473,7 @@ impl Default for PlaylistState {
             row_h: ROW_H,
             last_header: None,
             last_clip: None,
+            last_pick: None,
             waves: RefCell::new(HashMap::new()),
             wave_wait: false,
             undo: Vec::new(),

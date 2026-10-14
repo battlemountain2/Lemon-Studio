@@ -845,6 +845,10 @@ pub struct Engine {
     params: param_auto::ParamAuto,
     /// The project's random generator (random layers; spec: audio/channel-misc.md "FL's random generator").
     rng: layers::Mt19937,
+    metronome: bool,
+    metronome_phase: f32,
+    metronome_env: f32,
+    metronome_freq: f32,
     pub report: EngineReport,
 }
 
@@ -887,9 +891,20 @@ impl Engine {
                             s
                         }
                         // Lemon Studio choice: an empty sampler channel plays a built-in tone so new
-                        // projects make sound (FL's empty sampler is silent).
+                        // projects make sound (FL's empty sampler is silent). Drum channels play 808 drums.
                         None if ch.kind == ChannelKind::Sampler => {
-                            Some(library.tones.entry(rate).or_insert_with(|| fallback_tone(rate)).clone())
+                            let name = ch.name.as_deref().unwrap_or("").to_lowercase();
+                            if name.contains("kick") {
+                                Some(library.kick_tones.entry(rate).or_insert_with(|| crate::drums::kick_808(rate)).clone())
+                            } else if name.contains("clap") {
+                                Some(library.clap_tones.entry(rate).or_insert_with(|| crate::drums::clap_808(rate)).clone())
+                            } else if name.contains("hat") {
+                                Some(library.hat_tones.entry(rate).or_insert_with(|| crate::drums::hat_808(rate)).clone())
+                            } else if name.contains("snare") {
+                                Some(library.snare_tones.entry(rate).or_insert_with(|| crate::drums::snare_808(rate)).clone())
+                            } else {
+                                Some(library.tones.entry(rate).or_insert_with(|| fallback_tone(rate)).clone())
+                            }
                         }
                         None => None,
                     }
@@ -1220,8 +1235,24 @@ impl Engine {
             fx_dry: Vec::new(),
             inst_tail: 0,
             inst_active: false,
+            metronome: false,
+            metronome_phase: 0.0,
+            metronome_env: 0.0,
+            metronome_freq: 1000.0,
             report,
         }
+    }
+
+    /// Toggles or sets the metronome audio click.
+    pub fn set_metronome(&mut self, on: bool) {
+        self.metronome = on;
+        if !on {
+            self.metronome_env = 0.0;
+        }
+    }
+
+    pub fn metronome(&self) -> bool {
+        self.metronome
     }
 
     /// Plays generator-plugin channel `channel` through `inst` (a shared instance that outlives this engine).
@@ -1839,6 +1870,34 @@ impl Engine {
         self.mix(len, &song);
         self.out.clear();
         self.out.extend_from_slice(&self.bus[0][..len * 2]);
+        if self.metronome && !self.exporting && self.ppq > 0 {
+            let beat_ticks = u64::from(self.ppq);
+            if tick % beat_ticks == 0 {
+                let bar_ticks = beat_ticks * 4;
+                if tick % bar_ticks == 0 {
+                    self.metronome_freq = 1600.0;
+                    self.metronome_env = 0.5;
+                } else {
+                    self.metronome_freq = 1000.0;
+                    self.metronome_env = 0.35;
+                }
+                self.metronome_phase = 0.0;
+            }
+            if self.metronome_env > 1e-4 {
+                let decay = (-1.0 / (0.012 * self.rate as f32)).exp();
+                let phase_inc = self.metronome_freq / self.rate as f32;
+                for f in self.out.chunks_exact_mut(2) {
+                    if self.metronome_env <= 1e-4 {
+                        break;
+                    }
+                    let s = (self.metronome_phase * std::f32::consts::TAU).sin() * self.metronome_env;
+                    self.metronome_phase = (self.metronome_phase + phase_inc).fract();
+                    self.metronome_env *= decay;
+                    f[0] += s;
+                    f[1] += s;
+                }
+            }
+        }
         self.out_pos = 0;
         self.out_tick = tick;
         self.out_frame = start;
@@ -4631,5 +4690,17 @@ mod tests {
         let e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
         assert!((e.triggers[0].rate - 2f64.powf(1000.0 / 1200.0)).abs() < 1e-9, "fine pitch 220 = +1000 cents");
         assert!((e.channels[0].base_rate / e.channels[0].src_ratio - 1.0).abs() < 1e-9, "the channel is not moved");
+    }
+
+    #[test]
+    fn metronome_generates_clicks_on_beats() {
+        let p = project(vec![], vec![]);
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
+        e.set_metronome(true);
+        let (s, tick, _) = e.next_tick().expect("first tick");
+        assert_eq!(tick, 0);
+        let peak = s.iter().copied().fold(0.0f32, f32::max);
+        assert!(peak > 0.1, "metronome downbeat click should produce sound, got peak {peak}");
     }
 }

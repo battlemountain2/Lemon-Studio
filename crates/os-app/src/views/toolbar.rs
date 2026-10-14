@@ -192,7 +192,12 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     .into_iter()
     .enumerate()
     {
-        tool_button(ui, btn(580.0 + 33.0 * i as f32, 4.0), icon, false, Action::Placeholder(hint), hint);
+        let (on, act) = if i == 0 {
+            (s.toggles.contains(&"metronome"), Action::Metronome)
+        } else {
+            (false, Action::Placeholder(hint))
+        };
+        tool_button(ui, btn(580.0 + 33.0 * i as f32, 4.0), icon, on, act, hint);
     }
 
     // Song position (B:S:T).

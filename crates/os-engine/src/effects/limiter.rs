@@ -18,7 +18,25 @@ fn curve(base: f64, x: f64) -> f64 {
 }
 
 impl Limiter {
+    /// The default master limiter configuration (matching FL Studio's default template:
+    /// +5.5 dB input gain boost and 0.0 dB ceiling for instant punch without clipping).
+    pub fn default_master(sample_rate: u32) -> Self {
+        let gain = 10.0f32.powf(5.5 / 20.0);
+        let ceiling = 1.0f32;
+        let release_ms = 200.0;
+        let release_samples = (release_ms / 1000.0 * f64::from(sample_rate)).max(1.0);
+        Limiter {
+            gain,
+            ceiling,
+            release_coef: (1.0 - (-1.0 / release_samples).exp()) as f32,
+            env: 1.0,
+        }
+    }
+
     pub fn from_state(state: &[u8], sample_rate: u32) -> Option<Self> {
+        if state.is_empty() {
+            return Some(Self::default_master(sample_rate));
+        }
         let param = |k: usize| field(state, k + 1);
         let gain = curve(7.0, f64::from(param(0)?) / 1000.0);
         let ceiling = curve(3.0, f64::from(param(2)?) / 1000.0);

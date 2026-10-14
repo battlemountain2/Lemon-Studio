@@ -9,6 +9,7 @@
 //! - [`wav`]: writing renders to disk.
 
 pub mod clock;
+pub mod drums;
 pub mod effects;
 pub mod engine;
 pub mod envelope;
@@ -19,6 +20,7 @@ pub mod voices;
 pub mod wav;
 
 pub use clock::Clock;
+pub use drums::{clap_808, hat_808, kick_808, snare_808};
 pub use engine::{Engine, EngineReport, PlayMode};
 pub use instrument::{ChannelLevels, ChannelVoicing, HostedEffect, Instrument, NoteLevels, SharedEffect, SharedInstrument, TransportInfo};
 pub use sample::{Sample, SampleLibrary};

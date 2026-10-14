@@ -157,6 +157,8 @@ enum Cmd {
     NoteOn(usize, u16, u8),
     NoteOff(usize, u16),
     Stop,
+    /// Enable or disable the audio metronome click.
+    Metronome(bool),
     /// Render to a WAV file with the hosted plugins (FILE > Export): project, mode, sample rate, file.
     Export(Box<Project>, PlayMode, u32, PathBuf),
     /// The audio settings changed: move the playback to a new stream, close the live and preview streams.
@@ -249,6 +251,11 @@ impl Transport {
     /// stream with the new settings; live notes and previews open one when next needed.
     pub fn reopen(&self) {
         let _ = self.tx.send(Cmd::Reopen);
+    }
+
+    /// Sets whether the metronome audio click plays during playback.
+    pub fn set_metronome(&self, on: bool) {
+        let _ = self.tx.send(Cmd::Metronome(on));
     }
 
     /// Renders `project` offline to a 32-bit float WAV file at `rate`, with the hosted instruments and effects, on the
@@ -739,9 +746,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     // Streams that were stopped and finish their fade before they are dropped.
     let mut closing: Vec<(Session, Instant)> = Vec::new();
     let mut reset_pending = false;
-    let swap = |s: &mut Session, library: &mut SampleLibrary| {
+    let mut metronome_on = false;
+    let swap = |s: &mut Session, library: &mut SampleLibrary, metronome: bool| {
         // Build outside the lock, then swap at the playing position.
         let mut e = Engine::new(&s.project, library, s.rate, s.mode);
+        e.set_metronome(metronome);
         if s.kind == Kind::Live {
             e.clear_schedule();
         }
@@ -768,14 +777,14 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 if let Some(project) = latest.lock().ok().and_then(|mut l| l.take()) {
                     for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
                         s.project = project.clone();
-                        swap(s, &mut library);
+                        swap(s, &mut library, metronome_on);
                     }
                     live_project = Some(project);
                 }
             }
             Ok(Cmd::Instruments) => {
                 for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
-                    swap(s, &mut library);
+                    swap(s, &mut library, metronome_on);
                 }
             }
             Ok(Cmd::NoteOn(ch, key, vel)) => {
@@ -875,11 +884,24 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 reset_pending = false;
                 live_project = Some((*project).clone());
                 match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, At { tick: start, paused: false }) {
-                    Ok(s) => session = Some(s),
+                    Ok(s) => {
+                        if let Ok(mut e) = s.engine.lock() {
+                            e.set_metronome(metronome_on);
+                        }
+                        session = Some(s);
+                    }
                     Err(e) => {
                         report(&shared, e);
                         let _ = shared.state.compare_exchange(PLAYING, STOPPED, Ordering::AcqRel, Ordering::Acquire);
                         shared.rewind(0.0);
+                    }
+                }
+            }
+            Ok(Cmd::Metronome(on)) => {
+                metronome_on = on;
+                if let Some(s) = &session {
+                    if let Ok(mut e) = s.engine.lock() {
+                        e.set_metronome(on);
                     }
                 }
             }
@@ -894,7 +916,12 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     drop(old);
                     reset_instruments(&inst);
                     match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at) {
-                        Ok(s) => session = Some(s),
+                        Ok(s) => {
+                            if let Ok(mut e) = s.engine.lock() {
+                                e.set_metronome(metronome_on);
+                            }
+                            session = Some(s);
+                        }
                         Err(e) => {
                             report(&shared, e);
                             if generation == shared.generation.load(Ordering::Acquire) {

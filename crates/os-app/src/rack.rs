@@ -902,6 +902,7 @@ pub enum RCmd {
     Fill(usize, u32),
     AdvancedFill(usize),
     Rotate(usize, i32),
+    CutItself(usize),
     // LED menu (§10).
     Solo(usize),
     Lock(usize),
@@ -1063,7 +1064,10 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
         PItem::not_yet("Change icon..."),
         PItem::sep(),
         if sampler { it("Load sample...", RCmd::LoadSample(r)) } else { PItem::new("Load sample...", Cmd::Nothing).off() },
-        PItem::not_yet("Cut itself").mark(Mark::Check(false)),
+        {
+            let cut_itself = s.project.channels.get(r).is_some_and(|c| c.misc.cut > 0 && c.misc.cut == c.misc.cut_by);
+            it("Cut itself", RCmd::CutItself(r)).mark(Mark::Check(cut_itself))
+        },
         PItem::new("Show waveform preview", Cmd::Nothing).off(),
         PItem::sep(),
         PItem::sub("Insert", crate::plugin_menu::items(s, crate::plugin_menu::Target::Gen(Some(r)), true)),
@@ -1299,6 +1303,19 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         }
         RCmd::Rotate(r, d) => {
             rotate(s, r, d);
+            None
+        }
+        RCmd::CutItself(r) => {
+            if let Some(ch) = s.project.channels.get_mut(r) {
+                if ch.misc.cut > 0 && ch.misc.cut == ch.misc.cut_by {
+                    ch.misc.cut = 0;
+                    ch.misc.cut_by = 0;
+                } else {
+                    let grp = (r as u32) + 1;
+                    ch.misc.cut = grp;
+                    ch.misc.cut_by = grp;
+                }
+            }
             None
         }
         RCmd::Solo(r) => {
@@ -1956,5 +1973,32 @@ mod tests {
         assert_eq!(n.position / 24, 4, "time shift stays inside its step");
         assert_eq!(Tab::Vel.text(&Note::step(0, 0), 24), "Velocity 78%");
         assert_eq!(key_name(60), "C5");
+    }
+
+    #[test]
+    fn cut_itself_toggles_cut_and_cut_by() {
+        let mut app = App::new(None);
+        assert_eq!(app.state.project.channels[0].misc.cut, 1);
+        assert_eq!(app.state.project.channels[0].misc.cut_by, 1);
+
+        // Toggle off
+        run(&mut app, RCmd::CutItself(0));
+        assert_eq!(app.state.project.channels[0].misc.cut, 0);
+        assert_eq!(app.state.project.channels[0].misc.cut_by, 0);
+
+        // Menu shows unticked
+        let m = channel_menu(&app.state, 0, 0.0, 0.0);
+        let item = m.items.iter().find(|i| i.label == "Cut itself").expect("Cut itself menu item");
+        assert_eq!(item.mark, Mark::Check(false));
+
+        // Toggle on
+        run(&mut app, RCmd::CutItself(0));
+        assert_eq!(app.state.project.channels[0].misc.cut, 1);
+        assert_eq!(app.state.project.channels[0].misc.cut_by, 1);
+
+        // Menu shows ticked
+        let m = channel_menu(&app.state, 0, 0.0, 0.0);
+        let item = m.items.iter().find(|i| i.label == "Cut itself").expect("Cut itself menu item");
+        assert_eq!(item.mark, Mark::Check(true));
     }
 }

@@ -64,10 +64,40 @@ fn stamp(path: &Path) -> Option<Stamp> {
     std::fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok()))
 }
 
+/// Loads a built-in procedural sample if `path` names one.
+pub fn load_builtin(path: &Path) -> Option<Arc<Sample>> {
+    let s = path.to_str()?;
+    let lower = s.to_lowercase();
+    if s.starts_with("builtin:")
+        || lower.contains("808 kick")
+        || lower.contains("808 clap")
+        || lower.contains("808 hat")
+        || lower.contains("808 snare")
+    {
+        if lower.contains("kick") {
+            static KICK: OnceLock<Arc<Sample>> = OnceLock::new();
+            return Some(KICK.get_or_init(|| crate::drums::kick_808(44100)).clone());
+        } else if lower.contains("clap") {
+            static CLAP: OnceLock<Arc<Sample>> = OnceLock::new();
+            return Some(CLAP.get_or_init(|| crate::drums::clap_808(44100)).clone());
+        } else if lower.contains("hat") {
+            static HAT: OnceLock<Arc<Sample>> = OnceLock::new();
+            return Some(HAT.get_or_init(|| crate::drums::hat_808(44100)).clone());
+        } else if lower.contains("snare") {
+            static SNARE: OnceLock<Arc<Sample>> = OnceLock::new();
+            return Some(SNARE.get_or_init(|| crate::drums::snare_808(44100)).clone());
+        }
+    }
+    None
+}
+
 /// `load`, shared: while any holder keeps a decoded file alive, loading the same unchanged file again returns that
 /// copy instead of decoding it again. Project loading decodes samples on worker threads this way so that the plugin
 /// instances made afterwards on the UI thread find them ready (spec: ui/project-loading.md).
 pub fn load_shared(path: &Path) -> Result<Arc<Sample>, SampleError> {
+    if let Some(s) = load_builtin(path) {
+        return Ok(s);
+    }
     static LIVE: OnceLock<std::sync::Mutex<HashMap<PathBuf, (std::sync::Weak<Sample>, Stamp)>>> = OnceLock::new();
     let live = LIVE.get_or_init(Default::default);
     let st = stamp(path);
@@ -86,7 +116,25 @@ pub fn load_shared(path: &Path) -> Result<Arc<Sample>, SampleError> {
 
 /// Decodes a WAV (PCM or Vorbis-in-WAV) / FLAC / Ogg Vorbis / WavPack / MP3 / AIFF file.
 pub fn load(path: &Path) -> Result<Sample, SampleError> {
-    let bytes = std::fs::read(path).map_err(|source| SampleError::Io { path: path.to_owned(), source })?;
+    if let Some(s) = load_builtin(path) {
+        return Ok((*s).clone());
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(source) => {
+            let lower = path.to_string_lossy().to_lowercase();
+            if lower.contains("kick") {
+                return Ok((*crate::drums::kick_808(44100)).clone());
+            } else if lower.contains("clap") {
+                return Ok((*crate::drums::clap_808(44100)).clone());
+            } else if lower.contains("hat") {
+                return Ok((*crate::drums::hat_808(44100)).clone());
+            } else if lower.contains("snare") {
+                return Ok((*crate::drums::snare_808(44100)).clone());
+            }
+            return Err(SampleError::Io { path: path.to_owned(), source });
+        }
+    };
     let decode_err = |message: String| SampleError::Decode { path: path.to_owned(), message };
     if let Some(vw) = vorbis_in_wav(&bytes) {
         let mut s = decode(vw.ogg.to_vec(), Some("ogg")).map_err(decode_err)?;
@@ -228,6 +276,10 @@ pub struct SampleLibrary {
     cache: HashMap<String, Option<Arc<Sample>>>,
     /// Built-in tones by output rate (the engine's empty-sampler fallback), built once.
     pub(crate) tones: HashMap<u32, Arc<Sample>>,
+    pub(crate) kick_tones: HashMap<u32, Arc<Sample>>,
+    pub(crate) clap_tones: HashMap<u32, Arc<Sample>>,
+    pub(crate) hat_tones: HashMap<u32, Arc<Sample>>,
+    pub(crate) snare_tones: HashMap<u32, Arc<Sample>>,
     /// Paths that couldn't be resolved or decoded, with the reason.
     pub failures: Vec<(String, String)>,
     /// Stretched copies made so far: (source, length in frames, pitch factor bits, copy).
@@ -306,17 +358,29 @@ impl SampleLibrary {
         if let Some(s) = self.cache.get(project_path) {
             return s.clone();
         }
+        if let Some(s) = load_builtin(Path::new(project_path)) {
+            self.cache.insert(project_path.into(), Some(s.clone()));
+            return Some(s);
+        }
         let loaded = match self.resolve(project_path) {
             None => {
-                self.failures.push((project_path.into(), "factory folder not set".into()));
-                None
+                if let Some(s) = load_builtin(Path::new(project_path)) {
+                    Some(s)
+                } else {
+                    self.failures.push((project_path.into(), "factory folder not set".into()));
+                    None
+                }
             }
             // Shared with the other users of the file (plugin instances, playlist waveforms).
             Some(p) => match load_shared(&p) {
                 Ok(s) => Some(s),
                 Err(e) => {
-                    self.failures.push((project_path.into(), e.to_string()));
-                    None
+                    if let Some(s) = load_builtin(&p) {
+                        Some(s)
+                    } else {
+                        self.failures.push((project_path.into(), e.to_string()));
+                        None
+                    }
                 }
             },
         };

@@ -92,6 +92,8 @@ pub enum Action {
     Placeholder(&'static str),
     /// Typing keyboard to piano switch (toolbar, OPTIONS menu, Ctrl+T).
     Typing,
+    /// Metronome click switch (toolbar, OPTIONS menu, Ctrl+M).
+    Metronome,
     /// The toolbar's scope / spectrum panel: click switches the display.
     Monitor,
     /// The toolbar's CPU panel: double-click opens the Plugin performance monitor, right-click its menu.
@@ -4142,6 +4144,7 @@ impl App {
             }
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => self.act(Action::PianoUndo),
             Key::Character(c) if ctrl && c.eq_ignore_ascii_case("t") => self.toggle_typing(),
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("m") => self.toggle_metronome(),
             // Piano-roll tools and selection editing (spec: ui/piano-roll.md §9). Letters switch
             // tools (until a typing keyboard exists, which will take them).
             Key::Character(c) if !ctrl && !alt && self.state.shown(Win::PianoRoll) && Tool::from_letter(c).is_some() => {
@@ -4196,6 +4199,7 @@ impl App {
             return;
         }
         let start = if song { f64::from(self.state.playlist.pos) } else { f64::from(self.state.piano.marker) };
+        self.transport.set_metronome(self.metronome_on());
         self.transport.play(&p, self.play_mode(), start);
     }
 
@@ -4218,6 +4222,24 @@ impl App {
 
     pub fn typing_on(&self) -> bool {
         self.state.toggles.contains(&"typing")
+    }
+
+    /// Metronome switch (toolbar, Options menu, Ctrl+M); enables or disables the click during playback.
+    pub fn toggle_metronome(&mut self) {
+        let s = &mut self.state;
+        let on = if let Some(i) = s.toggles.iter().position(|t| *t == "metronome") {
+            s.toggles.remove(i);
+            false
+        } else {
+            s.toggles.push("metronome");
+            true
+        };
+        self.transport.set_metronome(on);
+        self.invalidate();
+    }
+
+    pub fn metronome_on(&self) -> bool {
+        self.state.toggles.contains(&"metronome")
     }
 
     /// A physical key went down or up. Returns true when the typing keyboard took it (a note key or
@@ -4555,6 +4577,34 @@ impl App {
                         let at = self.top_hit(self.mouse.0, self.mouse.1).map_or(self.mouse, |h| (h.rect.x, h.rect.y));
                         pl::start_edit(&mut self.state, pl::EditTarget::PatternName(n), at);
                     }
+                } else {
+                    let now = std::time::Instant::now();
+                    let double = self.state.playlist.last_pick.is_some_and(|(s, t)| s == src && now.duration_since(t).as_millis() < 450);
+                    self.state.playlist.last_pick = (!double).then_some((src, now));
+                    if double {
+                        match src {
+                            os_model::ClipSource::Pattern(n) => {
+                                self.state.pattern = n;
+                                if let Some(p) = self.state.project.patterns.iter().find(|p| p.number == n) {
+                                    if let Some(first_note) = p.notes.first() {
+                                        let ch_idx = first_note.channel;
+                                        if let Some(pos) = self.state.project.channels.iter().position(|c| c.index == ch_idx) {
+                                            self.state.selected_channel = pos;
+                                            self.state.rack.select_only(pos);
+                                        }
+                                    }
+                                }
+                                self.state.raise(Win::PianoRoll);
+                            }
+                            os_model::ClipSource::Channel(ch) => {
+                                if let Some(pos) = self.state.project.channels.iter().position(|c| c.index == ch) {
+                                    self.state.rack.select_only(pos);
+                                    self.focus_channel(pos);
+                                    self.toggle_channel_window(pos);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Action::PlPopup(i) => {
@@ -4634,6 +4684,7 @@ impl App {
                 }
             }
             Action::Typing => self.toggle_typing(),
+            Action::Metronome => self.toggle_metronome(),
             // spec: ui/main-window.md §13: a double click opens the Plugin performance monitor; one click does nothing.
             Action::CpuPanel => {
                 let now = std::time::Instant::now();
@@ -4922,6 +4973,11 @@ impl App {
         }
         let on = crate::rack::toggle_step(s, i, k);
         self.drag = Some(Drag::RackPaint { row: i, on, last: k });
+        if on && !self.transport.playing() {
+            if let Some(ch) = self.state.project.channels.get(i).map(|c| c.index) {
+                self.preview(ch, 60);
+            }
+        }
     }
 
     /// Speaker (spec: ui/channel-rack.md §7): plays the current pattern; while it plays, pauses / resumes.
@@ -4976,7 +5032,11 @@ impl App {
                 }
             }
             Action::ChannelSelect(i) => {
-                if shift {
+                if alt {
+                    if let Some(ch) = self.state.project.channels.get(i).map(|c| c.index) {
+                        self.preview(ch, 60);
+                    }
+                } else if shift {
                     let at = views::rack::name_rect(&self.state, i).map_or(mouse, |r| (r.x, r.y));
                     rk::open_box(&mut self.state, rk::RBox::Channel(i), at);
                 } else if !ctrl {
@@ -5209,6 +5269,7 @@ impl App {
                 }
             }
             (m, i) if item_at(m, i).is_some_and(|it| it.label == TYPING_LABEL) => self.toggle_typing(),
+            (m, i) if item_at(m, i).is_some_and(|it| it.label == "Metronome") => self.toggle_metronome(),
             (m, i) if item_at(m, i).is_some_and(|it| crate::params::menu_handles(it.label)) => {
                 let label = item_at(m, i).map_or("", |it| it.label);
                 if let Some(msg) = self.params_menu(label) {
@@ -5329,10 +5390,10 @@ pub(crate) fn add_channel(p: &mut Project) -> usize {
     p.channels.len() - 1
 }
 
-/// A new project (owner's choice, 2026-10-10): one empty sampler channel, played and edited by Lemon Sampler, on
-/// insert 1, and pattern 1.
+/// A new project: matches FL Studio's default template (Basic with limiter) with 4 drum channels
+/// (Kick, Clap, Hat, Snare) routed to Inserts 1-4, pattern 1, 130 BPM, and a Fruity Limiter on the Master track.
 pub fn default_project() -> Project {
-    template_project(&[crate::plugins::LEMON_SAMPLER])
+    template_project(&["Kick", "Clap", "Hat", "Snare"])
 }
 
 /// A one-channel project that plays `path` once from the start (browser sample preview, spec: ui/browser.md §7).
@@ -5353,8 +5414,33 @@ pub fn test_project() -> Project {
 /// Sampler channels named `names` (channel i on insert i + 1), 18 mixer tracks (master, Insert 1-16 and the hidden
 /// last one, as FL's default template stores them; spec: ui/mixer.md §1) routed to the master, pattern 1.
 fn template_project(names: &[&str]) -> Project {
-    let channel = |i: u16, name: &str| sampler_channel(i, name, i + 1);
+    let channel = |i: u16, name: &str| {
+        let mut ch = sampler_channel(i, name, i + 1);
+        let lower = name.to_lowercase();
+        if lower.contains("kick") {
+            ch.sample_path = Some("builtin:808 Kick.wav".into());
+            ch.misc.cut = u32::from(i) + 1;
+            ch.misc.cut_by = u32::from(i) + 1;
+        } else if lower.contains("clap") {
+            ch.sample_path = Some("builtin:808 Clap.wav".into());
+            ch.misc.cut = u32::from(i) + 1;
+            ch.misc.cut_by = u32::from(i) + 1;
+        } else if lower.contains("hat") {
+            ch.sample_path = Some("builtin:808 Hat.wav".into());
+            ch.misc.cut = u32::from(i) + 1;
+            ch.misc.cut_by = u32::from(i) + 1;
+        } else if lower.contains("snare") {
+            ch.sample_path = Some("builtin:808 Snare.wav".into());
+            ch.misc.cut = u32::from(i) + 1;
+            ch.misc.cut_by = u32::from(i) + 1;
+        }
+        ch
+    };
     let mut mixer: Vec<MixerTrack> = (0..18u16).map(MixerTrack::new).collect();
+    // Fruity Limiter on Master (slot 0) with default +5.5 dB gain and 0 dB ceiling
+    mixer[0].slots[0] = Some(os_model::SlotPlugin { name: "Fruity Limiter".into(), state: vec![] });
+    mixer[0].slot_on[0] = true;
+    mixer[0].slot_mix[0] = 1.0;
     // The hidden last track is routed nowhere, as FL stores it (spec: flp/events/mixer.md).
     mixer[17].routes.clear();
     Project {
@@ -5513,15 +5599,18 @@ mod tests {
 
     /// Writes the toolbar with a live-looking signal to OS_MONITOR_SHOT (a look-and-feel check, not an assertion).
     #[test]
-    fn new_project_is_one_empty_lemon_sampler() {
+    fn new_project_matches_fl_studio_default_drums() {
         let p = default_project();
-        assert_eq!(p.channels.len(), 1);
-        let c = &p.channels[0];
-        assert_eq!((c.kind, c.name.as_deref(), c.sample_path.as_deref(), c.mixer_track), (ChannelKind::Sampler, Some("Lemon Sampler"), None, 1));
-        // Its starting Lemon Sampler state names no sample and carries the channel's envelope records.
-        let st = crate::plugins::sampler_state(c);
-        let json = String::from_utf8_lossy(&st[8..]).to_string();
-        assert!(json.contains("\"envvol_on\":{\"bool\":false}") && json.contains("\"sample-path\":\"\\\"\\\"\""), "{json}");
+        assert_eq!(p.channels.len(), 4);
+        let names: Vec<_> = p.channels.iter().map(|c| c.name.as_deref().unwrap()).collect();
+        assert_eq!(names, vec!["Kick", "Clap", "Hat", "Snare"]);
+        for (i, c) in p.channels.iter().enumerate() {
+            assert_eq!(c.kind, ChannelKind::Sampler);
+            assert_eq!(c.mixer_track, (i + 1) as u16);
+            assert!(c.sample_path.as_deref().unwrap().starts_with("builtin:808"));
+        }
+        // Master has Fruity Limiter configured
+        assert_eq!(p.mixer[0].slots[0].as_ref().unwrap().name, "Fruity Limiter");
     }
 
     /// The whole window at one scale, for looking at text: `OS_TEXT_SHOT=<file.png> OS_TEXT_SHOT_SCALE=1.25`.
@@ -8871,5 +8960,34 @@ mod tests {
         assert!(app.state.plugdb.prefs.folders.is_empty());
         finish(&mut app);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn picker_pattern_double_click_opens_piano_roll() {
+        let mut app = App::new(None);
+        app.state.hide(Win::PianoRoll);
+        assert!(!app.state.shown(Win::PianoRoll));
+
+        let src = os_model::ClipSource::Pattern(1);
+        let act = Action::PlPick(src);
+
+        // First click selects the pattern
+        app.act(act.clone());
+        assert_eq!(app.state.pattern, 1);
+        assert!(!app.state.shown(Win::PianoRoll));
+
+        // Second click (double click) opens the piano roll
+        app.act(act);
+        assert!(app.state.shown(Win::PianoRoll), "double clicking a pattern in the picker opens the piano roll");
+    }
+
+    #[test]
+    fn toggle_metronome_switches_state() {
+        let mut app = App::new(None);
+        assert!(!app.metronome_on());
+        app.act(Action::Metronome);
+        assert!(app.metronome_on());
+        app.act(Action::Metronome);
+        assert!(!app.metronome_on());
     }
 }

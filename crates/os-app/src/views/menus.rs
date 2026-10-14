@@ -467,6 +467,7 @@ pub fn paint_dropdown(ui: &mut Ui, s: &State, menu: usize) {
                     let mark = match (item.mark, menu == VIEW) {
                         (Mark::Check(_), true) => Mark::Check(win_of(item.label).is_some_and(|w| s.shown(w))),
                         (Mark::Check(_), _) if item.label == "Typing keyboard to piano" => Mark::Check(s.toggles.contains(&"typing")),
+                        (Mark::Check(_), _) if item.label == "Metronome" => Mark::Check(s.toggles.contains(&"metronome")),
                         (mk, _) => mk,
                     };
                     let (mx, my) = (rr.x + 10.0, rr.y + row / 2.0);
