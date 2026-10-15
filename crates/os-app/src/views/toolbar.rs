@@ -116,8 +116,8 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
         }
         ui.c.text_center(Font::condensed(10, 5), Rect::new(r.x + 1.0, r.y, r.w, r.h), if active { t.pill_text } else { t.glyph_dim }, label);
     }
-    // Lit while playing, with a pause glyph (Play pauses); unlit with the play glyph when paused.
-    let play_on = f.playing && !f.paused;
+    // Lit while playing, with a pause glyph (Play pauses); unlit with the play glyph when paused; lit with play glyph while waiting/counting down.
+    let play_on = (f.playing && !f.paused) || s.rec_waiting || s.rec_countdown_active;
     for (r, icon, on, action, hint) in [
         (Rect::span(419.0, 449.0, 5.0, 35.0), Icon::Play, play_on, Action::Play, "Play / pause (Space plays / stops)"),
         (Rect::span(450.0, 482.0, 5.0, 35.0), Icon::Stop, false, Action::Stop, "Stop (Space)"),
@@ -143,7 +143,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
         }
         let g = Rect::new(r.x + 8.0, r.y + 8.0, r.w - 16.0, r.h - 16.0);
         let c = if on { t.on_glyph } else { t.glyph };
-        if icon == Icon::Play && on {
+        if icon == Icon::Play && f.playing && !f.paused {
             // Pause: two bars.
             let (w, h) = (g.w * 0.22, g.h * 0.7);
             let y = g.cy() - h / 2.0;
@@ -200,19 +200,12 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_polygon(&[(tb.right() - 9.0, 17.0), (tb.right() - 6.0, 13.0), (tb.right() - 3.0, 17.0)], t.glyph_dim);
     ui.c.fill_polygon(&[(tb.right() - 9.0, 22.0), (tb.right() - 6.0, 26.0), (tb.right() - 3.0, 22.0)], t.glyph_dim);
 
-    // Recording options. The metronome works (spec: ui/metronome.md); the others wait for recording.
+    // Recording options.
     tool_button(ui, btn(580.0, 4.0), Icon::Metronome, crate::metronome::on(), Action::Metronome, "Metronome (Ctrl+M) - right-click for the sound");
-    for (i, (icon, hint)) in [
-        (Icon::WaitInput, "Wait for input to start recording"),
-        (Icon::Countdown, "Countdown before recording"),
-        (Icon::Blend, "Blend recording"),
-        (Icon::LoopRecord, "Loop recording"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        tool_button(ui, btn(613.0 + 33.0 * i as f32, 4.0), icon, false, Action::Placeholder(hint), hint);
-    }
+    tool_button(ui, btn(613.0, 4.0), Icon::WaitInput, s.rec_wait_input, Action::RecWaitInput, "Wait for input to start recording (Ctrl+I)");
+    tool_button(ui, btn(646.0, 4.0), Icon::Countdown, s.rec_countdown, Action::RecCountdown, "3-2-1 countdown before recording");
+    tool_button(ui, btn(679.0, 4.0), Icon::Blend, s.rec_blend, Action::RecBlend, "Blend recording (overdub notes into pattern)");
+    tool_button(ui, btn(712.0, 4.0), Icon::LoopRecord, s.rec_loop, Action::RecLoop, "Loop recording");
 
     // Song position (B:S:T).
     let tp = Rect::span(745.0, 873.0, 4.0, 36.0);

@@ -124,6 +124,14 @@ pub enum Action {
     Typing,
     /// Record switch (toolbar, R): live performance note recording into the current pattern.
     Record,
+    /// Wait for input to start recording (toolbar, Ctrl+I).
+    RecWaitInput,
+    /// 3-2-1 Countdown before recording (toolbar, Ctrl+P).
+    RecCountdown,
+    /// Blend recording / Overdub into pattern (toolbar).
+    RecBlend,
+    /// Loop recording (toolbar).
+    RecLoop,
     /// Metronome switch (toolbar, OPTIONS menu, Ctrl+M); right-click on the button picks the sound.
     Metronome,
     /// Auto scrolling switch (toolbar, OPTIONS menu); right-click on the button for continuous scrolling.
@@ -798,6 +806,12 @@ pub struct State {
     pub message: Option<String>,
     pub toggles: Vec<&'static str>,
     pub recording: bool,
+    pub rec_wait_input: bool,
+    pub rec_countdown: bool,
+    pub rec_blend: bool,
+    pub rec_loop: bool,
+    pub rec_waiting: bool,
+    pub rec_countdown_active: bool,
     /// MIDI input devices that are open (their notes play the selected channel; spec: ui/midi-input.md).
     pub midi_inputs: Vec<String>,
     pub maximized: bool,
@@ -894,6 +908,14 @@ struct RecNote {
     pattern: u16,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CountdownState {
+    start: std::time::Instant,
+    beat_duration: std::time::Duration,
+    beats_total: u32,
+    beats_played: u32,
+}
+
 pub struct App {
     pub state: State,
     pub plugins: crate::plugins::Plugins,
@@ -928,6 +950,8 @@ pub struct App {
     midi_held: Vec<(u8, usize)>,
     midi_last_scan: std::time::Instant,
     rec_held: Vec<RecNote>,
+    countdown: Option<CountdownState>,
+    last_tick: u32,
     /// Last title-bar press (window, time, position), for double-click maximize / restore.
     title_click: Option<(Win, std::time::Instant, (f32, f32))>,
     /// Last channel-rack press (action, time), for double clicks on slots and mixer boxes (§8, §12).
@@ -1049,6 +1073,12 @@ impl App {
                 tapper: Default::default(),
                 toggles: vec!["typing"],
                 recording: false,
+                rec_wait_input: false,
+                rec_countdown: false,
+                rec_blend: true,
+                rec_loop: true,
+                rec_waiting: false,
+                rec_countdown_active: false,
                 midi_inputs: Vec::new(),
                 maximized: true,
                 piano: PianoState::default(),
@@ -1082,6 +1112,8 @@ impl App {
             midi_held: Vec::new(),
             midi_last_scan: std::time::Instant::now(),
             rec_held: Vec::new(),
+            countdown: None,
+            last_tick: 0,
             title_click: None,
             rack_click: None,
             cpu_click: None,
@@ -1547,6 +1579,7 @@ impl App {
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     pub(crate) fn plugin_tick(&mut self) {
+        self.countdown_tick();
         self.scan_tick();
         self.loading_tick();
         self.export_tick();
@@ -4487,7 +4520,13 @@ impl App {
             return;
         }
         match key {
-            Key::Named(NamedKey::Space) => self.act(if self.transport.playing() { Action::Stop } else { Action::Play }),
+            Key::Named(NamedKey::Space) => {
+                if self.state.rec_waiting || self.countdown.is_some() {
+                    self.cancel_pre_record();
+                } else {
+                    self.act(if self.transport.playing() { Action::Stop } else { Action::Play });
+                }
+            }
             // spec: ui/tempo-tapper.md §1
             Key::Named(NamedKey::F5) if ctrl => self.act(Action::ToggleWin(Win::Tapper)),
             Key::Named(NamedKey::F5) => self.act(Action::ToggleWin(Win::Playlist)),
@@ -4564,6 +4603,7 @@ impl App {
             Key::Character(c) if ctrl && self.shift && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_AS)),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT)),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION)),
+            Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("i") => self.toggle_rec_wait_input(),
             Key::Character(c) if !ctrl && !alt && c.eq_ignore_ascii_case("r") && !self.typing_on() => self.toggle_record(),
             _ => {}
         }
@@ -4572,7 +4612,20 @@ impl App {
     /// Start playback in the mode the PAT / SONG switch shows. Pattern mode loops the current pattern from the piano
     /// roll's play-start marker (§10); song mode plays the playlist from its start and stops at its end.
     pub(crate) fn start_playback(&mut self) {
+        self.state.rec_waiting = false;
+        self.state.rec_countdown_active = false;
+        self.countdown = None;
         self.rec_held.clear();
+        if self.state.recording && !self.state.rec_blend {
+            let row = self.state.selected_channel;
+            if let Some(ch) = self.state.project.channels.get(row).map(|c| c.index) {
+                let pat = self.state.pattern;
+                if let Some(p) = self.state.project.patterns.iter_mut().find(|p| p.number == pat) {
+                    p.notes.retain(|n| n.channel != ch);
+                    self.state.piano.dirty = true;
+                }
+            }
+        }
         let p = crate::rack::play_project(&self.state);
         let song = self.state.song_mode;
         if song && p.arrangement().is_none_or(|a| a.clips.is_empty()) {
@@ -4581,6 +4634,7 @@ impl App {
             return;
         }
         let start = if song { f64::from(self.state.playlist.pos) } else { f64::from(self.state.piano.marker) };
+        self.last_tick = start.round() as u32;
         self.transport.play(&p, self.play_mode(), start);
     }
 
@@ -4588,9 +4642,119 @@ impl App {
         if self.state.song_mode { PlayMode::Song } else { PlayMode::Pattern(self.state.pattern) }
     }
 
+    pub fn cancel_pre_record(&mut self) -> bool {
+        let was = self.state.rec_waiting || self.countdown.is_some();
+        self.state.rec_waiting = false;
+        self.state.rec_countdown_active = false;
+        self.countdown = None;
+        if was {
+            self.state.message = Some("Recording canceled".into());
+            self.invalidate();
+        }
+        was
+    }
+
+    pub fn trigger_play(&mut self) {
+        if self.state.recording {
+            if self.state.rec_wait_input {
+                self.state.rec_waiting = true;
+                self.state.message = Some("Waiting for input... (play a note on keyboard to start recording)".into());
+                self.invalidate();
+                return;
+            }
+            if self.state.rec_countdown {
+                self.start_countdown();
+                return;
+            }
+        }
+        self.start_playback();
+    }
+
+    fn start_countdown(&mut self) {
+        let tempo = self.state.tempo.clamp(20.0, 999.0);
+        let beat_duration = std::time::Duration::from_secs_f64(60.0 / tempo);
+        self.transport.tap_click(true);
+        self.state.rec_countdown_active = true;
+        self.countdown = Some(CountdownState {
+            start: std::time::Instant::now(),
+            beat_duration,
+            beats_total: 4,
+            beats_played: 1,
+        });
+        self.state.message = Some("Countdown: 4...".into());
+        self.invalidate();
+    }
+
+    fn countdown_tick(&mut self) {
+        let Some(mut cd) = self.countdown.take() else {
+            self.state.rec_countdown_active = false;
+            return;
+        };
+        self.state.rec_countdown_active = true;
+        let elapsed = cd.start.elapsed();
+        let target_beat = (elapsed.as_secs_f64() / cd.beat_duration.as_secs_f64()).floor() as u32 + 1;
+
+        while cd.beats_played < target_beat && cd.beats_played < cd.beats_total {
+            cd.beats_played += 1;
+            self.transport.tap_click(false);
+            let remaining = cd.beats_total - cd.beats_played + 1;
+            self.state.message = Some(format!("Countdown: {remaining}..."));
+            self.invalidate();
+        }
+
+        if elapsed >= cd.beat_duration * cd.beats_total {
+            self.state.rec_countdown_active = false;
+            self.state.message = Some("Recording...".into());
+            self.start_playback();
+        } else {
+            self.countdown = Some(cd);
+        }
+    }
+
+    pub fn toggle_rec_wait_input(&mut self) {
+        self.state.rec_wait_input = !self.state.rec_wait_input;
+        self.state.message = Some(if self.state.rec_wait_input {
+            "Wait for input: ON (playback starts on first note)".into()
+        } else {
+            "Wait for input: OFF".into()
+        });
+        self.invalidate();
+    }
+
+    pub fn toggle_rec_countdown(&mut self) {
+        self.state.rec_countdown = !self.state.rec_countdown;
+        self.state.message = Some(if self.state.rec_countdown {
+            "3-2-1 countdown: ON (1-bar metronome count-in before recording)".into()
+        } else {
+            "3-2-1 countdown: OFF".into()
+        });
+        self.invalidate();
+    }
+
+    pub fn toggle_rec_blend(&mut self) {
+        self.state.rec_blend = !self.state.rec_blend;
+        self.state.message = Some(if self.state.rec_blend {
+            "Blend recording: ON (overdub into existing pattern notes)".into()
+        } else {
+            "Blend recording: OFF (replace existing pattern notes)".into()
+        });
+        self.invalidate();
+    }
+
+    pub fn toggle_rec_loop(&mut self) {
+        self.state.rec_loop = !self.state.rec_loop;
+        self.state.message = Some(if self.state.rec_loop {
+            "Loop recording: ON".into()
+        } else {
+            "Loop recording: OFF".into()
+        });
+        self.invalidate();
+    }
+
     pub fn toggle_record(&mut self) {
         self.state.recording = !self.state.recording;
         if !self.state.recording {
+            self.cancel_pre_record();
             self.finalize_recording();
             self.state.message = Some("Live recording off".into());
         } else {
@@ -4706,6 +4870,9 @@ impl App {
             self.typing_synced = true;
             self.transport.update(&crate::rack::play_project(&self.state));
         }
+        if self.state.rec_waiting {
+            self.start_playback();
+        }
         let key = key as u16;
         self.transport.note_on(row, key, TYPING_VELOCITY);
         self.typing_held.push((code, row, key));
@@ -4759,6 +4926,19 @@ impl App {
                 self.invalidate();
             }
         }
+        let now_tick = self.transport.tick().max(0.0).round() as u32;
+        if self.transport.playing() {
+            if self.state.recording && !self.state.rec_loop && !self.state.song_mode {
+                if now_tick < self.last_tick && self.last_tick > 48 {
+                    self.finalize_recording();
+                    self.transport.stop();
+                    self.state.message = Some("Pattern take recorded".into());
+                    self.invalidate();
+                    return;
+                }
+            }
+            self.last_tick = now_tick;
+        }
         let msgs = self.midi.poll();
         if msgs.is_empty() {
             return;
@@ -4766,6 +4946,9 @@ impl App {
         for m in msgs {
             match m {
                 crate::midi_in::Msg::On(key, velocity) => {
+                    if self.state.rec_waiting {
+                        self.start_playback();
+                    }
                     if self.state.shown(Win::Tapper) {
                         self.midi_tap();
                     }
@@ -5167,6 +5350,10 @@ impl App {
             }
             Action::Typing => self.toggle_typing(),
             Action::Record => self.toggle_record(),
+            Action::RecWaitInput => self.toggle_rec_wait_input(),
+            Action::RecCountdown => self.toggle_rec_countdown(),
+            Action::RecBlend => self.toggle_rec_blend(),
+            Action::RecLoop => self.toggle_rec_loop(),
             Action::Metronome => self.toggle_metronome(),
             Action::AutoScroll => self.toggle_autoscroll(),
             Action::EnableGroups => self.toggle_groups(),
@@ -5196,17 +5383,24 @@ impl App {
             Action::DragWindow => self.want_drag_window = true,
             Action::Play => {
                 self.perf_transport();
+                if self.cancel_pre_record() {
+                    return;
+                }
                 match self.transport.state() {
                     // Play toggles pause (the position is held in place); Stop rewinds.
                     TransportState::Playing => self.transport.pause(),
                     TransportState::Paused => self.transport.resume(),
-                    TransportState::Stopped => self.start_playback(),
+                    TransportState::Stopped => self.trigger_play(),
                 }
             }
             Action::Stop => {
+                let canceled = self.cancel_pre_record();
                 self.finalize_recording();
                 self.perf_transport();
                 self.transport.stop();
+                if canceled {
+                    return;
+                }
             }
             Action::PatSong(song) => {
                 let changed = s.song_mode != song;
@@ -10261,5 +10455,86 @@ mod tests {
         let mut app = App::new(None);
         app.act(Action::Settings(views::settings::SAct::Button("Refresh device list")));
         assert!(app.state.message.is_some());
+    }
+
+    #[test]
+    fn rec_options_toggle_actions_and_shortcuts() {
+        let mut app = App::new(None);
+        assert!(!app.state.rec_wait_input);
+        assert!(!app.state.rec_countdown);
+        assert!(app.state.rec_blend);
+        assert!(app.state.rec_loop);
+
+        // Actions
+        app.act(Action::RecWaitInput);
+        assert!(app.state.rec_wait_input);
+        app.act(Action::RecCountdown);
+        assert!(app.state.rec_countdown);
+        app.act(Action::RecBlend);
+        assert!(!app.state.rec_blend);
+        app.act(Action::RecLoop);
+        assert!(!app.state.rec_loop);
+
+        // Shortcuts
+        app.key(&winit::keyboard::Key::Character("i".into()), true, false);
+        assert!(!app.state.rec_wait_input);
+    }
+
+    #[test]
+    fn rec_wait_input_starts_on_first_note() {
+        let mut app = App::new(None);
+        app.state.recording = true;
+        app.state.rec_wait_input = true;
+
+        // Press Play: should enter waiting state without running transport yet
+        app.act(Action::Play);
+        assert!(app.state.rec_waiting);
+        assert!(!app.transport.playing());
+
+        // First typing note triggers playback immediately
+        let taken = app.typing_key(winit::keyboard::KeyCode::KeyQ, true, false, false);
+        assert!(taken);
+        assert!(!app.state.rec_waiting);
+        assert!(app.transport.playing());
+
+        // Release note commits it
+        app.typing_key(winit::keyboard::KeyCode::KeyQ, false, false, false);
+        assert_eq!(app.state.project.patterns[0].notes.len(), 1);
+        app.act(Action::Stop);
+    }
+
+    #[test]
+    fn rec_countdown_and_cancel() {
+        let mut app = App::new(None);
+        app.state.recording = true;
+        app.state.rec_countdown = true;
+
+        app.act(Action::Play);
+        assert!(app.countdown.is_some());
+        assert!(app.state.rec_countdown_active);
+        assert!(!app.transport.playing());
+
+        // Space cancels countdown
+        app.key(&winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space), false, false);
+        assert!(app.countdown.is_none());
+        assert!(!app.state.rec_countdown_active);
+        assert!(!app.transport.playing());
+    }
+
+    #[test]
+    fn rec_non_blend_mode_replaces_existing_notes() {
+        let mut app = App::new(None);
+        // Pre-populate note on channel 0
+        let ch = app.state.project.channels[0].index;
+        app.state.project.patterns[0].notes.push(Note { key: 50, ..Note::step(ch, 0) });
+        assert_eq!(app.state.project.patterns[0].notes.len(), 1);
+
+        app.state.recording = true;
+        app.state.rec_blend = false; // Overwrite / Replace mode
+
+        app.act(Action::Play);
+        // Notes on channel 0 in pattern were cleared for clean recording
+        assert!(app.state.project.patterns[0].notes.is_empty());
+        app.act(Action::Stop);
     }
 }
