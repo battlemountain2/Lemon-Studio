@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Tick-based playback engine: schedules notes from patterns / playlist clips on the sequencer's tick clock, plays
 //! sampler and audio-clip channels, and sums them through the mixer routing graph. Everything that is scheduled
 //! happens at a tick's start; the engine renders whole ticks and hands them out in the block sizes the caller asks
@@ -192,6 +198,9 @@ struct ChannelState {
     frame_s: f64,
     /// A generator plugin channel; it sounds only once an instrument is attached (`Engine::set_instrument`).
     plugin: bool,
+    /// A sampler channel: the instrument playing it (Lemon Sampler) applies the root note and fine tune itself, so its
+    /// notes' tuning leaves them out (spec: plugins/lemon-sampler.md §7).
+    own_tuning: bool,
     instrument: Slot,
     /// Polyphony, mono, portamento and cut group rules for the instrument's notes (spec: audio/channel-voices.md).
     rules: notes::Rules,
@@ -440,6 +449,18 @@ impl ChannelState {
     /// The channel's pitch in cents from key 60.
     fn pitch_from_60(&self) -> f64 {
         f64::from(laws::channel_pitch(self.knob, self.fine, self.root, self.main)) + 6000.0
+    }
+
+    /// The tuning (semitones) a hosted instrument hears with each note: the channel's pitch, without the root note and
+    /// fine tune when the instrument applies those itself.
+    fn hosted_shift(&self) -> f32 {
+        let shift = if self.own_tuning {
+            if self.pitched { (f64::from(laws::channel_pitch(self.knob, 0, 60, self.main)) + 6000.0) / 100.0 } else { 0.0 }
+        } else {
+            12.0 * (self.base_rate / self.src_ratio).log2()
+        };
+        let shift = shift as f32;
+        if shift.is_finite() && shift.abs() > 1e-3 { shift } else { 0.0 }
     }
 
     /// A control point replaces the channel's own setting (spec: audio/pattern-controls.md).
@@ -847,12 +868,12 @@ pub struct Engine {
     params: param_auto::ParamAuto,
     /// The project's random generator (random layers; spec: audio/channel-misc.md "FL's random generator").
     rng: layers::Mt19937,
-    metronome: bool,
-    metronome_phase: f32,
-    metronome_env: f32,
-    metronome_freq: f32,
-    beat_ticks: u64,
-    bar_ticks: u64,
+    /// The metronome of a playback stream (`set_metronome`), and the beats from one accent to the next: the project
+    /// signature's numerator (spec: ui/metronome.md §4).
+    metronome: Option<crate::metronome::Metronome>,
+    beats_per_accent: u16,
+    /// The Tempo tapper's clicks (`tap_click`), on any live stream.
+    tap_clicks: crate::metronome::TapClicks,
     pub report: EngineReport,
 }
 
@@ -875,9 +896,6 @@ impl Engine {
         let mut report = EngineReport::default();
         let tempo = project.tempo.filter(|&t| t.is_finite() && t > 0.0).map(|t| t.clamp(10.0, 999.0)).unwrap_or(130.0);
         let ppq = project.ppq.clamp(1, 960);
-        let (num, den) = project.time_signature.unwrap_or((4, 4));
-        let beat_ticks = (u64::from(ppq) * 4 / u64::from(den.max(1))).max(1);
-        let bar_ticks = (beat_ticks * u64::from(num.max(1))).max(1);
         let n_tracks = project.mixer.len().max(1);
 
         let mut channels: Vec<ChannelState> = project
@@ -964,6 +982,7 @@ impl Engine {
                     pitch_env: env_on.then(|| envelope::Params::new(&ch.envelopes[os_model::Envelope::PITCH])).flatten(),
                     frame_s: 1.0 / f64::from(rate),
                     plugin: ch.kind == ChannelKind::Plugin,
+                    own_tuning: ch.kind.is_sampler(),
                     instrument: Slot::default(),
                     rules: notes::Rules::new(&ch.misc, ppq),
                     from_scale,
@@ -1231,26 +1250,23 @@ impl Engine {
             fx_dry: Vec::new(),
             inst_tail: 0,
             inst_active: false,
-            metronome: false,
-            metronome_phase: 0.0,
-            metronome_env: 0.0,
-            metronome_freq: 1000.0,
-            beat_ticks,
-            bar_ticks,
+            metronome: None,
+            beats_per_accent: project.time_signature.map_or(4, |s| s.0.max(1)),
+            tap_clicks: crate::metronome::TapClicks::new(rate),
             report,
         }
     }
 
-    /// Toggles or sets the metronome audio click.
-    pub fn set_metronome(&mut self, on: bool) {
-        self.metronome = on;
-        if !on {
-            self.metronome_env = 0.0;
-        }
+    /// Clicks with `switch` while playing live (spec: ui/metronome.md); an export never does.
+    pub fn set_metronome(&mut self, switch: std::sync::Arc<crate::metronome::Switch>) {
+        self.metronome = Some(crate::metronome::Metronome::new(switch, self.rate));
     }
 
-    pub fn metronome(&self) -> bool {
-        self.metronome
+    /// A click from the next tick, for a tap on the Tempo tapper (spec: ui/tempo-tapper.md §8): the metronome's Tick,
+    /// accented or not, into the master track like the metronome's clicks; also on a stream of live notes.
+    pub fn tap_click(&mut self, accent: bool) {
+        self.tap_clicks.start(accent);
+        self.tail_done = false;
     }
 
     /// Plays generator-plugin channel `channel` through `inst` (a shared instance that outlives this engine).
@@ -1439,9 +1455,9 @@ impl Engine {
         let drained = self.out_pos >= self.out.len();
         if self.live_only {
             let rest_silent = self.out[self.out_pos.min(self.out.len())..].iter().all(|&s| s == 0.0);
-            return rest_silent && self.voices.is_empty() && self.inst_tail == 0 && self.inst_live.is_empty();
+            return rest_silent && self.voices.is_empty() && self.inst_tail == 0 && self.inst_live.is_empty() && !self.tap_clicks.sounding();
         }
-        !self.looping && drained && self.tail_done && self.inst_live.is_empty()
+        !self.looping && drained && self.tail_done && self.inst_live.is_empty() && !self.tap_clicks.sounding()
     }
 
     /// Start playback in the tick that contains `frame` (at the project tempo; notes before that tick are not
@@ -1534,6 +1550,12 @@ impl Engine {
     /// the ticks after it.
     pub fn continue_from(&mut self, old: &mut Engine) {
         self.looping = old.looping;
+        // The metronome carries on, with a click that is sounding (rebuilt at a new rate).
+        self.metronome = old.metronome.take().map(|m| if m.rate() == self.rate { m } else { crate::metronome::Metronome::new(m.switch().clone(), self.rate) });
+        // So does a tap's click (a tap usually changes the tempo while its click sounds).
+        if old.tap_clicks.rate() == self.rate {
+            std::mem::swap(&mut self.tap_clicks, &mut old.tap_clicks);
+        }
         let tick = old.tick;
         self.clock = if self.rate == old.rate && self.ppq == old.ppq {
             let mut c = old.clock;
@@ -1606,10 +1628,6 @@ impl Engine {
         // The main volume glides from where it was.
         self.main_glide = old.main_glide;
         self.exporting = old.exporting;
-        self.metronome = old.metronome;
-        self.metronome_phase = old.metronome_phase;
-        self.metronome_env = old.metronome_env;
-        self.metronome_freq = old.metronome_freq;
         if self.rate == old.rate && self.tracks.len() == old.tracks.len() {
             for (new, o) in self.tracks.iter_mut().zip(&mut old.tracks) {
                 new.gains = o.gains;
@@ -1866,37 +1884,20 @@ impl Engine {
         for ch in &mut self.channels {
             ch.advance(len as u32);
         }
+        // The metronome's click enters the master track (spec: ui/metronome.md §4): live playback only, and no new
+        // click once a song is over.
+        if let Some(m) = self.metronome.as_mut().filter(|_| !self.exporting && !self.live_only) {
+            let start = self.looping || tick < self.end_tick;
+            m.tick(tick, self.ppq, self.beats_per_accent, start, &mut self.bus[0][..len * 2]);
+        }
+        if !self.exporting {
+            self.tap_clicks.mix(&mut self.bus[0][..len * 2]);
+        }
         self.tick = tick + 1;
         self.frame = start + len as u64;
         self.mix(len, &song);
         self.out.clear();
         self.out.extend_from_slice(&self.bus[0][..len * 2]);
-        if self.metronome && !self.exporting && self.beat_ticks > 0 {
-            if tick % self.beat_ticks == 0 {
-                if tick % self.bar_ticks == 0 {
-                    self.metronome_freq = 1600.0;
-                    self.metronome_env = 0.5;
-                } else {
-                    self.metronome_freq = 1000.0;
-                    self.metronome_env = 0.35;
-                }
-                self.metronome_phase = 0.0;
-            }
-            if self.metronome_env > 1e-4 {
-                let decay = (-1.0 / (0.015 * self.rate as f32)).exp();
-                let phase_inc = self.metronome_freq / self.rate as f32;
-                for f in self.out.chunks_exact_mut(2) {
-                    if self.metronome_env <= 1e-4 {
-                        break;
-                    }
-                    let s = (self.metronome_phase * std::f32::consts::TAU).sin() * self.metronome_env;
-                    self.metronome_phase = (self.metronome_phase + phase_inc).fract();
-                    self.metronome_env *= decay;
-                    f[0] += s;
-                    f[1] += s;
-                }
-            }
-        }
         self.out_pos = 0;
         self.out_tick = tick;
         self.out_frame = start;
@@ -2195,11 +2196,10 @@ impl Engine {
                 self.missed += 1;
                 continue;
             };
-            // The channel's pitch (knob, control points, automation, fine tune, root note, main pitch) reaches the
-            // instrument as each note's tuning, with the note's fine pitch, on top of any glide; notes keep the pitch they
-            // started with.
-            let shift = (12.0 * (ch.base_rate / ch.src_ratio).log2()) as f32;
-            let shift = if shift.is_finite() && shift.abs() > 1e-3 { shift } else { 0.0 };
+            // The channel's pitch (knob, control points, automation, fine tune, root note, main pitch; a sampler
+            // channel's instrument applies root and fine itself) reaches the instrument as each note's tuning, with the
+            // note's fine pitch, on top of any glide; notes keep the pitch they started with.
+            let shift = ch.hosted_shift();
             if self.inst_fine.len() <= c {
                 self.inst_fine.resize(c + 1, [0.0; 128]);
             }
@@ -3086,53 +3086,6 @@ mod tests {
         // Crucial F05 verification: after continue_from, the new engine must have Lemon Reverb,
         // and must NOT have swapped in the old Lemon Delay!
         assert_eq!(new_engine.tracks[0].effects[0].name, "Lemon Reverb");
-    }
-
-    #[test]
-    fn metronome_clicks_at_tick_zero_and_respects_meter() {
-        let mut p = project(vec![], vec![]);
-        p.time_signature = Some((3, 4));
-        p.ppq = 96;
-        let mut lib = SampleLibrary::default();
-        let mut engine = Engine::new(&p, &mut lib, 44100, PlayMode::Song);
-        engine.set_metronome(true);
-
-        // Advance tick 0 (downbeat accent)
-        let (buf, tick, _) = engine.next_tick().unwrap();
-        assert_eq!(tick, 0);
-        assert!(buf.iter().any(|&s| s.abs() > 0.05), "tick 0 must produce an audible click");
-        assert_eq!(engine.metronome_freq, 1600.0, "downbeat accent is 1600 Hz");
-
-        // Advance to tick 96 (beat 1, regular beat 1000 Hz)
-        for _ in 1..96 {
-            engine.next_tick().unwrap();
-        }
-        let (_, tick, _) = engine.next_tick().unwrap();
-        assert_eq!(tick, 96);
-        assert_eq!(engine.metronome_freq, 1000.0, "beat 1 is 1000 Hz");
-
-        // Advance to tick 192 (beat 2, regular beat 1000 Hz)
-        for _ in 97..192 {
-            engine.next_tick().unwrap();
-        }
-        let (_, tick, _) = engine.next_tick().unwrap();
-        assert_eq!(tick, 192);
-        assert_eq!(engine.metronome_freq, 1000.0, "beat 2 is 1000 Hz");
-
-        // Advance to tick 288 (bar 1, downbeat accent 1600 Hz in 3/4 time)
-        for _ in 193..288 {
-            engine.next_tick().unwrap();
-        }
-        let (_, tick, _) = engine.next_tick().unwrap();
-        assert_eq!(tick, 288);
-        assert_eq!(engine.metronome_freq, 1600.0, "downbeat of next bar in 3/4 is 1600 Hz");
-
-        // Exporting engine (render_ticks) must NOT output metronome clicks even if metronome is enabled
-        let mut export_engine = Engine::new(&p, &mut lib, 44100, PlayMode::Song);
-        export_engine.set_metronome(true);
-        let mut out = Vec::new();
-        export_engine.render_ticks(1, &mut out);
-        assert!(out.iter().all(|&s| s == 0.0), "export must never output metronome click");
     }
 
     /// Records note events and outputs a constant 1.0 while any note is held.
@@ -4122,6 +4075,14 @@ mod tests {
         let got = tunes(&p);
         assert_eq!(got.len(), 1);
         assert!((got[0].1 + 2.5).abs() < 1e-3, "{got:?}");
+        // A sampler channel's instrument (Lemon Sampler) applies root note and fine tune itself: the tuning leaves them
+        // out. A plugin channel's tuning holds them.
+        (p.channels[0].misc.root, p.channels[0].misc.fine) = (48, 30);
+        let got = tunes(&p);
+        assert!((got[0].1 + 2.5).abs() < 1e-3, "{got:?}");
+        p.channels[0].kind = ChannelKind::Plugin;
+        let got = tunes(&p);
+        assert!((got[0].1 - (12.0 - 2.5 + 0.3)).abs() < 1e-3, "{got:?}");
     }
 
     // spec: audio/audio-clips.md "Starting inside a clip"
@@ -4766,15 +4727,102 @@ mod tests {
         assert!((e.channels[0].base_rate / e.channels[0].src_ratio - 1.0).abs() < 1e-9, "the channel is not moved");
     }
 
+    // spec: ui/metronome.md §4
+    fn metronome_on() -> std::sync::Arc<crate::metronome::Switch> {
+        let sw = std::sync::Arc::new(crate::metronome::Switch::default());
+        sw.set_on(true);
+        sw.set_sound(crate::metronome::Sound::Beep);
+        sw
+    }
+
+    /// Frames where sound starts after at least 100 silent ones, with the peak of the next 5 ms.
+    fn click_onsets(out: &[f32], rate: u32) -> Vec<(u64, f32)> {
+        let left: Vec<f32> = out.chunks_exact(2).map(|f| f[0]).collect();
+        let mut v = Vec::new();
+        let mut last: Option<usize> = None;
+        for (i, &s) in left.iter().enumerate() {
+            if s.abs() < 1e-6 {
+                continue;
+            }
+            if last.is_none_or(|l| i - l > 100) {
+                let n = (rate / 200) as usize;
+                v.push((i as u64, left[i..(i + n).min(left.len())].iter().fold(0.0f32, |m, x| m.max(x.abs()))));
+            }
+            last = Some(i);
+        }
+        v
+    }
+
     #[test]
-    fn metronome_generates_clicks_on_beats() {
+    fn metronome_clicks_every_beat_of_a_playing_pattern_and_accents_the_bar() {
+        // An empty pattern in 3/4 loops a bar of three beats: accented, plain, plain, accented, ...
+        let mut p = project(vec![], vec![]);
+        p.time_signature = Some((3, 4));
+        p.mixer = (0..2).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::new(None);
+        let rate = 48000;
+        let mut e = Engine::new(&p, &mut lib, rate, PlayMode::Pattern(1));
+        e.set_looping(true);
+        e.set_metronome(metronome_on());
+        // Three seconds: seven beats.
+        let mut out = vec![0.0; 2 * rate as usize * 3];
+        e.process(&mut out);
+        let on = click_onsets(&out, rate);
+        // 130 BPM: a beat every 0.4615 s. Ticks are whole samples (the loop restarts the clock) and a sine's first
+        // sample is 0, so an onset is within a few frames of the beat's exact time.
+        let beats: Vec<u64> = (0..7).map(|b| crate::clock::Clock::frame_of_tick(rate, 96, 130.0, 96 * b)).collect();
+        assert_eq!(on.len(), beats.len(), "{on:?}");
+        for ((f, _), b) in on.iter().zip(&beats) {
+            assert!(f.abs_diff(*b) <= 3, "{f} vs beat {b}");
+        }
+        let accented: Vec<bool> = on.iter().map(|o| o.1 > on[1].1 * 1.3).collect();
+        assert_eq!(accented, [true, false, false, true, false, false, true]);
+    }
+
+    #[test]
+    fn metronome_is_never_in_an_export_and_follows_the_master_track() {
+        let mut p = project(vec![], vec![]);
+        p.mixer = (0..2).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::new(None);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.set_metronome(metronome_on());
+        let mut out = Vec::new();
+        e.render_ticks(400, &mut out);
+        assert!(out.iter().all(|&s| s == 0.0), "an export never clicks");
+        // The master track muted: playback is silent too.
+        p.mixer[0].enabled = false;
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.set_looping(true);
+        e.set_metronome(metronome_on());
+        let mut out = vec![0.0; 2 * 48000];
+        e.process(&mut out);
+        assert!(out.iter().all(|&s| s == 0.0), "muted master");
+    }
+
+    // spec: ui/tempo-tapper.md §8
+    #[test]
+    fn a_tap_clicks_on_a_stream_of_live_notes_and_carries_over_a_rebuild() {
         let p = project(vec![], vec![]);
         let mut lib = SampleLibrary::new(None);
-        let mut e = Engine::new(&p, &mut lib, 44100, PlayMode::Pattern(1));
-        e.set_metronome(true);
-        let (s, tick, _) = e.next_tick().expect("first tick");
-        assert_eq!(tick, 0);
-        let peak = s.iter().copied().fold(0.0f32, f32::max);
-        assert!(peak > 0.1, "metronome downbeat click should produce sound, got peak {peak}");
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.clear_schedule();
+        assert!(e.finished());
+        e.tap_click(true);
+        assert!(!e.finished(), "a click keeps a stream of live notes going");
+        let mut out = vec![0.0; 2 * 240];
+        e.process(&mut out);
+        let on = click_onsets(&out, 48000);
+        assert_eq!(on.len(), 1);
+        assert!(on[0].0 < 2 && (on[0].1 - 1.0).abs() < 0.05, "accented Tick from the start: {on:?}");
+        // The tempo changes while it sounds: the rebuilt engine plays the rest of it.
+        let mut p2 = p.clone();
+        p2.tempo = Some(90.0);
+        let mut e2 = Engine::new(&p2, &mut lib, 48000, PlayMode::Pattern(1));
+        e2.clear_schedule();
+        e2.continue_from(&mut e);
+        let mut rest = vec![0.0; 2 * 2000];
+        e2.process(&mut rest);
+        assert!(rest.iter().any(|&s| s != 0.0));
+        assert!(e2.finished(), "silent again once the click is over");
     }
 }

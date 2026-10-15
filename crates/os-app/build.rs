@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Embeds `assets/lemonstudio.ico` as icon resource 1 (Windows). Uses the Windows SDK's `rc.exe`
 //! (or `$RC`); without it the build goes on and the exe just has no icon. Also sets `cfg(plugin_windows)` where plugin
 //! windows exist.
@@ -22,9 +28,10 @@ fn find_rc() -> Option<PathBuf> {
 }
 
 fn main() {
-    // `plugin_windows`: plugin editors open in Lemon Studio's frame windows (Win32 on Windows, X11 on Linux).
+    // `plugin_windows`: plugin editors open in Lemon Studio's frame windows (Win32 on Windows, X11 on Linux, AppKit on
+    // macOS).
     println!("cargo::rustc-check-cfg=cfg(plugin_windows)");
-    if matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("windows" | "linux")) {
+    if matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("windows" | "linux" | "macos")) {
         println!("cargo::rustc-cfg=plugin_windows");
     }
     println!("cargo:rerun-if-changed=assets/lemonstudio.rc");

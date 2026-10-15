@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Pattern name box (with suggestions and colour swatches) and the delete confirmation.
 // spec: ui/pattern-menu.md §3, §4
 
@@ -148,6 +154,8 @@ pub fn paint(ui: &mut Ui, s: &State) {
         ui.c.text(Font::new(13), r.x + 12.0, r.y + 8.0, t.glyph_dim, "Confirm");
         // spec: ui/channel-rack.md §18 (channels), ui/pattern-menu.md (patterns)
         let msg = match &s.rack.pending_delete {
+            // spec: ui/unused-channels.md §4
+            Some(rows) if s.rack.purging => format!("{} unused audio clip channel(s) are about to be deleted.", rows.len()),
             Some(rows) if rows.len() == 1 => "The selected channel is about to be deleted.".to_string(),
             Some(rows) => format!("The {} selected channels are about to be deleted.", rows.len()),
             None => format!("{} is about to be deleted.", pt::name_of(s, s.pattern.max(1))),

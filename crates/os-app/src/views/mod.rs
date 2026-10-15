@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Views of the main window, laid out from the measured default layout.
 // spec: ui/main-window.md
 
@@ -12,6 +18,7 @@ pub mod patterns;
 pub mod perf;
 pub mod playlist;
 pub mod rack;
+pub mod tapper;
 pub mod toolbar;
 
 use std::borrow::Cow;
@@ -35,6 +42,8 @@ pub struct FrameInfo {
     pub peaks: (f32, f32),
     /// Notes playing now, as (channel index, key).
     pub sounding: Vec<(u16, u16)>,
+    /// The song position slider's handle is being dragged (it shows the dragged position, not the playhead).
+    pub song_pos_drag: bool,
 }
 
 /// UI text at a nominal size (Cuprum; spec §10).
@@ -100,6 +109,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             Win::ChannelRack => ui.part(Seg::Win(win), a, |ui| rack::paint(ui, s, f)),
             Win::Plugin => ui.part(Seg::Win(win), a, |ui| channel_win::paint(ui, s, f)),
             Win::Perf => ui.part(Seg::Win(win), a, |ui| perf::paint(ui, s, f)),
+            Win::Tapper => ui.part(Seg::Win(win), a, |ui| tapper::paint(ui, s, f)),
             _ => {}
         }
         ui.c.pop_clip();
@@ -134,6 +144,7 @@ pub fn paint_area(s: &State, w: Win) -> Rect {
         Win::ChannelRack => rack::paint_area(s),
         Win::Plugin => channel_win::rect(s),
         Win::Perf => perf::bounds(s),
+        Win::Tapper => tapper::bounds(s),
         w => s.win_rect(w),
     }
 }

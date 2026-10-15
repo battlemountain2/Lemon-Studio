@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Sample loading: decode an audio file to stereo `f32` frames.
 //!
 // spec: flp/sample-paths.md (placeholders, formats), audio/sample-formats.md (Vorbis in WAV, MP3, AIFF)
@@ -271,8 +277,9 @@ impl SampleLibrary {
     }
 
     /// The FL Studio install folder on this machine, if one is found: the folder named by the environment
-    /// variable `OPENSTUDIO_FACTORY`, else the default install location, else (off Windows) the newest
-    /// "FL Studio ..." folder in the Wine prefix (`WINEPREFIX`, or `~/.wine`).
+    /// variable `OPENSTUDIO_FACTORY`, else the default install location (on macOS the newest
+    /// `/Applications/FL Studio ....app`, whose install folder is `Contents/Resources/FL`), else (off Windows)
+    /// the newest "FL Studio ..." folder in the Wine prefix (`WINEPREFIX`, or `~/.wine`).
     pub fn default_factory_dir() -> Option<PathBuf> {
         if let Some(p) = std::env::var_os("OPENSTUDIO_FACTORY").map(PathBuf::from) {
             return p.is_dir().then_some(p);
@@ -281,7 +288,24 @@ impl SampleLibrary {
         if p.is_dir() {
             return Some(p);
         }
+        #[cfg(target_os = "macos")]
+        if let Some(p) = Self::mac_factory_dir() {
+            return Some(p);
+        }
         Self::wine_factory_dir()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn mac_factory_dir() -> Option<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir("/Applications")
+            .ok()?
+            .flatten()
+            .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("FL Studio") && n.ends_with(".app")))
+            .map(|e| e.path().join("Contents/Resources/FL"))
+            .filter(|p| p.join("Data/Patches").is_dir())
+            .collect();
+        found.sort();
+        found.pop()
     }
 
     #[cfg(windows)]

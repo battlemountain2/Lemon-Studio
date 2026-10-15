@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Playback: an audio thread that owns the output streams and the engines.
 //!
 //! One state machine, `State` (stopped / playing / paused), published in `Shared`:
@@ -156,9 +162,9 @@ enum Cmd {
     /// Live note (typing keyboard): channel (rack position), key, velocity; `NoteOff` releases.
     NoteOn(usize, u16, u8),
     NoteOff(usize, u16),
+    /// A tap on the Tempo tapper: a click, accented or not, like a live note.
+    TapClick(bool),
     Stop,
-    /// Enable or disable the audio metronome click.
-    Metronome(bool),
     /// Render to a WAV file with the hosted plugins (FILE > Export): project, mode, sample rate, file.
     Export(Box<Project>, PlayMode, u32, PathBuf),
     /// The audio settings changed: move the playback to a new stream, close the live and preview streams.
@@ -253,11 +259,6 @@ impl Transport {
         let _ = self.tx.send(Cmd::Reopen);
     }
 
-    /// Sets whether the metronome audio click plays during playback.
-    pub fn set_metronome(&self, on: bool) {
-        let _ = self.tx.send(Cmd::Metronome(on));
-    }
-
     /// Renders `project` offline to a 32-bit float WAV file at `rate`, with the hosted instruments and effects, on the
     /// audio thread: playback, previews and live notes stop at once and nothing else processes the plugins meanwhile.
     /// Follow it with `export_status`.
@@ -326,6 +327,12 @@ impl Transport {
 
     pub fn note_off(&self, channel: usize, key: u16) {
         let _ = self.tx.send(Cmd::NoteOff(channel, key));
+    }
+
+    /// A tap on the Tempo tapper (spec: ui/tempo-tapper.md §8): the metronome's Tick, accented or not, where a live
+    /// note would play (into playback while playing, else on the live stream).
+    pub fn tap_click(&self, accent: bool) {
+        let _ = self.tx.send(Cmd::TapClick(accent));
     }
 
     /// Hold playback where it is (Playing -> Paused); `resume` continues from the same place.
@@ -674,7 +681,16 @@ fn raise_priority() {
     }
 }
 
-#[cfg(not(windows))]
+/// macOS: the user-interactive class keeps the feeder on the performance cores.
+#[cfg(target_os = "macos")]
+fn raise_priority() {
+    // SAFETY: changes the calling thread's own QoS class.
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn raise_priority() {}
 
 fn attach(e: &mut Engine, inst: &Instruments) {
@@ -746,11 +762,9 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     // Streams that were stopped and finish their fade before they are dropped.
     let mut closing: Vec<(Session, Instant)> = Vec::new();
     let mut reset_pending = false;
-    let mut metronome_on = false;
-    let swap = |s: &mut Session, library: &mut SampleLibrary, metronome: bool| {
+    let swap = |s: &mut Session, library: &mut SampleLibrary| {
         // Build outside the lock, then swap at the playing position.
         let mut e = Engine::new(&s.project, library, s.rate, s.mode);
-        e.set_metronome(metronome);
         if s.kind == Kind::Live {
             e.clear_schedule();
         }
@@ -777,23 +791,26 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 if let Some(project) = latest.lock().ok().and_then(|mut l| l.take()) {
                     for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
                         s.project = project.clone();
-                        swap(s, &mut library, metronome_on);
+                        swap(s, &mut library);
                     }
                     live_project = Some(project);
                 }
             }
             Ok(Cmd::Instruments) => {
                 for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
-                    swap(s, &mut library, metronome_on);
+                    swap(s, &mut library);
                 }
             }
-            Ok(Cmd::NoteOn(ch, key, vel)) => {
+            Ok(cmd @ (Cmd::NoteOn(..) | Cmd::TapClick(_))) => {
+                // A click needs no channel: it also opens the live stream before any project was sent.
+                let empty = Project::default();
+                let project = live_project.as_ref().or(matches!(cmd, Cmd::TapClick(_)).then_some(&empty));
                 let target = match session.as_ref() {
                     Some(s) if !s.paused() => Some(s),
                     _ => {
                         if live.is_none() {
-                            if let Some(p) = &live_project {
-                                match Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, &mut library, shared.clone(), &inst, At::default(), false) {
+                            if let Some(p) = project {
+                                match Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, &mut library, shared.clone(), &inst, At::default()) {
                                     Ok(s) => live = Some(s),
                                     Err(e) => report(&shared, e),
                                 }
@@ -804,7 +821,11 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 };
                 if let Some(s) = target {
                     if let Ok(mut e) = s.engine.lock() {
-                        e.note_on(ch, key, vel);
+                        match cmd {
+                            Cmd::NoteOn(ch, key, vel) => e.note_on(ch, key, vel),
+                            Cmd::TapClick(accent) => e.tap_click(accent),
+                            _ => {}
+                        }
                     }
                     s.feed.wake();
                 }
@@ -820,7 +841,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             Ok(Cmd::PreviewFor(project, limit)) => {
                 preview = None;
                 preview_until = limit.map(|d| Instant::now() + d);
-                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default(), false) {
+                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default()) {
                     Ok(s) => preview = Some(s),
                     Err(e) => report(&shared, e),
                 }
@@ -828,7 +849,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             Ok(Cmd::PreviewSong(project)) => {
                 preview = None;
                 preview_until = None;
-                match Session::start(&project, PlayMode::Song, Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default(), false) {
+                match Session::start(&project, PlayMode::Song, Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default()) {
                     Ok(s) => preview = Some(s),
                     Err(e) => report(&shared, e),
                 }
@@ -842,7 +863,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     let running = session.as_ref().is_some_and(|s| !s.paused());
                     if !running && live.is_none() {
                         if let Some(p) = live_project.as_ref().or(Some(&*project)) {
-                            match Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, &mut library, shared.clone(), &inst, At::default(), false) {
+                            match Session::start(p, PlayMode::Pattern(1), Kind::Live, 0, &mut library, shared.clone(), &inst, At::default()) {
                                 Ok(s) => live = Some(s),
                                 Err(e) => report(&shared, e),
                             }
@@ -864,7 +885,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 }
                 preview = None;
                 preview_until = None;
-                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default(), false) {
+                match Session::start(&project, PlayMode::Pattern(1), Kind::Preview, 0, &mut library, shared.clone(), &inst, At::default()) {
                     Ok(s) => preview = Some(s),
                     Err(e) => report(&shared, e),
                 }
@@ -883,22 +904,12 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 reset_instruments(&inst);
                 reset_pending = false;
                 live_project = Some((*project).clone());
-                match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, At { tick: start, paused: false }, metronome_on) {
-                    Ok(s) => {
-                        session = Some(s);
-                    }
+                match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, At { tick: start, paused: false }) {
+                    Ok(s) => session = Some(s),
                     Err(e) => {
                         report(&shared, e);
                         let _ = shared.state.compare_exchange(PLAYING, STOPPED, Ordering::AcqRel, Ordering::Acquire);
                         shared.rewind(0.0);
-                    }
-                }
-            }
-            Ok(Cmd::Metronome(on)) => {
-                metronome_on = on;
-                if let Some(s) = &session {
-                    if let Ok(mut e) = s.engine.lock() {
-                        e.set_metronome(on);
                     }
                 }
             }
@@ -912,10 +923,8 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     let (project, mode, generation) = (old.project.clone(), old.mode, old.generation);
                     drop(old);
                     reset_instruments(&inst);
-                    match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at, metronome_on) {
-                        Ok(s) => {
-                            session = Some(s);
-                        }
+                    match Session::start(&project, mode, Kind::Song, generation, &mut library, shared.clone(), &inst, at) {
+                        Ok(s) => session = Some(s),
                         Err(e) => {
                             report(&shared, e);
                             if generation == shared.generation.load(Ordering::Acquire) {
@@ -1040,13 +1049,12 @@ impl Session {
 
     /// Opens a stream with the audio settings and starts it at `at` (playback: the position is published at once).
     #[allow(clippy::too_many_arguments)]
-    fn start(project: &Project, mode: PlayMode, kind: Kind, generation: u64, library: &mut SampleLibrary, shared: Arc<Shared>, inst: &Instruments, at: At, metronome: bool) -> Result<Session, String> {
+    fn start(project: &Project, mode: PlayMode, kind: Kind, generation: u64, library: &mut SampleLibrary, shared: Arc<Shared>, inst: &Instruments, at: At) -> Result<Session, String> {
         let song = kind == Kind::Song;
         let out = crate::audio_cfg::output(&crate::audio_cfg::AudioCfg::current())?;
         let (device, format, mut config) = (out.device, out.format, out.config);
         let rate = config.sample_rate;
         let mut e = Engine::new(project, library, rate, mode);
-        e.set_metronome(metronome);
         // Pattern playback loops on the bar line.
         e.set_looping(song && matches!(mode, PlayMode::Pattern(_)));
         if kind == Kind::Live {
@@ -1054,6 +1062,10 @@ impl Session {
         }
         if kind != Kind::Preview {
             attach(&mut e, inst);
+        }
+        // Playback clicks with the metronome switch; live notes and previews never do (spec: ui/metronome.md §4).
+        if song {
+            e.set_metronome(crate::metronome::switch());
         }
         // Seek before anything is queued, so the first block is already the start position.
         if at.tick > 0.0 {

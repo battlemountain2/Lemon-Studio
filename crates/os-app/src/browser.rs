@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Browser behaviour: tabs, tree open/close, selection, scrolling and drag and drop into the project.
 // spec: ui/browser.md
 
@@ -210,7 +216,7 @@ impl App {
             return;
         }
         // Plugin windows float above the main window: a sample released over one goes into that plugin.
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         if let Item::Sample(path) = &item {
             if self.sample_to_plugin_window(path) {
                 return;

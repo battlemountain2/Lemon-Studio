@@ -1,8 +1,14 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Text: the bundled Cuprum face (SIL OFL 1.1, see `fonts/Cuprum/OFL.txt`).
 //!
 //! On Windows, text goes through GDI with ClearType: the destination pixels are copied into a DIB,
 //! GDI draws the string over them (so ClearType blends against the real background), and the
-//! result is copied back. On Linux, text is drawn from outlines in the Barlow family (`text_sw.rs`;
+//! result is copied back. On Linux and macOS, text is drawn from outlines in the Barlow family (`text_sw.rs`;
 //! `OPENSTUDIO_TEXT=cuprum` for the portable engine). Elsewhere (and on Windows with `OPENSTUDIO_TEXT=portable`) the portable
 //! engine draws grayscale text with fontdue on GDI's metrics model: the same cell height and
 //! baseline, condensed widths by squeezing glyphs, synthetic bold and italic.
@@ -93,8 +99,8 @@ pub struct TextEngine {
     #[cfg(windows)]
     gdi: Option<gdi::Gdi>,
     portable: portable::Fd,
-    /// Linux: the outline engine with the Barlow family (`text_sw.rs`), unless Cuprum was asked for.
-    #[cfg(target_os = "linux")]
+    /// Linux and macOS: the outline engine with the Barlow family (`text_sw.rs`), unless Cuprum was asked for.
+    #[cfg(unix)]
     sw: Option<sw::Sw>,
 }
 
@@ -109,7 +115,7 @@ impl TextEngine {
             #[cfg(windows)]
             gdi,
             portable: portable::Fd::new()?,
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             sw: match std::env::var("OPENSTUDIO_TEXT").as_deref() {
                 Ok("cuprum") => None,
                 _ => Some(sw::Sw::new()?),
@@ -123,7 +129,7 @@ impl TextEngine {
         if let Some(g) = &mut self.gdi {
             return g.extent(f, scale, s);
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         if let Some(e) = &mut self.sw {
             return e.extent(f, scale, s);
         }
@@ -136,7 +142,7 @@ impl TextEngine {
         if let Some(g) = &mut self.gdi {
             return g.metrics(f, scale);
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         if let Some(e) = &mut self.sw {
             return e.metrics(f, scale);
         }
@@ -154,7 +160,7 @@ impl TextEngine {
         if let Some(g) = &mut self.gdi {
             return g.draw(pix, clip, f, scale, x, y, c, s, vertical);
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         if let Some(e) = &mut self.sw {
             return e.draw(pix, clip, f, scale, x, y, c, s, vertical);
         }
@@ -491,7 +497,7 @@ mod gdi {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[path = "text_sw.rs"]
 mod sw;
 
@@ -532,7 +538,7 @@ mod portable {
     }
 
     /// (win ascent, win descent, average char width) in em from a TrueType font's OS/2 table.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) fn os2(data: &[u8]) -> Option<(f32, f32, f32)> {
         let u16_at = |o: usize| data.get(o..o + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
         let u32_at = |o: usize| data.get(o..o + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));

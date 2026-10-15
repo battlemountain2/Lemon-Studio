@@ -1,3 +1,9 @@
+// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
+// and not any other part of Lemon Studio.
+
 //! Lemon Studio audio engine.
 //!
 //! - [`sample`]: decoding and resolving sample files.
@@ -5,6 +11,7 @@
 //! - [`effects`]: Lemon Studio's mixer-slot effects (EQ, limiter).
 //! - [`clock`]: the sequencer's tick clock (ticks to samples).
 //! - [`engine`]: tick-based playback of patterns and the playlist through the mixer.
+//! - [`metronome`]: the click on every beat while playing live.
 //! - [`voices`]: a hosted instrument's voices as the host counts them.
 //! - [`wav`]: writing renders to disk.
 
@@ -15,6 +22,7 @@ pub mod engine;
 pub mod envelope;
 pub mod instrument;
 pub mod laws;
+pub mod metronome;
 pub mod sample;
 pub mod voices;
 pub mod wav;
