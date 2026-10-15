@@ -28,11 +28,12 @@ pub fn parse(status: u8, d1: u8, d2: u8) -> Option<Msg> {
     }
 }
 
-/// The open input devices and the notes they sent.
 pub struct MidiIn {
+    tx: Sender<Msg>,
     rx: Receiver<Msg>,
     /// Names of the devices that opened.
     pub names: Vec<String>,
+    wake: fn(),
     /// Open devices; dropping one closes it.
     _ports: Vec<midir::MidiInputConnection<()>>,
 }
@@ -44,18 +45,38 @@ impl MidiIn {
     pub fn open(wake: fn()) -> MidiIn {
         let (tx, rx) = channel();
         let (ports, names) = open_all(&tx, wake);
-        MidiIn { rx, names, _ports: ports }
+        MidiIn { tx, rx, names, wake, _ports: ports }
     }
 
     /// No devices: for tests and screenshots.
     pub fn none() -> MidiIn {
-        let (_, rx) = channel();
-        MidiIn { rx, names: Vec::new(), _ports: Vec::new() }
+        let (tx, rx) = channel();
+        MidiIn { tx, rx, names: Vec::new(), wake: || (), _ports: Vec::new() }
     }
 
     /// Notes received since the last call, oldest first.
     pub fn poll(&self) -> Vec<Msg> {
         self.rx.try_iter().collect()
+    }
+
+    /// Checks connected MIDI input ports and reconnects dynamically if devices were plugged or unplugged.
+    /// Returns true if the device list changed.
+    pub fn refresh(&mut self) -> bool {
+        let Ok(list) = midir::MidiInput::new(CLIENT) else { return false };
+        let mut available = Vec::new();
+        for port in list.ports() {
+            if let Ok(name) = list.port_name(&port) {
+                available.push(name);
+            }
+        }
+        if available != self.names {
+            let (ports, names) = open_all(&self.tx, self.wake);
+            self._ports = ports;
+            self.names = names;
+            true
+        } else {
+            false
+        }
     }
 }
 

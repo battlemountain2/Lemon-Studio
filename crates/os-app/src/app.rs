@@ -122,6 +122,8 @@ pub enum Action {
     Placeholder(&'static str),
     /// Typing keyboard to piano switch (toolbar, OPTIONS menu, Ctrl+T).
     Typing,
+    /// Record switch (toolbar, R): live performance note recording into the current pattern.
+    Record,
     /// Metronome switch (toolbar, OPTIONS menu, Ctrl+M); right-click on the button picks the sound.
     Metronome,
     /// Auto scrolling switch (toolbar, OPTIONS menu); right-click on the button for continuous scrolling.
@@ -795,6 +797,7 @@ pub struct State {
     pub tempo: f64,
     pub message: Option<String>,
     pub toggles: Vec<&'static str>,
+    pub recording: bool,
     /// MIDI input devices that are open (their notes play the selected channel; spec: ui/midi-input.md).
     pub midi_inputs: Vec<String>,
     pub maximized: bool,
@@ -882,6 +885,15 @@ impl State {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RecNote {
+    key: u16,
+    channel: u16,
+    velocity: u8,
+    start_tick: u32,
+    pattern: u16,
+}
+
 pub struct App {
     pub state: State,
     pub plugins: crate::plugins::Plugins,
@@ -914,6 +926,8 @@ pub struct App {
     /// MIDI controller input, and its held notes: (key, rack row they started on).
     pub midi: crate::midi_in::MidiIn,
     midi_held: Vec<(u8, usize)>,
+    midi_last_scan: std::time::Instant,
+    rec_held: Vec<RecNote>,
     /// Last title-bar press (window, time, position), for double-click maximize / restore.
     title_click: Option<(Win, std::time::Instant, (f32, f32))>,
     /// Last channel-rack press (action, time), for double clicks on slots and mixer boxes (§8, §12).
@@ -1034,6 +1048,7 @@ impl App {
                 perf: crate::perf::Perf::default(),
                 tapper: Default::default(),
                 toggles: vec!["typing"],
+                recording: false,
                 midi_inputs: Vec::new(),
                 maximized: true,
                 piano: PianoState::default(),
@@ -1065,6 +1080,8 @@ impl App {
             typing_synced: false,
             midi: crate::midi_in::MidiIn::none(),
             midi_held: Vec::new(),
+            midi_last_scan: std::time::Instant::now(),
+            rec_held: Vec::new(),
             title_click: None,
             rack_click: None,
             cpu_click: None,
@@ -3051,6 +3068,18 @@ impl App {
                     self.state.message = Some(format!("Theme: {name}"));
                 }
             }
+            SAct::Button("Refresh device list") => {
+                let changed = self.midi.refresh();
+                self.state.midi_inputs = self.midi.names.clone();
+                let count = self.state.midi_inputs.len();
+                self.state.message = Some(if count == 0 {
+                    "No MIDI input devices found".into()
+                } else if changed {
+                    format!("MIDI devices refreshed: {count} connected ({})", self.state.midi_inputs.join(", "))
+                } else {
+                    format!("MIDI devices: {count} connected ({})", self.state.midi_inputs.join(", "))
+                });
+            }
             SAct::Button("Reset") => self.settings_act(SAct::Preset(0)),
             SAct::Button("Load theme...") => self.theme_dialog(),
             SAct::Button("Manage plugins") => self.open_settings(views::settings::PLUGINS),
@@ -4535,6 +4564,7 @@ impl App {
             Key::Character(c) if ctrl && self.shift && c.eq_ignore_ascii_case("s") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_AS)),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("r") => self.act(Action::MenuItem(0, views::menus::FILE_EXPORT)),
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION)),
+            Key::Character(c) if !ctrl && !alt && c.eq_ignore_ascii_case("r") && !self.typing_on() => self.toggle_record(),
             _ => {}
         }
     }
@@ -4542,6 +4572,7 @@ impl App {
     /// Start playback in the mode the PAT / SONG switch shows. Pattern mode loops the current pattern from the piano
     /// roll's play-start marker (§10); song mode plays the playlist from its start and stops at its end.
     pub(crate) fn start_playback(&mut self) {
+        self.rec_held.clear();
         let p = crate::rack::play_project(&self.state);
         let song = self.state.song_mode;
         if song && p.arrangement().is_none_or(|a| a.clips.is_empty()) {
@@ -4555,6 +4586,53 @@ impl App {
 
     fn play_mode(&self) -> PlayMode {
         if self.state.song_mode { PlayMode::Song } else { PlayMode::Pattern(self.state.pattern) }
+    }
+
+    pub fn toggle_record(&mut self) {
+        self.state.recording = !self.state.recording;
+        if !self.state.recording {
+            self.finalize_recording();
+            self.state.message = Some("Live recording off".into());
+        } else {
+            self.state.message = Some("Live recording armed (press Play or Space to record notes)".into());
+        }
+        self.invalidate();
+    }
+
+    fn commit_recorded_note(&mut self, r: RecNote, length: u32) {
+        let p = match self.state.project.patterns.iter().position(|p| p.number == r.pattern) {
+            Some(i) => &mut self.state.project.patterns[i],
+            None => {
+                self.state.project.patterns.push(Pattern { number: r.pattern, ..Pattern::default() });
+                self.state.project.patterns.last_mut().expect("pushed")
+            }
+        };
+        let note = Note {
+            position: r.start_tick,
+            length: length.max(12),
+            channel: r.channel,
+            key: r.key,
+            velocity: r.velocity,
+            ..Note::step(r.channel, r.start_tick)
+        };
+        p.notes.push(note);
+        p.notes.sort_by_key(|n| n.position);
+        self.state.piano.dirty = true;
+        self.damage_win(Win::PianoRoll);
+        self.damage_win(Win::ChannelRack);
+        self.invalidate();
+    }
+
+    fn finalize_recording(&mut self) {
+        if self.rec_held.is_empty() {
+            return;
+        }
+        let now_tick = self.transport.tick().max(0.0).round() as u32;
+        let held = std::mem::take(&mut self.rec_held);
+        for r in held {
+            let len = if now_tick > r.start_tick { now_tick - r.start_tick } else { 24 };
+            self.commit_recorded_note(r, len);
+        }
     }
 
     /// Play one note of channel `channel` (Note::channel) once (also while playing or paused).
@@ -4594,6 +4672,12 @@ impl App {
             let Some(i) = self.typing_held.iter().position(|h| h.0 == code) else { return false };
             let (_, row, key) = self.typing_held.remove(i);
             self.transport.note_off(row, key);
+            let now_tick = self.transport.tick().max(0.0).round() as u32;
+            if let Some(pos) = self.rec_held.iter().position(|r| r.key == key) {
+                let r = self.rec_held.remove(pos);
+                let len = if now_tick > r.start_tick { now_tick - r.start_tick } else { 24 };
+                self.commit_recorded_note(r, len);
+            }
             self.typing_lit_changed();
             return true;
         }
@@ -4625,6 +4709,18 @@ impl App {
         let key = key as u16;
         self.transport.note_on(row, key, TYPING_VELOCITY);
         self.typing_held.push((code, row, key));
+        if self.state.recording && self.transport.playing() {
+            if let Some(ch) = self.state.project.channels.get(row).map(|c| c.index) {
+                let start_tick = self.transport.tick().max(0.0).round() as u32;
+                self.rec_held.push(RecNote {
+                    key,
+                    channel: ch,
+                    velocity: TYPING_VELOCITY,
+                    start_tick,
+                    pattern: self.state.pattern,
+                });
+            }
+        }
         self.typing_lit_changed();
         true
     }
@@ -4634,8 +4730,14 @@ impl App {
         if self.typing_held.is_empty() {
             return;
         }
+        let now_tick = self.transport.tick().max(0.0).round() as u32;
         for (_, row, key) in std::mem::take(&mut self.typing_held) {
             self.transport.note_off(row, key);
+            if let Some(pos) = self.rec_held.iter().position(|r| r.key == key) {
+                let r = self.rec_held.remove(pos);
+                let len = if now_tick > r.start_tick { now_tick - r.start_tick } else { 24 };
+                self.commit_recorded_note(r, len);
+            }
         }
         self.typing_lit_changed();
     }
@@ -4643,6 +4745,20 @@ impl App {
     /// MIDI controller notes (spec: ui/midi-input.md): note on plays the selected channel, like a typing-keyboard key;
     /// note off releases the key on the channel it started on.
     fn midi_tick(&mut self) {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.midi_last_scan).as_millis() >= 1000 {
+            self.midi_last_scan = now;
+            if self.midi.refresh() {
+                self.state.midi_inputs = self.midi.names.clone();
+                let count = self.state.midi_inputs.len();
+                self.state.message = Some(if count == 0 {
+                    "MIDI devices updated: None connected".into()
+                } else {
+                    format!("MIDI devices: {count} connected ({})", self.state.midi_inputs.join(", "))
+                });
+                self.invalidate();
+            }
+        }
         let msgs = self.midi.poll();
         if msgs.is_empty() {
             return;
@@ -4662,13 +4778,33 @@ impl App {
                         self.typing_synced = true;
                         self.transport.update(&crate::rack::play_project(&self.state));
                     }
-                    self.transport.note_on(row, u16::from(key), velocity);
+                    let key_u16 = u16::from(key);
+                    self.transport.note_on(row, key_u16, velocity);
                     self.midi_held.push((key, row));
+                    if self.state.recording && self.transport.playing() {
+                        if let Some(ch) = self.state.project.channels.get(row).map(|c| c.index) {
+                            let start_tick = self.transport.tick().max(0.0).round() as u32;
+                            self.rec_held.push(RecNote {
+                                key: key_u16,
+                                channel: ch,
+                                velocity,
+                                start_tick,
+                                pattern: self.state.pattern,
+                            });
+                        }
+                    }
                 }
                 crate::midi_in::Msg::Off(key) => {
+                    let key_u16 = u16::from(key);
+                    let now_tick = self.transport.tick().max(0.0).round() as u32;
+                    if let Some(pos) = self.rec_held.iter().position(|r| r.key == key_u16) {
+                        let r = self.rec_held.remove(pos);
+                        let len = if now_tick > r.start_tick { now_tick - r.start_tick } else { 24 };
+                        self.commit_recorded_note(r, len);
+                    }
                     while let Some(i) = self.midi_held.iter().position(|h| h.0 == key) {
                         let (_, row) = self.midi_held.remove(i);
-                        self.transport.note_off(row, u16::from(key));
+                        self.transport.note_off(row, key_u16);
                     }
                 }
             }
@@ -5030,6 +5166,7 @@ impl App {
                 }
             }
             Action::Typing => self.toggle_typing(),
+            Action::Record => self.toggle_record(),
             Action::Metronome => self.toggle_metronome(),
             Action::AutoScroll => self.toggle_autoscroll(),
             Action::EnableGroups => self.toggle_groups(),
@@ -5067,6 +5204,7 @@ impl App {
                 }
             }
             Action::Stop => {
+                self.finalize_recording();
                 self.perf_transport();
                 self.transport.stop();
             }
@@ -5077,6 +5215,7 @@ impl App {
                 // so the playheads always show what is heard.
                 if changed && self.transport.playing() {
                     let was_playing = !self.transport.paused();
+                    self.finalize_recording();
                     self.transport.stop();
                     if was_playing {
                         self.start_playback();
@@ -10055,5 +10194,72 @@ mod tests {
         assert_eq!(crate::metronome::on(), !initial);
         app.act(Action::Metronome);
         assert_eq!(crate::metronome::on(), initial);
+    }
+
+    #[test]
+    fn record_toggle_and_action() {
+        let mut app = App::new(None);
+        assert!(!app.state.recording);
+        app.act(Action::Record);
+        assert!(app.state.recording);
+        assert_eq!(app.state.message.as_deref(), Some("Live recording armed (press Play or Space to record notes)"));
+        app.act(Action::Record);
+        assert!(!app.state.recording);
+        assert_eq!(app.state.message.as_deref(), Some("Live recording off"));
+    }
+
+    #[test]
+    fn record_key_r_shortcut() {
+        let mut app = App::new(None);
+        app.state.toggles.retain(|t| *t != "typing");
+        assert!(!app.state.recording);
+        app.key(&winit::keyboard::Key::Character("r".into()), false, false);
+        assert!(app.state.recording);
+        app.key(&winit::keyboard::Key::Character("R".into()), false, false);
+        assert!(!app.state.recording);
+    }
+
+    #[test]
+    fn commit_recorded_note_into_pattern() {
+        let mut app = App::new(None);
+        assert!(app.state.project.patterns[0].notes.is_empty());
+        let rec = RecNote {
+            key: 60,
+            channel: 0,
+            velocity: 110,
+            start_tick: 96,
+            pattern: 1,
+        };
+        app.commit_recorded_note(rec, 48);
+        assert_eq!(app.state.project.patterns[0].notes.len(), 1);
+        let note = &app.state.project.patterns[0].notes[0];
+        assert_eq!(note.key, 60);
+        assert_eq!(note.position, 96);
+        assert_eq!(note.length, 48);
+        assert_eq!(note.velocity, 110);
+    }
+
+    #[test]
+    fn finalize_recording_drains_held_notes() {
+        let mut app = App::new(None);
+        app.state.recording = true;
+        app.rec_held.push(RecNote {
+            key: 64,
+            channel: 0,
+            velocity: 95,
+            start_tick: 0,
+            pattern: 1,
+        });
+        app.finalize_recording();
+        assert!(app.rec_held.is_empty());
+        assert_eq!(app.state.project.patterns[0].notes.len(), 1);
+        assert_eq!(app.state.project.patterns[0].notes[0].key, 64);
+    }
+
+    #[test]
+    fn midi_refresh_device_list_action() {
+        let mut app = App::new(None);
+        app.act(Action::Settings(views::settings::SAct::Button("Refresh device list")));
+        assert!(app.state.message.is_some());
     }
 }

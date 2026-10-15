@@ -153,16 +153,29 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
             icons::draw(ui.c, icon, g, c);
         }
     }
-    // Record: not available yet, so drawn greyed out (no hover, no press).
+    // Record: live performance recording.
     let rec = Rect::span(486.0, 513.0, 7.0, 33.0);
-    ui.off(rec, "Recording");
-    if lemon {
-        os_ui::kit::button(ui.c, t, Rect::new(rec.cx() - 14.0, rec.cy() - 14.0, 28.0, 28.0), os_ui::kit::State::NORMAL.with_disabled(true));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.mix(t.toolbar, 0.6));
+    let rec_on = s.recording;
+    let hov = ui.hit(rec, Action::Record, "Record (R) - toggle live note recording");
+    let dot_c = if rec_on {
+        t.record
+    } else if hov {
+        t.record.mix(t.button, 0.9)
+    } else if lemon {
+        t.record.mix(t.toolbar, 0.6)
     } else {
-        ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, t.toolbar_line.shade(-0.25));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, t.button.shade(-0.12));
-        ui.c.fill_circle(rec.cx(), rec.cy(), 5.6, t.record.mix(t.button, 0.7).shade(-0.15));
+        t.record.mix(t.button, 0.7).shade(-0.15)
+    };
+    if lemon {
+        let st = os_ui::kit::State::hover(hov).with_on(rec_on);
+        os_ui::kit::button(ui.c, t, Rect::new(rec.cx() - 14.0, rec.cy() - 14.0, 28.0, 28.0), st);
+        ui.c.fill_circle(rec.cx(), rec.cy(), if rec_on { 6.5 } else { 5.6 }, dot_c);
+    } else {
+        let ring = if rec_on { t.toolbar_line.shade(0.3) } else { t.toolbar_line.shade(-0.25) };
+        let face = if rec_on { t.button.shade(0.2) } else { t.button.shade(-0.12) };
+        ui.c.fill_circle(rec.cx(), rec.cy(), 14.0, ring);
+        ui.c.fill_circle(rec.cx(), rec.cy(), 12.6, face);
+        ui.c.fill_circle(rec.cx(), rec.cy(), if rec_on { 6.5 } else { 5.6 }, dot_c);
     }
     // Tempo.
     let tb = Rect::span(517.0, 570.0, 6.0, 34.0);

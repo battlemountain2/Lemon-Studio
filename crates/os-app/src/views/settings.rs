@@ -132,6 +132,7 @@ pub const LIVE: &[&str] = &[
     "Add folder...",
     "Find new plugins",
     "Rescan all",
+    "Refresh device list",
     "Load theme...",
     "Reset",
 ];
