@@ -141,8 +141,10 @@ fn live(key: &str) -> bool {
     LIVE.contains(&key)
 }
 
-/// The combos that work (Audio page: they open a menu of choices, `App::audio_menu`).
-pub const LIVE_COMBOS: [&str; 3] = [OUTPUT_DEVICE, SAMPLE_RATE, BUFFER_LENGTH];
+/// The combos that work (they open a menu of choices, `App::audio_menu`).
+pub const LIVE_COMBOS: [&str; 4] = [OUTPUT_DEVICE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS];
+/// General ▸ Display: "Entertain me" simulates the mixer's cables, "Off" hangs them still (crate::cable).
+pub const ANIMATIONS: &str = "Animations";
 pub const OUTPUT_DEVICE: &str = "Output device";
 pub const SAMPLE_RATE: &str = "Sample rate (Hz)";
 pub const BUFFER_LENGTH: &str = "Buffer length";
@@ -338,7 +340,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 combo("Main", 64.0, "Pop-ups scaling"),
                 combo("Main", 64.0, "Toolbars scaling"),
                 combo("Off", 64.0, "Transparent windows"),
-                combo("Entertain me", 126.0, "Animations"),
+                combo(if s.cables.borrow().still_cables { "Off" } else { "Entertain me" }, 126.0, ANIMATIONS),
                 Slider("Smoothing", 0.2),
                 combo("Ultrasmooth", 126.0, "Animation refresh rate"),
                 Check2("Force refreshes", true, "Transparent menus", true),
@@ -830,7 +832,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
             check(ui, a, *da, g.x + 22.0, cy, live(a));
             check(ui, b, *db, g.x + 324.0, cy, live(b));
         }
-        // The Audio page's device, rate and buffer combos open their menus.
+        // The Audio page's device, rate and buffer combos and General's Animations open their menus.
         Row::Combo(v, w, label) if LIVE_COMBOS.contains(label) => {
             let b = Rect::new(x0, y + 3.0, *w, 21.0);
             let hov = ui.hit(b, Action::Settings(SAct::Combo(label, b.x, b.bottom())), "");
@@ -1041,7 +1043,7 @@ fn folders(ui: &mut Ui, list: &[(String, &'static str, bool, bool)], b: Rect) {
     }
 }
 
-/// The preferred format switch (spec: ui/plugin-manager.md §3): VST3, CLAP, VST2 (greyed: not hosted yet).
+/// The preferred format switch (spec: ui/plugin-manager.md §3): VST3, CLAP, VST2.
 fn prefer(ui: &mut Ui, cur: Prefer, x0: f32, y: f32, ty: f32) {
     let t = ui.t;
     let f = LABEL;
@@ -1050,12 +1052,8 @@ fn prefer(ui: &mut Ui, cur: Prefer, x0: f32, y: f32, ty: f32) {
     let mut x = x0 + lw + 12.0;
     for p in [Prefer::Vst3, Prefer::Clap, Prefer::Vst2] {
         let b = Rect::new(x, y + 3.0, 54.0, 21.0);
-        let enabled = p != Prefer::Vst2;
         let on = p == cur;
-        let hov = enabled && ui.hit(b, Action::Settings(SAct::Plug(Plug::Prefer(p))), "Listed when a plugin is found in several formats");
-        if !enabled {
-            ui.off(b, "VST2 hosting");
-        }
+        let hov = ui.hit(b, Action::Settings(SAct::Plug(Plug::Prefer(p))), "Listed when a plugin is found in several formats");
         let ink = if lemon {
             if on {
                 lk::lit(ui.c, b, lk::r_btn(t), hov);
@@ -1072,9 +1070,6 @@ fn prefer(ui: &mut Ui, cur: Prefer, x0: f32, y: f32, ty: f32) {
             if hov { t.glyph } else { t.text }
         };
         ui.c.text_center(Font::new(13), b, ink, p.label());
-        if !enabled {
-            grey(ui, b);
-        }
         x += 58.0;
     }
 }
@@ -1139,7 +1134,8 @@ fn table(ui: &mut Ui, s: &State, area: Rect) {
             led(ui, shr.cx(), shr.cy(), row.shown, hov);
         }
         let col = if row.dim || !row.shown { t.text_dim } else { t.text };
-        let failed = !row.toggles && !row.status.is_empty() && row.status != "ok";
+        // A plugin this program cannot load is listed dimmed, not as an error.
+        let failed = !row.toggles && !row.status.is_empty() && row.status != "ok" && row.status != db::Status::Unsupported.text();
         let cells: [(&str, Color); 6] = [
             (&row.name, col),
             (row.format, col),

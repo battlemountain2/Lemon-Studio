@@ -12,8 +12,8 @@
 //! When the main window is a native Wayland one (no X server to put it on) an X11 window cannot be its child: frames are
 //! always top-level, and since they cannot be owned by it either, they are kept above other windows while Lemon Studio is
 //! the active application (the main window has the focus, or a frame is the active window) and stacked normally
-//! otherwise (`main_focused`). While a blocking dialog is open they step back (`unpinned`): the app waits for its answer
-//! and cannot follow the focus, so a frame kept above would hide the dialog.
+//! otherwise (`main_focused`). While a dialog is open in the main window (ui/dialogs.md) they step back (`unpinned`): a
+//! frame kept above would hide the dialog.
 //!
 //! One connection serves every frame (each plugin opens its own for its editor). The app reads its events on the UI tick
 //! (`pump`) and repaints what changed after handling them (`paint_dirty`). Frames answer the window manager's pings
@@ -90,7 +90,7 @@ thread_local! {
     static CONN: RefCell<Option<Rc<Conn>>> = const { RefCell::new(None) };
     /// The main window has the keyboard focus (`main_focused`), known before the connection opens.
     static MAIN_FOCUSED: Cell<bool> = const { Cell::new(true) };
-    /// Blocking dialogs open now (`unpinned`): the frames are not kept above while there is one.
+    /// Dialogs open now (`unpinned`): the frames are not kept above while there is one.
     static MODAL: Cell<u32> = const { Cell::new(0) };
     /// A docked frame moved, shrank or went: part of the main window was uncovered (`take_exposed`).
     static EXPOSED: Cell<bool> = const { Cell::new(false) };
@@ -651,7 +651,10 @@ impl Frame {
                 };
                 self.reply(r, (e.root_x, e.root_y));
             }
-            Event::ButtonRelease(e) if e.detail == 1 => self.state.borrow_mut().release(),
+            Event::ButtonRelease(e) if e.detail == 1 => {
+                let r = self.state.borrow_mut().left_up(f32::from(e.event_x) / k, f32::from(e.event_y) / k);
+                self.reply(r, (e.root_x, e.root_y));
+            }
             Event::MotionNotify(e) if self.state.borrow().moving.is_some() => {
                 let Some((cx, cy, wx, wy)) = self.state.borrow().moving else { return };
                 let at = (wx + i32::from(e.root_x) - cx, wy + i32::from(e.root_y) - cy);
@@ -905,7 +908,7 @@ pub fn main_focused(focused: bool) {
 /// While held, the frames are not kept above other windows (see the module notes).
 pub struct Unpinned(());
 
-/// A blocking dialog opens (the app waits for it on the UI thread): the frames step back until the guard drops.
+/// A dialog opens in the main window: the frames step back until the guard drops.
 pub fn unpinned() -> Unpinned {
     MODAL.with(|m| m.set(m.get() + 1));
     if let Some(conn) = CONN.with(|c| c.borrow().clone()) {
@@ -923,7 +926,7 @@ impl Drop for Unpinned {
     }
 }
 
-/// Keeps the frames above other windows while Lemon Studio is the active application and no blocking dialog is open, and
+/// Keeps the frames above other windows while Lemon Studio is the active application and no dialog is open, and
 /// only then.
 fn keep_above(conn: &Conn) {
     let want = conn.owner.get() == 0 && MODAL.with(Cell::get) == 0 && (MAIN_FOCUSED.with(Cell::get) || conn.frame_active.get());

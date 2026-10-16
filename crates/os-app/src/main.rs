@@ -18,8 +18,10 @@ mod audio_bench;
 #[cfg(test)]
 mod render_check;
 mod browser;
+mod cable;
 mod cpu;
 mod dialog;
+mod filedlg;
 mod enable_groups;
 mod icons;
 mod knobs;
@@ -37,6 +39,7 @@ mod osc3;
 mod monitor;
 mod params;
 mod piano;
+mod piano_snap;
 mod piano_split;
 mod piano_tools;
 mod rack;
@@ -54,10 +57,12 @@ mod project_plugins;
 mod presets;
 mod misc;
 mod misc_page;
+mod snap;
 mod song_pos;
 mod stall;
 mod tapper;
 mod transport;
+mod typein;
 mod views;
 
 use std::num::NonZeroU32;
@@ -104,6 +109,9 @@ struct Shell {
     /// When the last frame was painted (finished presenting), and when its paint started.
     painted: Instant,
     frame_start: Instant,
+    /// Shortest time from one frame's start to the next, from the refresh rate of `frame_monitor` (see `frame_interval`).
+    frame: Duration,
+    frame_monitor: Option<winit::monitor::MonitorHandle>,
     /// `OS_FRAMES=<file>`: one line per frame (see `FrameLog`).
     frames: Option<FrameLog>,
     /// Wakes the app while a modal loop holds up winit's (see `stall`).
@@ -141,9 +149,19 @@ impl FrameLog {
     }
 }
 
-/// Shortest time from one frame's start to the next asked for by ticks and mouse input (a drag moves the mouse
-/// hundreds of times a second): about 60 frames a second.
+/// Longest frame interval: frames asked for by ticks and mouse input (a drag moves the mouse hundreds of times a second)
+/// come at least about 60 times a second, and at the monitor's rate on a faster one (`frame_interval`).
 const FRAME: Duration = Duration::from_millis(16);
+
+/// Shortest time from one frame's start to the next on a monitor refreshing at `mhz` millihertz: a little under one
+/// refresh, as the timer wakes a little late. A window dragged at 60 frames a second trails the cursor on a faster
+/// screen (the cursor moves at the screen's rate), and paints during a drag are short (about a millisecond).
+fn frame_interval(mhz: Option<u32>) -> Duration {
+    match mhz.filter(|&m| m > 0) {
+        Some(m) => Duration::from_secs_f64(960.0 / f64::from(m)).clamp(IDLE, FRAME),
+        None => FRAME,
+    }
+}
 
 /// Shortest idle time after a frame. Windows hands out a window's WM_PAINT ahead of its child windows' and ahead of
 /// every WM_TIMER, so a main window that always has a frame pending starves the plugin windows (docked children and
@@ -390,11 +408,24 @@ impl Shell {
         let ms = if self.app.animating() { 16 } else { 100 };
         let now = Instant::now();
         let mut wake = now + Duration::from_millis(ms);
-        // macOS: Quit from the menu bar or the Dock asks about unsaved changes as closing the window does.
+        // Unsaved changes were answered (or there were none): the window closes.
+        if self.app.want_exit {
+            el.exit();
+        }
+        // macOS: Quit from the menu bar or the Dock asks about unsaved changes as closing the window does; AppKit waits
+        // for the answer. A Quit while a dialog is open is turned down (the dialog is answered first).
         #[cfg(target_os = "macos")]
         {
             if macos::take_quit() {
-                macos::answer_quit(self.app.confirm_discard("closing"));
+                if self.app.modal_open() {
+                    macos::answer_quit(false);
+                } else {
+                    self.app.ask_discard("closing", crate::dialog::Next::Quit);
+                    self.pending = true;
+                }
+            }
+            if let Some(quit) = self.app.quit_answer.take() {
+                macos::answer_quit(quit);
             }
             // A project double-clicked in the Finder opens as a dropped one would.
             for path in macos::take_opened() {
@@ -428,7 +459,7 @@ impl Shell {
         // winit stops dispatching after each frame and comes back here: asking for the next frame at once would keep
         // our WM_PAINT pending forever while playing, and the plugin windows would never paint (see `FRAME`).
         if self.pending {
-            let next = (self.frame_start + FRAME).max(self.painted + IDLE);
+            let next = (self.frame_start + self.frame).max(self.painted + IDLE);
             if now >= next {
                 self.pending = false;
                 if let Some(w) = &self.window {
@@ -608,10 +639,15 @@ impl ApplicationHandler for Shell {
             e => e,
         };
         match event {
+            // While a dialog is open the window stays (the dialog is answered first).
             WindowEvent::CloseRequested => {
-                if self.app.confirm_discard("closing") {
+                if !self.app.modal_open() {
+                    self.app.ask_discard("closing", crate::dialog::Next::Close);
+                }
+                if self.app.want_exit {
                     el.exit();
                 }
+                window.request_redraw();
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.mods = m.state();
@@ -750,7 +786,8 @@ impl ApplicationHandler for Shell {
                         return;
                     }
                 }
-                if pressed && !event.repeat {
+                // A dialog takes repeats too (typing, moving through its list).
+                if pressed && (!event.repeat || self.app.modal_open()) {
                     // macOS: Option and Command change the character a key types (Option+S is "ß"); shortcuts go by the
                     // key itself.
                     #[cfg(target_os = "macos")]
@@ -835,6 +872,12 @@ impl ApplicationHandler for Shell {
                 if canvas.pixmap.width() != cw || canvas.pixmap.height() != ch || canvas.scale != scale {
                     canvas.resize(cw, ch, scale);
                     self.app.invalidate();
+                }
+                // The window may have reached a monitor with another refresh rate.
+                let monitor = window.current_monitor();
+                if monitor != self.frame_monitor {
+                    self.frame = frame_interval(monitor.as_ref().and_then(|m| m.refresh_rate_millihertz()));
+                    self.frame_monitor = monitor;
                 }
                 // Paint only what changed, then present only that region.
                 let damage = self.app.take_damage();
@@ -940,8 +983,13 @@ impl ApplicationHandler for Shell {
                 }
                 if self.app.want_close {
                     self.app.want_close = false;
-                    if self.app.confirm_discard("closing") {
+                    if !self.app.modal_open() {
+                        self.app.ask_discard("closing", crate::dialog::Next::Close);
+                    }
+                    if self.app.want_exit {
                         el.exit();
+                    } else {
+                        window.request_redraw();
                     }
                 }
             }
@@ -1305,6 +1353,11 @@ fn main() {
     if args.first().map(String::as_str) == Some(os_native::check::CHECK_ARG) {
         os_host::guard::exit(os_native::check::run(&args[1..]));
     }
+    // Plugin editors in real plugin windows, checked from the main thread (`plugins::window_check`).
+    #[cfg(target_os = "macos")]
+    if args.first().map(String::as_str) == Some("--plugin-window-check") {
+        std::process::exit(plugins::window_check::run(&args[1..]));
+    }
     app::move_old_settings();
     if args.iter().any(|a| a == "--screenshot") {
         screenshot(&args);
@@ -1357,6 +1410,8 @@ fn main() {
         pending: false,
         painted: Instant::now(),
         frame_start: Instant::now(),
+        frame: FRAME,
+        frame_monitor: None,
         frames: FrameLog::open(),
         watchdog,
         ctrl_click: false,
@@ -1370,4 +1425,21 @@ fn main() {
     // The app's plugin instances are destroyed here, on this (UI) thread, as far as the engine has let go of them.
     drop(shell);
     plugins::sweep_retired();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Frames come a little under one refresh apart: never further apart than `FRAME`, never closer than `IDLE`.
+    #[test]
+    fn frame_interval_follows_the_refresh_rate() {
+        let ms = |mhz| frame_interval(mhz).as_secs_f64() * 1000.0;
+        assert!((ms(Some(60_000)) - 16.0).abs() < 1e-6);
+        assert!((ms(Some(180_000)) - 5.333).abs() < 1e-3, "180 Hz: {}", ms(Some(180_000)));
+        assert_eq!(frame_interval(Some(30_000)), FRAME);
+        assert_eq!(frame_interval(Some(1_000_000)), IDLE);
+        assert_eq!(frame_interval(None), FRAME);
+        assert_eq!(frame_interval(Some(0)), FRAME);
+    }
 }

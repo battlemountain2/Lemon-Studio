@@ -37,7 +37,7 @@ mod x11;
 #[cfg(target_os = "linux")]
 pub use x11::{
     busy, default_position, exposed, focus_main, lift_hide, lift_show, main_focused, paint_dirty, pointer, pump, screen_to_main, stack, take_exposed, take_lift_input, unpinned,
-    FrameWindow,
+    FrameWindow, Unpinned,
 };
 
 #[cfg(target_os = "macos")]
@@ -224,6 +224,9 @@ struct State {
     /// Title-bar move in progress: cursor and window position (screen px) at the press. Done by hand: the system's
     /// move loop (HTCAPTION) blocks the UI thread, which would freeze all drawing while a window moves.
     moving: Option<(i32, i32, i32, i32)>,
+    /// A title-bar button (close, minimize) pressed and not released yet: it acts on the release over it (owner,
+    /// 2026-10-15: acting on the press made accidental closes easy).
+    armed: Option<Part>,
     /// A top-level window (menu arrow > Detached) instead of a child of the main window (always when the main window is
     /// a native Wayland one).
     detached: bool,
@@ -251,6 +254,7 @@ impl State {
             events: Vec::new(),
             drag: None,
             moving: None,
+            armed: None,
             detached,
             clip: None,
             clip_key: None,
@@ -648,11 +652,11 @@ impl State {
             _ => {}
         }
         match part {
-            Some(Part::Close) => {
-                self.events.push(FrameEvent::Close);
-                Reply::Repaint
+            // Close and minimize only arm on the press; the release over the same button acts (`left_up`).
+            Some(Part::Close | Part::Minimize) => {
+                self.armed = part;
+                Reply::Capture
             }
-            Some(Part::Minimize) => Reply::Minimize,
             Some(Part::Gear) => {
                 self.strip = !self.strip;
                 if !self.strip {
@@ -725,6 +729,19 @@ impl State {
                 }
                 return Reply::None;
             }
+            if let Some(old) = self.misc_ui.held {
+                // Dragging along the keyboard lets go of the held key and sounds each key entered.
+                match misc_hit(self, x, y) {
+                    Some(crate::misc_page::Hit::Key(k)) if k != old => {
+                        self.misc_ui.held = Some(k);
+                        self.events.push(FrameEvent::Note(old, 0, false));
+                        self.events.push(FrameEvent::Note(k, 100, true));
+                        os_clap::wake();
+                        return Reply::Repaint;
+                    }
+                    _ => return Reply::None,
+                }
+            }
             if self.drag.is_none() && self.moving.is_none() {
                 let h = misc_hit(self, x, y);
                 if h != self.misc_ui.hover {
@@ -750,8 +767,27 @@ impl State {
         if hover { Reply::Repaint } else { Reply::None }
     }
 
-    /// The button was released (or the mouse lost otherwise): drags end, a held Misc key is let go.
+    /// The left button was released at (x, y): an armed title-bar button acts if the mouse is still over it, then
+    /// everything a release ends ends (`release`).
+    fn left_up(&mut self, x: f32, y: f32) -> Reply {
+        let armed = self.armed.take();
+        let over = armed.is_some() && part_at(self, x, y) == armed;
+        self.release();
+        match armed {
+            Some(Part::Close) if over => {
+                self.events.push(FrameEvent::Close);
+                Reply::Repaint
+            }
+            Some(Part::Minimize) if over => Reply::Minimize,
+            Some(_) => Reply::Repaint,
+            None => Reply::None,
+        }
+    }
+
+    /// The button was released (or the mouse lost otherwise): drags end, a held Misc key is let go, an armed title-bar
+    /// button is let go without acting.
     fn release(&mut self) {
+        self.armed = None;
         self.drag = None;
         self.moving = None;
         self.misc_ui.drag = None;
@@ -789,13 +825,8 @@ impl State {
         use crate::misc_page::{self as mp, Hit, M};
         let h = misc_hit(self, x, y)?;
         let vals = self.info.misc?;
-        // Greyed-out controls (and setting the root note from a key where it does nothing) only say so.
-        let off = match (b, h) {
-            (Btn::Right, Hit::Key(_)) if !vals.tuned => Some("Root note"),
-            (Btn::Right, Hit::Key(_)) => None,
-            _ => mp::off_name(h, &vals),
-        };
-        if let Some(name) = off {
+        // Greyed-out controls only say so.
+        if let Some(name) = mp::off_name(h, &vals) {
             if b != Btn::Middle {
                 self.events.push(FrameEvent::NotAvailable(name));
                 os_clap::wake();
@@ -930,6 +961,27 @@ mod tests {
         assert_eq!(at(438.0, 15.0), Some(Part::PresetNext));
         assert_eq!(at(460.0, 15.0), Some(Part::Minimize));
         assert_eq!(at(479.0, 15.0), Some(Part::Close));
+
+        // Close and minimize act on the release over them, not on the press; sliding off, or losing the mouse,
+        // cancels.
+        let mut st = state(true, "Master");
+        let screen = |_: f32, _: f32| (0, 0);
+        let closes = |st: &State| st.events.iter().filter(|e| matches!(e, FrameEvent::Close)).count();
+        assert_eq!(st.left_down(479.0, 15.0, false, &screen), Reply::Capture);
+        assert_eq!(closes(&st), 0, "the press does not close");
+        assert_eq!(st.left_up(200.0, 15.0), Reply::Repaint);
+        assert_eq!(closes(&st), 0, "released off the button");
+        st.left_down(479.0, 15.0, false, &screen);
+        st.release();
+        assert_eq!(st.left_up(479.0, 15.0), Reply::None, "the mouse was lost first");
+        st.left_down(479.0, 15.0, false, &screen);
+        assert_eq!(st.left_up(479.0, 15.0), Reply::Repaint);
+        assert_eq!(closes(&st), 1);
+        st.left_down(460.0, 15.0, false, &screen);
+        assert_eq!(st.left_up(479.0, 15.0), Reply::Repaint, "pressed on minimize, released on close: nothing");
+        assert_eq!(closes(&st), 1);
+        st.left_down(460.0, 15.0, false, &screen);
+        assert_eq!(st.left_up(460.0, 15.0), Reply::Minimize);
         assert_eq!(at(200.0, 15.0), Some(Part::Caption));
         assert_eq!(at(29.0, 50.0), Some(Part::Tab(0)));
         assert_eq!(at(74.0, 50.0), Some(Part::Tab(1)));
@@ -941,11 +993,11 @@ mod tests {
     fn frame_shots() {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
-        let misc = |tuned: bool| {
+        let misc = |sampler: bool| {
             let mut st = state(true, "Insert 1");
             st.misc = true;
             st.editor = (crate::misc_page::PAGE_W, crate::misc_page::PAGE_H);
-            st.info.misc = Some(crate::misc_page::MiscVals { tuned, ..Default::default() });
+            st.info.misc = Some(crate::misc_page::MiscVals { sampler, ..Default::default() });
             st
         };
         let effect = || {
@@ -965,6 +1017,15 @@ mod tests {
             paint(&mut c, &st);
             c.pixmap.save_png(dir.join(name)).unwrap();
         }
+        // The Misc page again in the Lemon design.
+        os_theme::set_current(&os_theme::design::palette(os_theme::Design::Lemon, None));
+        for (name, st) in [("frame_misc_lemon.png", misc(true)), ("frame_misc_plugin_lemon.png", misc(false))] {
+            let (w, h) = st.size();
+            let mut c = Canvas::new(w as u32, h as u32, 1.0).unwrap();
+            paint(&mut c, &st);
+            c.pixmap.save_png(dir.join(name)).unwrap();
+        }
+        os_theme::set_current(&os_theme::Palette::default());
     }
 
     /// Strip controls that do nothing yet are greyed out: RANGE / TRACK, and ON / PAN / VOL / PITCH of an effect.
@@ -983,5 +1044,28 @@ mod tests {
         fx.info.misc = None;
         assert_eq!(part_at(&fx, 383.0 + dx, 47.0), Some(Part::Off("Panning")));
         assert_eq!(part_at(&fx, 349.0 + dx, 47.0), Some(Part::Off("Effect on / off")));
+    }
+
+    /// A Misc keyboard key sounds while the button is held: sliding to the next key lets go of it and sounds that one,
+    /// the release lets go of the last.
+    #[test]
+    fn misc_keys_sound_while_held() {
+        use crate::misc_page::Hit;
+        let mut st = state(true, "Insert 1");
+        st.misc = true;
+        st.editor = (crate::misc_page::PAGE_W, crate::misc_page::PAGE_H);
+        let (w, h) = st.size();
+        let find = |st: &State, k: u8| {
+            (0..w as i32).flat_map(|x| (0..h as i32).map(move |y| (x as f32, y as f32))).find(|&(x, y)| misc_hit(st, x, y) == Some(Hit::Key(k))).unwrap()
+        };
+        let (c, cs) = (find(&st, 60), find(&st, 61));
+        let screen = |_: f32, _: f32| (0, 0);
+        assert_eq!(st.left_down(c.0, c.1, false, &screen), Reply::Capture);
+        assert_eq!(st.motion(c.0, c.1, false), Reply::None, "the held key keeps sounding");
+        assert_eq!(st.motion(cs.0, cs.1, false), Reply::Repaint);
+        st.release();
+        let notes: Vec<(u8, bool)> = st.events.iter().filter_map(|e| if let FrameEvent::Note(k, _, on) = e { Some((*k, *on)) } else { None }).collect();
+        assert_eq!(notes, [(60, true), (60, false), (61, true), (61, false)]);
+        assert_eq!(st.misc_ui.held, None);
     }
 }

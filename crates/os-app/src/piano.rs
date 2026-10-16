@@ -74,6 +74,9 @@ pub struct PianoState {
     pub px_per_beat: f32,
     /// Length of the last note added, moved or resized; 0 = not yet (§8: first note is PPQ/2).
     pub last_len: u32,
+    /// The last note clicked or edited in the event panel: new notes take its controls (velocity, pan, release, cutoff,
+    /// resonance, fine pitch, repeat, colour), as FL does; `None` = the defaults.
+    pub last_controls: Option<Note>,
     /// The project changed since the playing engine last got it (notes, steps, mixer, channel
     /// settings, tempo); `App::tick` sends it to the transport.
     pub dirty: bool,
@@ -106,6 +109,8 @@ pub struct PianoState {
     pub split: crate::piano_split::Split,
     /// Last press on the splitter, for its double click.
     pub split_click: Option<std::time::Instant>,
+    /// The magnet button's setting (spec: ui/piano-snap.md): a program setting, kept in the user folder (crate::snap).
+    pub snap: crate::snap::EditorSnap,
     sel: Vec<usize>,
     sel_key: (u16, u16),
     undo: Vec<(u16, Vec<Note>, Vec<ControlPoint>)>,
@@ -118,6 +123,7 @@ impl Default for PianoState {
             scroll_y: ((TOP_KEY - 72) as f32) * ROW,
             px_per_beat: 96.0,
             last_len: 0,
+            last_controls: None,
             dirty: false,
             held: None,
             typed: Vec::new(),
@@ -134,6 +140,7 @@ impl Default for PianoState {
             rng: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1,
             split: crate::piano_split::load(),
             split_click: None,
+            snap: crate::snap::EditorSnap::default(),
             sel: Vec::new(),
             sel_key: (0, 0),
             undo: Vec::new(),
@@ -163,7 +170,7 @@ impl PianoState {
 
     /// Forget everything tied to the previous project.
     pub fn reset(&mut self) {
-        *self = PianoState { px_per_beat: self.px_per_beat, row_h: self.row_h, ghosts: self.ghosts, tool: self.tool, rng: self.rng, split: self.split, ..PianoState::default() };
+        *self = PianoState { px_per_beat: self.px_per_beat, row_h: self.row_h, ghosts: self.ghosts, tool: self.tool, rng: self.rng, split: self.split, snap: self.snap, ..PianoState::default() };
     }
 }
 
@@ -229,17 +236,6 @@ impl Geom {
         let x = self.x_of(n.position as f32);
         let w = (len as f32 * self.ppt).max(3.0);
         Some(Rect::new(x, self.y_of(key) - 1.0, w, self.row + 1.0))
-    }
-
-    /// Snap a tick down to the step grid.
-    pub fn snap_down(&self, tick: f32) -> u32 {
-        let t = tick.max(0.0) as u32;
-        t - t % self.step
-    }
-
-    /// Snap a tick delta to the nearest step.
-    pub fn snap_delta(&self, dt: f32) -> i64 {
-        (dt / self.step as f32).round() as i64 * i64::from(self.step)
     }
 }
 
@@ -516,10 +512,25 @@ pub fn undo(s: &mut State) -> bool {
 pub fn add_note(s: &mut State, channel: u16, tick: u32, key: i32) -> usize {
     let ppq = u32::from(s.project.ppq.max(4));
     let length = if s.piano.last_len > 0 { s.piano.last_len } else { ppq / 2 };
-    let note = Note { length, key: key.clamp(0, TOP_KEY) as u16, ..Note::step(channel, tick) };
+    let mut note = Note { length, key: key.clamp(0, TOP_KEY) as u16, ..Note::step(channel, tick) };
+    if let Some(t) = s.piano.last_controls {
+        copy_controls(&t, &mut note);
+    }
     let p = pattern_mut(s);
     p.notes.push(note);
     p.notes.len() - 1
+}
+
+/// The controls a new note takes from the last one touched; never its place, length, key or mute.
+pub fn copy_controls(from: &Note, to: &mut Note) {
+    to.velocity = from.velocity;
+    to.pan = from.pan;
+    to.release = from.release;
+    to.mod_x = from.mod_x;
+    to.mod_y = from.mod_y;
+    to.fine_pitch = from.fine_pitch;
+    to.repeat = from.repeat;
+    to.group = (to.group & Note::MUTED) | (from.group & !Note::MUTED);
 }
 
 /// Delete notes by index.
@@ -706,6 +717,18 @@ pub fn zoom_time(s: &mut State, g: &Geom, x: f32, notches: f32) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn new_notes_copy_controls_not_place_or_mute() {
+        use super::*;
+        let mut from = Note { velocity: 33, pan: 10, release: 90, mod_x: 200, mod_y: 7, fine_pitch: 130, repeat: 3, group: 0x05, ..Note::step(0, 480) };
+        from.group |= Note::MUTED;
+        let mut to = Note { length: 48, key: 72, ..Note::step(1, 96) };
+        copy_controls(&from, &mut to);
+        assert_eq!((to.velocity, to.pan, to.release, to.mod_x, to.mod_y, to.fine_pitch, to.repeat), (33, 10, 90, 200, 7, 130, 3));
+        assert_eq!(to.group, 0x05, "the colour comes along, the mute does not");
+        assert_eq!((to.position, to.length, to.key, to.channel), (96, 48, 72, 1));
+    }
+
+    #[test]
     fn lanes_map_values_and_centres() {
         let panel = Rect::new(0.0, 100.0, 10.0, 200.0);
         for lane in Lane::ALL.iter().copied().take(Lane::NOTE_LANES) {
@@ -842,7 +865,7 @@ mod tests {
             let y = g.y_of(key) + 8.0;
             assert_eq!(g.key_at(y), key);
         }
-        assert_eq!(g.snap_down(g.tick_at(g.x_of(100.0))), 96);
+        assert_eq!(crate::piano_snap::place(&a.state, &g, g.tick_at(g.x_of(100.0)), false), 96);
         assert_eq!(key_name_check(60), "C5");
     }
 

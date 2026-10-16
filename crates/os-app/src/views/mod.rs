@@ -8,7 +8,9 @@
 // spec: ui/main-window.md
 
 pub mod browser;
+pub mod cabledebug;
 pub mod channel_win;
+pub mod dialog;
 pub mod menus;
 pub mod mondebug;
 pub mod settings;
@@ -20,6 +22,7 @@ pub mod playlist;
 pub mod rack;
 pub mod tapper;
 pub mod toolbar;
+pub mod typein;
 
 use std::borrow::Cow;
 
@@ -104,7 +107,14 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         ui.c.push_clip(a);
         match win {
             Win::Playlist => ui.part(Seg::Win(win), a, |ui| playlist::paint(ui, s, r, f)),
-            Win::Mixer => ui.part(Seg::Win(win), a, |ui| mixer::paint(ui, s, r, f)),
+            Win::Mixer => ui.part(Seg::Win(win), a, |ui| {
+                // Timed while the cables swing: a mixer too slow to redraw them hangs them still.
+                let swinging = s.cables.borrow().moving().then(std::time::Instant::now);
+                mixer::paint(ui, s, r, f);
+                if let Some(t) = swinging {
+                    s.cables.borrow_mut().paint_cost(t.elapsed());
+                }
+            }),
             Win::PianoRoll => ui.part(Seg::Win(win), a, |ui| piano::paint(ui, s, r, f)),
             Win::ChannelRack => ui.part(Seg::Win(win), a, |ui| rack::paint(ui, s, f)),
             Win::Plugin => ui.part(Seg::Win(win), a, |ui| channel_win::paint(ui, s, f)),
@@ -134,6 +144,11 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if s.monitor.debug {
         mondebug::paint(ui, s);
     }
+    if s.cables.borrow().debug {
+        cabledebug::paint(ui, s);
+    }
+    // Message boxes and file dialogs go over everything (spec: ui/dialogs.md).
+    dialog::paint(ui, s);
     overlays
 }
 

@@ -142,6 +142,21 @@ fn value_of(s: &State, key: usize, index: usize) -> Option<f64> {
     v
 }
 
+/// Parameter `index` of instance `key`: its name, its normalized value, and setting it (the value box, spec:
+/// ui/type-in-value.md).
+pub(crate) fn param_name(s: &State, key: usize, index: usize) -> Option<String> {
+    Some(s.params.lists.get(&key)?.params.get(index)?.name.clone())
+}
+
+pub(crate) fn param_value(s: &State, key: usize, index: usize) -> Option<f64> {
+    value_of(s, key, index)
+}
+
+pub(crate) fn set_param_value(s: &State, key: usize, index: usize, v: f64) -> bool {
+    let Some(id) = s.params.lists.get(&key).and_then(|l| l.params.get(index)).map(|e| e.id) else { return false };
+    s.params.plugin(key).is_some_and(|p| p.lock().is_ok_and(|mut p| p.set_param(id, v)))
+}
+
 /// "Create automation clip" for parameter `index` of instance `key`: target, clip name, current value.
 pub fn automation(s: &State, key: usize, index: usize) -> Option<(u32, String, f64)> {
     Some((target_of(s, key, index)?, clip_name(s, key, index), value_of(s, key, index).unwrap_or(0.5)))
@@ -201,7 +216,11 @@ fn parameter_items(s: &State, param: Option<(usize, usize)>, create: Option<(u32
         PItem::head("Value"),
         copy,
         paste,
-        PItem::not_yet("Type in value..."),
+        // spec: ui/type-in-value.md §8 (normalized mode only)
+        match param {
+            Some((key, index)) => PItem::new("Type in value...", Cmd::TypeIn(crate::typein::Target::Param(key, index))),
+            None => PItem::not_yet("Type in value..."),
+        },
         PItem::not_yet("Set..."),
     ]
 }
@@ -240,6 +259,7 @@ impl App {
         let ui = &mut self.state.params;
         ui.lists.retain(|k, _| self.plugins.hosted.contains_key(k));
         let mut moved = None;
+        let mut edited = Vec::new();
         let mut automate = Vec::new();
         let mut stretch = Vec::new();
         for (&key, h) in &self.plugins.hosted {
@@ -270,6 +290,7 @@ impl App {
                     }
                 }
                 let (os_host::ParamEvent::Begin(id) | os_host::ParamEvent::Value(id, _)) = e else { continue };
+                edited.push(key);
                 if let Some(index) = ui.lists.get(&key).and_then(|l| l.params.iter().position(|x| x.id == id)) {
                     moved = Some(Tweak::Plugin { key, index });
                 }
@@ -280,6 +301,10 @@ impl App {
                     automate.push((key, index));
                 }
             }
+        }
+        // A knob moved in a plugin's own window is the user's edit (`Plugins::mark_edited`).
+        for key in edited {
+            self.plugins.mark_edited(key);
         }
         // Lemon Sampler's time-stretch knobs are the channel's own settings: the channel takes the editor's edits, so
         // its audio clips get their new length (`playlist::fit_audio`), playback and saving follow (ui/playlist.md §9c).
@@ -382,6 +407,9 @@ impl App {
                 let (Some(v), Some(id)) = (self.state.params.copied, id) else { return None };
                 let p = self.state.params.plugin(key)?;
                 let ok = p.lock().ok()?.set_param(id, v);
+                if ok {
+                    self.plugins.mark_edited(key);
+                }
                 (!ok).then(|| "The plugin did not take the value".to_string())
             }
         }
@@ -472,7 +500,7 @@ mod tests {
         let key = fx_key(2, 1);
         assert_eq!(a.browse_params(key), None);
         assert_eq!(a.state.params.visible(key).count(), 36);
-        let node = "1:Current project/Effects/Lemon Parametric EQ 2 (Insert 2)";
+        let node = "1:Current project/Effects/Lemon Parametric EQ (Insert 2)";
         assert_eq!((a.state.show_browser, a.state.browser_tab, a.state.browser_sel.as_deref()), (true, PROJECT_TAB, Some(node)));
         let list = rows(&a.state);
         let names: Vec<&str> = list.iter().filter(|r| matches!(r.item, Item::Param(k, _) if k == key)).map(|r| r.label.as_str()).collect();
@@ -485,7 +513,7 @@ mod tests {
         let menu = a.state.playlist.popup.take().unwrap();
         let tgt = target::slot_param(2, 1, 35);
         let create = menu.items.iter().find(|i| i.label == "Create automation clip").unwrap();
-        assert_eq!(create.cmd, Cmd::CreateAutomation(tgt, "Lemon Parametric EQ 2 - Insert 2 - Main level".into(), 0.5));
+        assert_eq!(create.cmd, Cmd::CreateAutomation(tgt, "Lemon Parametric EQ - Insert 2 - Main level".into(), 0.5));
         // Copy value (main level), then paste another value onto band 1 level.
         crate::playlist::run(&mut a, Cmd::Param(PCmd::Copy(key, 35)));
         assert_eq!(a.state.params.copied, Some(0.5));
@@ -496,7 +524,7 @@ mod tests {
 
         // Dropped on the playlist: a clip there, aimed at the parameter.
         let msg = a.params_drop(key, 35, 3, 384);
-        assert_eq!(msg.as_deref(), Some("Created automation clip \"Lemon Parametric EQ 2 - Insert 2 - Main level\""));
+        assert_eq!(msg.as_deref(), Some("Created automation clip \"Lemon Parametric EQ - Insert 2 - Main level\""));
         let ch = a.state.project.channels.last().unwrap().index;
         assert_eq!(a.state.project.automations.last().map(|x| (x.channel, x.target())), Some((ch, Some(tgt))));
         let clip = crate::playlist::arr_mut(&mut a.state).clips.last().cloned().unwrap();
@@ -513,11 +541,11 @@ mod tests {
         a.state.params.note(Tweak::Plugin { key, index: 35 });
         a.params_menu(ADD_LAST);
         let last = a.state.project.channels.last().unwrap();
-        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ 2 - Insert 2 - Main level #2"));
+        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Insert 2 - Main level #2"));
         // A plugin's own knob menu (host link): a clip on band 1 frequency.
         a.params_automate(key, 7);
         let last = a.state.project.channels.last().unwrap();
-        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ 2 - Insert 2 - Band 1 freq"));
+        assert_eq!(last.name.as_deref(), Some("Lemon Parametric EQ - Insert 2 - Band 1 freq"));
         assert_eq!(a.state.project.automations.last().and_then(|x| x.target()), Some(target::slot_param(2, 1, 7)));
         a.note_host_tweak(&Action::Tempo);
         assert_eq!(a.params_menu(TOOLS_NEXT), None);
@@ -526,7 +554,7 @@ mod tests {
     }
 
     /// Corpus check (OPENSTUDIO_FLP_CORPUS): automation clips made on Parametric EQ 2 slot parameters load as slot
-    /// parameter targets of the hosted Lemon Parametric EQ 2, and every clip whose name still ends in the parameter
+    /// parameter targets of the hosted Lemon Parametric EQ, and every clip whose name still ends in the parameter
     /// name ("... - Band 7 freq") points at the parameter of that name: the index maps 1:1 (spec §3, §7).
     #[test]
     fn corpus_eq_automation_points_at_the_same_parameters() {

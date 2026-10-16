@@ -515,7 +515,7 @@ pub fn row_steps(s: &State, r: usize, len: u32) -> Vec<bool> {
 // ---------------------------------------------------------------------------------------------------------
 // Channel edits
 
-fn channel_name(s: &State, r: usize) -> String {
+pub(crate) fn channel_name(s: &State, r: usize) -> String {
     s.project.channels.get(r).map(|c| c.name.clone().unwrap_or_else(|| format!("Channel {}", c.index + 1))).unwrap_or_default()
 }
 
@@ -528,12 +528,6 @@ pub fn clone_name(s: &State, r: usize) -> String {
     };
     let taken = |cand: &str| s.project.channels.iter().any(|c| c.name.as_deref() == Some(cand));
     (2..).map(|k| format!("{base} #{k}")).find(|c| !taken(c)).expect("unbounded")
-}
-
-/// Lowest insert (1..=125) no channel is routed to.
-pub fn free_insert(s: &State) -> u16 {
-    let max = crate::mixer::max_insert(&s.project);
-    (1..=max).find(|t| !s.project.channels.iter().any(|c| c.mixer_track == *t)).unwrap_or(max)
 }
 
 fn seed() -> u64 {
@@ -1156,7 +1150,12 @@ fn value_groups(s: &State, knob: Option<KnobId>, auto: Option<(u32, String, f64)
         }
         None => v.extend([PItem::not_yet("Copy value"), PItem::new("Paste value", Cmd::Nothing).off()]),
     }
-    v.extend([PItem::not_yet("Type in value..."), PItem::not_yet("Set...")]);
+    // spec: ui/type-in-value.md §8
+    v.push(match knob {
+        Some(k) => PItem::new("Type in value...", Cmd::TypeIn(crate::typein::Target::Knob(k))),
+        None => PItem::not_yet("Type in value..."),
+    });
+    v.push(PItem::not_yet("Set..."));
     v
 }
 
@@ -1242,6 +1241,18 @@ fn box_at_row(s: &State, r: usize, mouse: (f32, f32)) -> (f32, f32) {
     crate::views::rack::name_rect(s, r).map_or(crate::patterns::box_at_mouse(mouse), |nb| (nb.x, nb.y))
 }
 
+/// The sample chosen in Load sample...: row `r`'s channel takes it (and its name).
+pub fn sample_chosen(app: &mut App, r: usize, p: std::path::PathBuf) {
+    let s = &mut app.state;
+    let path = p.to_string_lossy().into_owned();
+    if let Some(ch) = s.project.channels.get_mut(r) {
+        ch.name = p.file_stem().map(|n| n.to_string_lossy().into_owned());
+        ch.sample_path = Some(path.clone());
+    }
+    s.sample_loads.push((r, path));
+    s.piano.dirty = true;
+}
+
 /// Run a rack menu command. Returns a status message.
 pub fn run(app: &mut App, c: RCmd) -> Option<String> {
     let mouse = app.mouse;
@@ -1252,16 +1263,12 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::MoveSel(d) => move_selected(app, d),
         RCmd::Sort(by) => sort(app, by),
         RCmd::LoadSample(r) => {
-            if let Some(p) = crate::dialog::modal(|| rfd::FileDialog::new().add_filter("Audio", &["wav", "mp3", "flac", "ogg", "aif", "aiff"]).pick_file()) {
-                let s = &mut app.state;
-                let path = p.to_string_lossy().into_owned();
-                if let Some(ch) = s.project.channels.get_mut(r) {
-                    ch.name = p.file_stem().map(|n| n.to_string_lossy().into_owned());
-                    ch.sample_path = Some(path.clone());
-                }
-                s.sample_loads.push((r, path));
-                s.piano.dirty = true;
-            }
+            // Starts in the folder of the channel's sample, when it has one.
+            let dir = app.state.project.channels.get(r).and_then(|c| c.sample_path.as_deref()).map(crate::plugins::resolve_sample).map(std::path::PathBuf::from);
+            let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Open, "Load sample", "audio", crate::dialog::Then::RackSample(r))
+                .filter("Audio", &["wav", "mp3", "flac", "ogg", "aif", "aiff"])
+                .start(dir.as_deref().and_then(std::path::Path::parent));
+            app.file_dialog(dlg);
         }
         RCmd::PianoRoll(r) => {
             app.focus_channel(r);
@@ -1384,24 +1391,9 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             }
             None
         }
-        RCmd::AssignFree(r) => {
-            let t = free_insert(s);
-            if let Some(c) = s.project.channels.get_mut(r) {
-                c.mixer_track = t;
-                s.piano.dirty = true;
-            }
-            Some(format!("Routed to Insert {t}"))
-        }
-        RCmd::AssignFreeSel => {
-            for &r in &sel {
-                let t = free_insert(s);
-                if let Some(c) = s.project.channels.get_mut(r) {
-                    c.mixer_track = t;
-                }
-            }
-            s.piano.dirty = true;
-            None
-        }
+        // spec: ui/mixer-track-commands.md §1
+        RCmd::AssignFree(r) => crate::mixer::route_free(s, &[r]),
+        RCmd::AssignFreeSel => crate::mixer::route_free(s, &sel),
         RCmd::SelectMixerTracks => {
             if let Some(t) = sel.first().and_then(|&r| s.project.channels.get(r)).map(|c| c.mixer_track) {
                 s.selected_mixer = t;

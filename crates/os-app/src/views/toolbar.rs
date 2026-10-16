@@ -179,7 +179,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     }
     // Tempo.
     let tb = Rect::span(517.0, 570.0, 6.0, 34.0);
-    ui.hit(tb, Action::Tempo, "Tempo (drag up/down)");
+    ui.hit(tb, Action::Tempo, "Tempo (drag up/down: the whole number, or the decimal place the drag starts on)");
     if lemon {
         os_ui::kit::lemon::well(ui.c, t, tb, t.time_panel);
     } else {
@@ -193,6 +193,9 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let ww = ui.c.text_width(Font::condensed(19, 6), &whole);
     let fw = ui.c.text_width(Font::condensed(13, 5), &frac);
     let x0 = (tb.right() - 11.0 - ww - fw).max(tb.x + 2.0);
+    // Where each decimal digit starts, for the drag's step (the point counts as the whole number).
+    let mut small = |n: usize| x0 + ww + ui.c.text_width(Font::condensed(13, 5), &frac[..n]);
+    s.tempo_digits.set([small(1), small(2), small(3)]);
     ui.c.push_clip(tb.inset(1.0));
     ui.c.text(Font::condensed(19, 6), x0, 9.0, digits, &whole);
     ui.c.text(Font::condensed(13, 5), x0 + ww, 16.0, t.glyph_dim.shade(0.3), &frac);
@@ -207,7 +210,7 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     tool_button(ui, btn(679.0, 4.0), Icon::Blend, s.rec_blend, Action::RecBlend, "Blend recording (overdub notes into pattern)");
     tool_button(ui, btn(712.0, 4.0), Icon::LoopRecord, s.rec_loop, Action::RecLoop, "Loop recording");
 
-    // Song position (B:S:T).
+    // Song position (B:S:T, or M:S:CS: a click toggles, right-click opens the mode menu).
     let tp = Rect::span(745.0, 873.0, 4.0, 36.0);
     if lemon {
         os_ui::kit::lemon::well(ui.c, t, tp, t.time_panel);
@@ -215,9 +218,14 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
         ui.c.fill_rect(tp, ui.t.s(0x212829));
         ui.c.fill_rect(tp.inset(1.0), t.time_panel);
     }
-    ui.hit(tp, Action::Swallow, "Song position (bar:step:tick)");
+    let hint = if s.clock_msc { "Song position (minute:second:centisecond)" } else { "Song position (bar:step:tick)" };
+    ui.hit(tp, Action::Clock, hint);
     ui.live(Live::Clock, tp);
-    let (bar, step, tick) = bst_ticks(f.tick * 96.0 / f64::from(s.project.ppq.max(1)));
+    let (bar, step, tick) = if s.clock_msc {
+        msc_ticks(f.tick / f64::from(s.project.ppq.max(1)) * 60.0 / s.tempo.max(1.0))
+    } else {
+        bst_ticks(f.tick * 96.0 / f64::from(s.project.ppq.max(1)))
+    };
     // Light digits drawn piece by piece (measured: big 36 px condensed to 14, small 24 to 9),
     // right-aligned so long bar numbers grow to the left and never leave the panel.
     let (big, small) = (Font::light(32, 13), Font::light(22, 8));
@@ -239,7 +247,8 @@ fn row1(ui: &mut Ui, s: &State, f: &FrameInfo) {
     ui.c.fill_rect(Rect::new(tick_x - 5.0, 29.5, 2.0, 2.0), g);
     ui.c.text(small, tick_x, 9.0, g, &tick_s);
     ui.c.pop_clip();
-    ui.c.text(Font::condensed(7, 3).bold(), 852.0, 5.0, if lemon { t.text_dim } else { t.glyph.shade(-0.1) }, "B:S:T");
+    let label = if s.clock_msc { "M:S:CS" } else { "B:S:T" };
+    ui.c.text_right(Font::condensed(7, 3).bold(), 871.0, 5.0, if lemon { t.text_dim } else { t.glyph.shade(-0.1) }, label);
 
     // Monitors (oscilloscope / spectrum analyzer, stereo peak bars) and CPU / memory.
     monitor(ui, s);
@@ -487,18 +496,31 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
         tool_button(ui, btn(580.0 + 33.0 * i as f32, 45.0), icon, on, action, hint);
     }
 
-    // Snap.
-    icons::draw(ui.c, Icon::Magnet, Rect::span(748.0, 766.0, 52.0, 70.0), t.glyph_dim.shade(0.3));
+    // Snap panel (spec: ui/global-snap.md §1): the magnet turns snapping on / off, the combo holds the global snap.
+    let global = s.global_snap.now;
+    let on = global != crate::playlist::Snap::None;
+    ui.hit(Rect::span(746.0, 767.0, 50.0, 72.0), Action::GlobalSnapToggle, crate::snap::MAGNET_HINT);
+    let magnet = if lemon {
+        if on { t.glyph_dim } else { t.glyph_dim.mix(t.toolbar, 0.55) }
+    } else {
+        t.tx(if on { 0x8b959c } else { 0x52585c })
+    };
+    icons::draw(ui.c, Icon::Magnet, Rect::span(748.0, 766.0, 52.0, 70.0), magnet);
     let snap = Rect::span(768.0, 830.0, 50.0, 72.0);
-    ui.off(snap, "Global snap (each editor has its own snap)");
+    let hov = ui.hit(snap, Action::GlobalSnap, crate::snap::HINT);
     if lemon {
-        os_ui::kit::lemon::well(ui.c, t, snap, t.sunken);
+        os_ui::kit::lemon::well(ui.c, t, snap, if hov { t.sunken.mix(t.button_hi, 0.5) } else { t.sunken });
     } else {
         ui.c.fill_rrect(snap, 2.0, t.sunken_dark);
     }
-    ui.c.text(Font::new(16), snap.x + 5.0, 51.0, t.glyph, "Line");
-    icons::draw(ui.c, Icon::ArrowRight, Rect::new(snap.right() - 14.0, 55.0, 12.0, 12.0), t.glyph_dim);
-    ui.veil(Rect::span(746.0, 831.0, 50.0, 72.0), t.toolbar);
+    // The longest labels ("1/6 step") are narrowed to fit before the arrow.
+    let label = global.label();
+    let room = snap.w - 5.0 - 14.0;
+    let font = if ui.c.text_width(Font::new(16), label) <= room { Font::new(16) } else { Font::condensed(16, 6) };
+    ui.c.text(font, snap.x + 5.0, 51.0, t.glyph, label);
+    // The arrow points down while the mouse is over the combo (§1).
+    let dir = if hov { os_ui::kit::Dir::Down } else { os_ui::kit::Dir::Right };
+    os_ui::kit::triangle(ui.c, snap.right() - 8.0, 61.0, 3.5, dir, t.glyph_dim);
 
     // Pattern selector.
     let prev = Rect::span(838.0, 851.0, 47.0, 76.0);
@@ -564,6 +586,12 @@ fn row2(ui: &mut Ui, s: &State, f: &FrameInfo) {
         icons::draw(ui.c, Icon::Globe, Rect::new(1449.0, 52.0, 18.0, 18.0), t.glyph_dim.shade(0.3));
         ui.veil(np, t.toolbar);
     }
+}
+
+/// Minutes, seconds and centiseconds of a position in seconds.
+pub fn msc_ticks(secs: f64) -> (u32, u32, u32) {
+    let cs = (secs.max(0.0) * 100.0) as u32;
+    (cs / 6000, cs / 100 % 60, cs % 100)
 }
 
 /// Bar:step:tick (1-based bar and step, 16 steps per bar, `ppq / 4` ticks per step).

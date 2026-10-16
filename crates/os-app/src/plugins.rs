@@ -11,6 +11,9 @@
 // spec: plugins/plugin-formats.md (hosting, Lemon Sampler state), ui/plugin-manager.md §4 (scan results, loading for
 // use), ui/plugin-window.md, plugins/host-link.md (Lemon plugins join the window strip)
 
+#[cfg(target_os = "macos")]
+pub mod window_check;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -46,6 +49,11 @@ pub struct Hosted {
     /// A native instance started from a project's state that it did not give back byte for byte: a save keeps the
     /// file's bytes instead of this instance's state (spec: plugins/fruity-abi.md "Saved state").
     pub keep_file_state: bool,
+    /// A copy in another format standing in for the wrapped plugin a project names (`project_plugins::switched_format`),
+    /// not edited by the user yet: a save leaves the channel's or slot's wrapper bytes as the file had them, so the named
+    /// plugin and its settings stay in the project. Playback and automation moving its parameters are not edits; the
+    /// user's own are (`Plugins::mark_edited`). Spec: flp/events/plugins.md §4, "copy in another format".
+    pub stand_in: bool,
     /// Its attention count, read without locking it (`os_host::Attention`); `None`: looked at on every tick.
     pub attention: Option<Arc<os_host::Attention>>,
     /// The count and time `idle` last looked at it (`Hosted::due`).
@@ -83,6 +91,7 @@ impl Hosted {
             link: None,
             stop_told: false,
             keep_file_state: false,
+            stand_in: false,
             attention,
             seen: Look::never(),
         }
@@ -186,16 +195,16 @@ pub struct Plugins {
 }
 
 /// Lemon Sampler compiled into Lemon Studio and hosted through its own CLAP entry, so sampler channels never depend on
-/// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon 3x Osc likewise (spec: plugins/lemon-3x-osc.md §6).
+/// finding a `.clap` file (spec: plugins/lemon-sampler.md §7); Lemon Trio likewise (spec: plugins/lemon-3x-osc.md §6).
 pub fn builtin() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static OSC3: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
-    v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_3X_OSC));
+    v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_TRIO));
     v
 }
 
-/// Lemon Parametric EQ 2, compiled in the same way: offered for every mixer slot, and it plays the slots a project
+/// Lemon Parametric EQ, compiled in the same way: offered for every mixer slot, and it plays the slots a project
 /// saved with the original EQ (spec: plugins/lemon-parametric-eq-2.md §8).
 pub fn builtin_effects() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
@@ -224,6 +233,7 @@ pub fn load_file(path: &Path, format: os_host::Format) -> Result<Arc<dyn Library
         match format {
             os_host::Format::Clap => os_clap::Library::load(path).map(|l| l as Arc<dyn Library>),
             os_host::Format::Vst3 => os_vst3::Module::load(path).map(|l| l as Arc<dyn Library>),
+            os_host::Format::Vst2 => os_vst2::Module::load(path).map(|l| l as Arc<dyn Library>),
             os_host::Format::Native => os_native::NativeLibrary::load(path).map(|l| l as Arc<dyn Library>),
         }
     };
@@ -270,6 +280,7 @@ pub fn format_name(f: os_host::Format) -> &'static str {
     match f {
         os_host::Format::Clap => "CLAP",
         os_host::Format::Vst3 => "VST3",
+        os_host::Format::Vst2 => "VST2",
         os_host::Format::Native => "native",
     }
 }
@@ -508,6 +519,22 @@ impl Plugins {
         self.hosted.get(&key)?.plugin.lock().ok()?.save_state()
     }
 
+    /// Marks the instance under `key`, just created, as a copy standing in for a plugin in another format
+    /// (`Hosted::stand_in`).
+    pub fn mark_stand_in(&mut self, key: usize) {
+        if let Some(h) = self.hosted.get_mut(&key) {
+            h.stand_in = true;
+        }
+    }
+
+    /// The user edited the instance under `key`: in its own window, with the parameter menu, or by loading a preset. A
+    /// copy standing in for another format's plugin is saved as itself from then on (`Hosted::stand_in`).
+    pub fn mark_edited(&mut self, key: usize) {
+        if let Some(h) = self.hosted.get_mut(&key) {
+            h.stand_in = false;
+        }
+    }
+
     /// Restores a `state` blob into the instance under `key`.
     pub fn set_state(&self, key: usize, data: &[u8]) -> bool {
         self.hosted.get(&key).and_then(|h| h.plugin.lock().ok()).is_some_and(|mut p| p.load_state(data))
@@ -522,7 +549,7 @@ impl Plugins {
         p.set_param(info.id, n.clamp(0.0, 1.0))
     }
 
-    /// The project-file state of the Lemon Parametric EQ 2 in mixer slot `key` (its plugin state converted back),
+    /// The project-file state of the Lemon Parametric EQ in mixer slot `key` (its plugin state converted back),
     /// `None` when the slot hosts something else.
     pub fn eq_file_state(&self, key: usize) -> Option<Vec<u8>> {
         let h = self.hosted.get(&key)?;
@@ -643,6 +670,15 @@ impl Plugins {
 
     pub fn instruments(&self) -> Vec<(usize, SharedInstrument)> {
         self.hosted.range(..FX_KEY).map(|(&r, h)| (r, h.plugin.clone() as SharedInstrument)).collect()
+    }
+
+    /// Whether an instrument's editor is open: its own keyboard plays it without the host, so the transport keeps it
+    /// processed while nothing plays (`Transport::listen`).
+    pub fn editor_open(&self) -> bool {
+        #[cfg(plugin_windows)]
+        return self.hosted.range(..FX_KEY).any(|(_, h)| h.window.is_some());
+        #[cfg(not(plugin_windows))]
+        false
     }
 
     /// Opens (or raises) row `row`'s plugin window.
@@ -956,21 +992,27 @@ pub fn retired_count() -> usize {
 /// Name of Lemon Studio's sampler plugin: it plays and edits every sampler channel (spec: plugins/lemon-sampler.md §7).
 pub const LEMON_SAMPLER: &str = "Lemon Sampler";
 /// Name of Lemon Studio's parametric EQ plugin.
-pub const LEMON_EQ: &str = "Lemon Parametric EQ 2";
+pub const LEMON_EQ: &str = "Lemon Parametric EQ";
 /// The plugin name a project file stores for the parametric EQ (file-format identifier, kept for interop): slots
-/// with it are played by Lemon Parametric EQ 2 (spec: plugins/lemon-parametric-eq-2.md §8).
+/// with it are played by Lemon Parametric EQ (spec: plugins/lemon-parametric-eq-2.md §8).
 pub const EQ_FILE_NAME: &str = "Fruity Parametric EQ 2";
-/// The built-in plugins' names before the line was renamed "Lemon" (2026-10-13), with their names now: plugin files and
-/// preset folders made earlier still carry them (spec: plugins/plugin-formats.md, identity).
-pub const OLD_NAMES: [(&str, &str); 3] =
-    [("Open Sampler", LEMON_SAMPLER), ("Open Parametric EQ 2", LEMON_EQ), ("Open 3x Osc", crate::osc3::LEMON_3X_OSC)];
+/// The built-in plugins' earlier names, newest first, with their names now: "Lemon Parametric EQ 2" and "Lemon 3x Osc"
+/// (2026-10-13 to 2026-10-14), and the "Open" names before the line was renamed "Lemon". Plugin files and preset
+/// folders made earlier still carry them (spec: plugins/plugin-formats.md, identity).
+pub const OLD_NAMES: [(&str, &str); 5] = [
+    ("Lemon Parametric EQ 2", LEMON_EQ),
+    ("Lemon 3x Osc", crate::osc3::LEMON_TRIO),
+    ("Open Sampler", LEMON_SAMPLER),
+    ("Open Parametric EQ 2", LEMON_EQ),
+    ("Open 3x Osc", crate::osc3::LEMON_TRIO),
+];
 
 /// What the mixer shows for a slot's stored plugin name.
 pub fn slot_label(name: &str) -> &str {
     if name == EQ_FILE_NAME { LEMON_EQ } else { name }
 }
 
-/// A new slot for effect `name`: what the project stores (Lemon Parametric EQ 2 as the file's EQ with its default
+/// A new slot for effect `name`: what the project stores (Lemon Parametric EQ as the file's EQ with its default
 /// state, so the file opens elsewhere; other effects by name).
 pub fn new_slot(name: &str) -> os_model::SlotPlugin {
     if name == LEMON_EQ {
@@ -1613,7 +1655,7 @@ mod tests {
         capture(hwnd, &dir.join("win_nostrip.bmp"));
     }
 
-    /// The built-in Lemon Parametric EQ 2 in a mixer slot window: the frame without a strip, the editor inside it, and a
+    /// The built-in Lemon Parametric EQ in a mixer slot window: the frame without a strip, the editor inside it, and a
     /// click on a band's switch reaching the plugin state.
     /// `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio eq_window_shots -- --ignored`
     #[test]
@@ -1641,7 +1683,7 @@ mod tests {
         assert_eq!(mask(&pl), Some(0x7f & !4));
     }
 
-    /// Lemon 3x Osc in its window: a wheel turn on a knob changes the plugin's value AND the picture (spec:
+    /// Lemon Trio in its window: a wheel turn on a knob changes the plugin's value AND the picture (spec:
     /// plugins/lemon-3x-osc.md §5). `OS_SHOT_DIR=.. cargo test -p os-app --bin lemonstudio osc3_window_redraws -- --ignored`
     #[test]
     #[ignore]
@@ -1649,9 +1691,9 @@ mod tests {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
-        let index = pl.index_of(crate::osc3::LEMON_3X_OSC).expect("built-in Lemon 3x Osc");
+        let index = pl.index_of(crate::osc3::LEMON_TRIO).expect("built-in Lemon Trio");
         pl.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: crate::osc3::LEMON_3X_OSC.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: crate::osc3::LEMON_TRIO.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -1671,7 +1713,7 @@ mod tests {
                 String::new()
             }
         }
-        let hits = lemon_3x_osc::view::paint(&mut c, &os_theme::Palette::default(), &Mid, &Default::default(), "", true);
+        let hits = lemon_3x_osc::view::paint(&mut c, &os_theme::design::palette(os_theme::Design::Lemon, None), &Mid, &Default::default(), "", true);
         let t = lemon_3x_osc::view::Target::Knob("o2_coarse".into());
         let r = hits.iter().rev().find(|h| h.t == t).expect("coarse knob").r;
         let (cx, cy) = ((r.cx() - lemon_3x_osc::view::CROP_X as f32) as i32, (r.cy() - lemon_3x_osc::view::HOSTED_CROP_Y as f32) as i32);
@@ -2023,16 +2065,22 @@ mod tests {
         assert!(after < before * 0.5, "MOD X down did not change what the app plays ({before} -> {after})");
     }
 
-    /// Keys typed while the plugin window has the focus must reach the app (the typing keyboard keeps playing).
+    /// Keys typed while the plugin window has the focus must reach the app (the typing keyboard keeps playing): a CLAP
+    /// plugin (`OS_CLAP`) or a VST2 one (`OS_VST2`), whose editor first gets a click at (300, 60).
     #[test]
     #[ignore]
     fn keys_in_a_plugin_window_reach_the_app() {
-        let Some(clap) = std::env::var_os("OS_CLAP") else { return };
-        let lib = os_clap::Library::load(std::path::Path::new(&clap)).expect("load clap");
-        let desc = lib.plugins[0].clone();
+        let (file, format) = match (std::env::var_os("OS_CLAP"), std::env::var_os("OS_VST2")) {
+            (Some(f), _) => (f, os_host::Format::Clap),
+            (None, Some(f)) => (f, os_host::Format::Vst2),
+            (None, None) => return,
+        };
+        let lib = load_file(std::path::Path::new(&file), format).expect("load");
+        let desc = lib.plugins()[0].clone();
+        let name = desc.name.clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name, target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2058,6 +2106,99 @@ mod tests {
         let keys = crate::plugin_window::take_keys();
         assert_eq!(keys.len(), 2, "{keys:?}");
         assert!(keys[0].pressed && !keys[1].pressed && keys[0].scancode == 0x10);
+    }
+
+    /// A VST2 plugin's editor in a real plugin window at 100, 150 and 200 % (spec: ui/ui-scaling.md §3): the frame's
+    /// editor area must fit the editor's own window at each scale (neither clipped nor left with a gap), and a real
+    /// mouse drag in it (`OS_VST2_DRAG=x,y` in editor pixels as it first opens, default the middle) must reach the app
+    /// as an edit. The window first opens at the monitor's scale, as in the app (whose DPI awareness the test takes).
+    /// Moves the desktop cursor. Screenshots go to `OS_SHOT_DIR` when it is set.
+    /// `OS_VST2=<plugin dll> cargo test -p os-app --bin lemonstudio vst2_editor_scales -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn vst2_editor_scales() {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT};
+        let Some(file) = std::env::var_os("OS_VST2") else { return };
+        let dir = std::env::var_os("OS_SHOT_DIR").map(std::path::PathBuf::from);
+        let drag = std::env::var("OS_VST2_DRAG").ok().and_then(|s| s.split_once(',').and_then(|(x, y)| Some((x.trim().parse::<i32>().ok()?, y.trim().parse::<i32>().ok()?))));
+        // Per-monitor DPI awareness, as winit gives the app: plugins see the monitor's own DPI, as they do there.
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn SetProcessDpiAwarenessContext(value: isize) -> i32;
+            fn GetDpiForSystem() -> u32;
+        }
+        const PER_MONITOR_AWARE_V2: isize = -4;
+        unsafe { SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2) };
+        let monitor = unsafe { GetDpiForSystem() } as f32 / 96.0;
+        let lib = load_file(std::path::Path::new(&file), os_host::Format::Vst2).expect("load");
+        let desc = lib.plugins()[0].clone();
+        let name = desc.name.clone();
+        let mut pl = Plugins { available: vec![Available { lib, desc }], scale: monitor, rate: 48000, ..Plugins::default() };
+        pl.create(0, 0).unwrap();
+        let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        pl.open_window(0, info).unwrap();
+        pump(&mut pl, 500);
+        let size = |h: HWND| unsafe {
+            let mut r: RECT = std::mem::zeroed();
+            GetWindowRect(h, &mut r);
+            (r.right - r.left, r.bottom - r.top)
+        };
+        let handles = |pl: &Plugins| {
+            let w = pl.hosted[&0].window.as_ref().unwrap();
+            let area = w.area() as HWND;
+            (w.hwnd() as HWND, area, unsafe { GetWindow(area, GW_CHILD) })
+        };
+        let shot = |pl: &Plugins, tag: &str| {
+            if let Some(d) = &dir {
+                let stem = name.replace(|c: char| !c.is_ascii_alphanumeric(), "_");
+                capture(handles(pl).0 as isize, &d.join(format!("vst2_{stem}_{tag}.bmp")));
+            }
+        };
+        let (frame, _, editor) = handles(&pl);
+        assert!(!editor.is_null(), "the editor is a child of the frame's editor area");
+        // A drag at the monitor's scale: what the editor reports is what "last tweaked" and automation recording hear.
+        let (ew, eh) = size(editor);
+        let (x, y) = drag.unwrap_or((ew / 2, eh / 2));
+        let mut p = POINT { x, y };
+        unsafe {
+            ClientToScreen(editor, &mut p);
+            SetForegroundWindow(frame);
+        }
+        pump(&mut pl, 200);
+        let input = |flags: u32, dx: i32, dy: i32| unsafe {
+            let i = INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } } };
+            SendInput(1, &i, std::mem::size_of::<INPUT>() as i32);
+        };
+        let _ = pl.hosted[&0].plugin.lock().unwrap().take_param_events();
+        unsafe { SetCursorPos(p.x, p.y) };
+        pump(&mut pl, 50);
+        input(MOUSEEVENTF_LEFTDOWN, 0, 0);
+        pump(&mut pl, 50);
+        for _ in 0..40 {
+            input(MOUSEEVENTF_MOVE, 0, -3);
+            pump(&mut pl, 12);
+        }
+        input(MOUSEEVENTF_LEFTUP, 0, 0);
+        pump(&mut pl, 200);
+        let edits = pl.hosted[&0].plugin.lock().unwrap().take_param_events();
+        println!("{name}: opened at the monitor's {monitor} as {ew} x {eh}; a drag at ({x}, {y}) gave {} edits, starting {:?}", edits.len(), &edits[..edits.len().min(3)]);
+        shot(&pl, "monitor");
+        if drag.is_some() {
+            assert!(!edits.is_empty(), "the drag reached no parameter");
+        }
+        let mut base = None;
+        for k in [1.0f32, 1.5, 2.0] {
+            pl.rescale_window(0, k);
+            pump(&mut pl, 600);
+            let (_, area, editor) = handles(&pl);
+            let (e, a) = (size(editor), size(area));
+            let reported = pl.hosted[&0].plugin.lock().unwrap().editor_size();
+            let b = *base.get_or_insert(e);
+            println!("{name} at {k}: editor window {e:?} ({:.2} x its size at 1), editor area {a:?}, reported {reported:?}", e.0 as f32 / b.0 as f32);
+            shot(&pl, &format!("{}", (k * 100.0) as u32));
+            assert_eq!(a, e, "at {k} the editor area fits the editor's window");
+        }
     }
 
     fn fixture_mp3() -> String {
@@ -2147,7 +2288,7 @@ mod tests {
     }
 
     /// Hosted instruments' voices (spec: audio/voices.md §2-§5): Lemon Sampler counts a voice until its sample ends (the
-    /// plugin reports the end), Lemon 3x Osc until its release is over; a reset (Stop) ends every voice at once. The
+    /// plugin reports the end), Lemon Trio until its release is over; a reset (Stop) ends every voice at once. The
     /// counts reach `Plugins::voices` through the instances' meters, without locking them.
     #[test]
     fn hosted_instrument_voices_follow_the_plugins() {
@@ -2159,7 +2300,7 @@ mod tests {
         let frames: Vec<f32> = (0..4800).flat_map(|_| [0.25f32; 2]).collect();
         os_engine::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &frames).unwrap();
         assert!(pl.load_sample(0, &wav.to_string_lossy()));
-        let osc = pl.index_of(crate::osc3::LEMON_3X_OSC).unwrap();
+        let osc = pl.index_of(crate::osc3::LEMON_TRIO).unwrap();
         pl.create_with(1, osc, None).unwrap();
         let run = |pl: &Plugins, key: usize, blocks: usize| {
             let inst = pl.hosted[&key].plugin.clone() as SharedInstrument;
@@ -2364,7 +2505,7 @@ mod tests {
         assert_eq!(read(&pl), ch.sound.stretch);
     }
 
-    /// The built-in Lemon Parametric EQ 2 starts from a project file's EQ state, plays it, and gives the state back
+    /// The built-in Lemon Parametric EQ starts from a project file's EQ state, plays it, and gives the state back
     /// (spec: plugins/lemon-parametric-eq-2.md §8).
     #[test]
     fn builtin_parametric_eq_takes_and_gives_the_file_state() {
@@ -2516,7 +2657,7 @@ mod tests {
     /// flp/events/plugins.md §4).
     #[test]
     fn vst3_plugins_save_and_reopen() {
-        let (Some(smp), Some(eq)) = (bundled("Lemon Sampler.vst3"), bundled("Lemon Parametric EQ 2.vst3")) else { return };
+        let (Some(smp), Some(eq)) = (bundled("Lemon Sampler.vst3"), bundled("Lemon Parametric EQ.vst3")) else { return };
         let load = |p: &std::path::Path| {
             let lib = os_vst3::Module::load(p).map(|l| l as Arc<dyn Library>).unwrap();
             Available { desc: lib.plugins()[0].clone(), lib }
@@ -2535,7 +2676,7 @@ mod tests {
         a.state.hosted_rows.push(row);
         let json = format!("{{\"version\":\"0.0.1\",\"params\":{{}},\"fields\":{{\"sample-path\":{}}}}}", json_string(&json_string(&wav.to_string_lossy())));
         assert!(a.plugins.set_state(row, json.as_bytes()));
-        a.state.project.mixer[3].slots[2] = Some(os_model::SlotPlugin { name: "Lemon Parametric EQ 2".into(), state: Vec::new() });
+        a.state.project.mixer[3].slots[2] = Some(os_model::SlotPlugin { name: "Lemon Parametric EQ".into(), state: Vec::new() });
         a.plugins.create_effect(3, 2, 0, None).unwrap();
         // An edit of the effect, through the hosting layer, flushed into its processor.
         {
@@ -2575,7 +2716,7 @@ mod tests {
         assert_eq!(b.plugins.descriptor(row).unwrap().format, os_host::Format::Vst3);
         assert_eq!(b.plugins.state(row).as_deref(), Some(&ch_state[..]));
         assert_eq!(b.plugins.state(fx_key(3, 2)).as_deref(), Some(&fx_state[..]));
-        assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some("Lemon Parametric EQ 2"));
+        assert_eq!(crate::mixer::slot_name(&b.state, 3, 2).as_deref(), Some("Lemon Parametric EQ"));
     }
 
     /// VST3 editors inside Lemon Studio's plugin frame, moved off every screen and captured with PrintWindow:
@@ -2585,7 +2726,7 @@ mod tests {
     fn vst3_window_shots() {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
-        for (file, effect) in [("Lemon Sampler.vst3", false), ("Lemon Parametric EQ 2.vst3", true)] {
+        for (file, effect) in [("Lemon Sampler.vst3", false), ("Lemon Parametric EQ.vst3", true)] {
             let Some(path) = bundled(file) else { continue };
             let lib = os_vst3::Module::load(&path).unwrap();
             let a = Available { desc: lib.plugins()[0].clone(), lib };

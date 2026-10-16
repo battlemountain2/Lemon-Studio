@@ -40,10 +40,11 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 
 ## ✅ Plugin hosting
 
-- CLAP and VST3 instruments and effects, with their editors and saved state
+- CLAP, VST3 and VST2 instruments and effects, with their editors and saved state
+- VST2 shells (one file offering several plugins); a VST2 plugin's state is saved in the layout FL Studio's projects use
 - On Windows, a plugin that crashes is stopped (its slot passes the sound through) instead of closing
   Lemon Studio
-- Not yet: VST2
+- Not yet: 32-bit plugins, and Intel-only plugins on Apple silicon (they need a bridge)
 
 ## ✅ Plugin management
 
@@ -53,7 +54,7 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - A background scan at startup; each file is tried in a separate scanner process, so a broken plugin
   cannot take Lemon Studio down
 - Favourites and hidden plugins
-- One menu entry per plugin installed as both VST3 and CLAP (your preferred format wins)
+- One menu entry per plugin installed in several formats (VST3, CLAP, VST2: your preferred format wins)
 
 ## ✅ Time-stretching
 
@@ -121,7 +122,7 @@ Not yet: Align all channel editors, Arrange windows.
 
 ## 🚧 Built-in instruments and effects
 
-- Lemon Sampler, Lemon 3x Osc (a three-oscillator synth) and Lemon Parametric EQ 2, also available as VST3
+- Lemon Sampler, Lemon Trio (a three-oscillator synth) and Lemon Parametric EQ, also available as VST3
   and CLAP bundles for other hosts
 - The sampler plays a project's sample settings (start and length, the sample file's loop, the sample
   effects, the channel filter, declicking) and each note's own pan and filter offsets
@@ -134,7 +135,8 @@ Not yet: Align all channel editors, Arrange windows.
 ## 🚧 Note input
 
 - Mouse, computer keyboard and MIDI controllers; notes play the selected channel
-- Not yet: note recording
+- Experimental in this fork: pattern note recording, wait-for-input, meter-aware count-in, blend/overdub and loop controls
+- Not yet: timestamp-accurate recording, robust loop-boundary/source-identity handling or recording undo; audio recording remains unavailable
 
 ## 🚧 Undo
 
@@ -160,7 +162,7 @@ Not yet: Align all channel editors, Arrange windows.
 - The Lemon design (lemon on neutral greys, rounded-square controls) and the Classic look, switched with
   Ctrl+Shift+D
 - Theme files apply to the Classic look
-- Not yet: restyled plugin editors
+- Lemon Studio's own plugin editors are drawn in the Lemon design only, whatever design the app shows
 
 ## ❌ Not available yet
 

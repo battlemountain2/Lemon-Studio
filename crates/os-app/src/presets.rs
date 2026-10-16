@@ -56,11 +56,11 @@ pub fn dir_for(plugin: &str) -> Option<PathBuf> {
     root().map(|r| dir_in(&r, plugin))
 }
 
-/// `plugin`'s folder in `root`. A built-in plugin's folder under its earlier "Open" name becomes its folder while it has
-/// none yet, so presets saved before the rename stay listed (spec: plugins/presets.md).
+/// `plugin`'s folder in `root`. A built-in plugin's folder under an earlier name (the newest one there) becomes its
+/// folder while it has none yet, so presets saved before a rename stay listed (spec: plugins/presets.md).
 fn dir_in(root: &Path, plugin: &str) -> PathBuf {
     let dir = root.join(folder_name(plugin));
-    if let Some((old, _)) = crate::plugins::OLD_NAMES.iter().find(|(_, now)| *now == plugin) {
+    for (old, _) in crate::plugins::OLD_NAMES.iter().filter(|(_, now)| *now == plugin) {
         let old = root.join(folder_name(old));
         if old.is_dir() && !dir.exists() {
             let _ = std::fs::rename(old, &dir);
@@ -276,6 +276,7 @@ fn load_into(app: &mut App, key: usize, path: &Path) -> Option<String> {
     let h = header(app, key)?;
     Some(match load(path, &h.id) {
         Ok((_, state)) if app.plugins.set_state(key, &state) => {
+            app.plugins.mark_edited(key);
             app.plugins.set_preset(key, Some(path.to_path_buf()));
             format!("Preset: {}", shown_name(path))
         }
@@ -284,15 +285,27 @@ fn load_into(app: &mut App, key: usize, path: &Path) -> Option<String> {
     })
 }
 
+/// Save preset as...: the save dialog, in the plugin's preset folder (`save_chosen` writes the file).
 fn save_as(app: &mut App, key: usize) -> Option<String> {
     let h = header(app, key)?;
-    let Some(state) = app.plugins.state(key) else { return Some(format!("{} has no state to save", h.plugin)) };
+    if app.plugins.state(key).is_none() {
+        return Some(format!("{} has no state to save", h.plugin));
+    }
     let dir = dir_for(&h.plugin)?;
     let _ = std::fs::create_dir_all(&dir);
     let start = app.plugins.presets.get(&key).map(|p| shown_name(p)).unwrap_or_else(|| "New preset".into());
-    let target = crate::dialog::modal(|| {
-        rfd::FileDialog::new().set_title("Save preset as").set_directory(&dir).set_file_name(format!("{start}.{EXT}")).add_filter("Lemon Studio preset", &[EXT]).save_file()
-    })?;
+    let dlg = crate::filedlg::FileDlg::new(crate::filedlg::Mode::Save, "Save preset as", "preset", crate::dialog::Then::SavePreset(key))
+        .filter("Lemon Studio preset", &[EXT])
+        .start(Some(&dir))
+        .name(&format!("{start}.{EXT}"));
+    app.file_dialog(dlg);
+    None
+}
+
+/// The preset file chosen in Save preset as...: the plugin's state is written there. Returns the status message.
+pub fn save_chosen(app: &mut App, key: usize, target: PathBuf) -> Option<String> {
+    let h = header(app, key)?;
+    let Some(state) = app.plugins.state(key) else { return Some(format!("{} has no state to save", h.plugin)) };
     let target = if target.extension().is_some_and(|e| e.eq_ignore_ascii_case(EXT)) { target } else { target.with_extension(EXT) };
     Some(match save(&target, &h, &state) {
         Ok(()) => {
@@ -354,10 +367,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Presets saved under a built-in plugin's earlier "Open" name move to its folder; another plugin's folder stays.
+    /// Presets saved under a built-in plugin's earlier names move to its folder; another plugin's folder stays.
     #[test]
     fn old_built_in_folders_are_taken_over() {
         let root = tmp("old");
+        save(&file_for(&root.join("Open 3x Osc"), "Bass"), &Header::default(), b"x").unwrap();
+        save(&file_for(&root.join("Lemon 3x Osc"), "Lead"), &Header::default(), b"x").unwrap();
+        let dir = dir_in(&root, crate::osc3::LEMON_TRIO);
+        assert_eq!(dir, root.join("Lemon Trio"));
+        assert_eq!(list_in(&dir)[0].name, "Lead");
+        assert!(root.join("Open 3x Osc").exists());
         save(&file_for(&root.join("Open Sampler"), "Kick"), &Header::default(), b"x").unwrap();
         save(&file_for(&root.join("Open Thing"), "Pad"), &Header::default(), b"x").unwrap();
         let dir = dir_in(&root, crate::plugins::LEMON_SAMPLER);
