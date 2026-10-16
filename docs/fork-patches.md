@@ -17,6 +17,7 @@ do not reset or force-push main to update it.
 | Drums and effects | Retain downstream procedural drum synthesis/template, delay, distortion and reverb in `os-engine`. | Engine/DSP unit tests and template assertions. No claim of FL Studio sonic parity. |
 | Linux scan environment | Retain downstream additional library lookup for scanner children. | Scanner tests. This is not a guarantee that the runtime loader can instantiate every plugin found by scanning. |
 | Playlist double-click | Keep downstream picker double-click alongside upstream right-click pattern menus. | App/editor tests. |
+| Default pattern names | Keep an explicitly confirmed `Pattern N` name so an empty new pattern appears in the picker without custom typing. Browsing and cancellation must not create patterns. | Checkmark hit-testing, repeated creation, Enter, cancel/Escape, clearing an existing name and FLP save/reopen regressions in `os-app::patterns`. |
 | CI and bundles | Run inherited platform matrix on main, integrate, feat and fix branches as well as PRs. Lock nested plugin builds. | CI must actually run remotely before claiming Windows/macOS verification. |
 
 ## Source attribution

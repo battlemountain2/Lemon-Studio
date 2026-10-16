@@ -358,7 +358,7 @@ pub fn accept(s: &mut State) {
     match b.target {
         BoxTarget::Name(n) => {
             let text = b.text.trim().to_string();
-            let name = (!text.is_empty() && text != format!("Pattern {n}")).then_some(text.clone());
+            let name = (!text.is_empty()).then_some(text.clone());
             if name.is_some() || s.project.pattern(n).is_some() {
                 pat_mut(s, n).name = name;
             }
@@ -566,6 +566,71 @@ mod tests {
         key(s, &winit::keyboard::Key::Character("Bass".into()), false);
         accept(s);
         assert_eq!(crate::views::playlist::pick_items(s).len(), before.len() + 1);
+    }
+
+    #[test]
+    fn checkmark_keeps_default_named_patterns_in_picker_and_save() {
+        let mut app = app();
+        let mut canvas = os_ui::Canvas::new(1920, 1080, 1.0).expect("test canvas");
+        for number in [4, 6] {
+            app.act(crate::app::Action::PatternAdd);
+            let name_box = app.state.pat_ui.name_box.as_ref().unwrap();
+            assert_eq!(name_box.text, format!("Pattern {number}"));
+            app.mouse = (name_box.at.0 + 33.0, name_box.at.1 + 38.0);
+            app.paint(&mut canvas, None);
+            assert!(app.top_hit(app.mouse.0, app.mouse.1).is_some_and(|hit| hit.action == crate::app::Action::Pat(Hit::Accept)));
+            app.mouse_down();
+            app.mouse_up();
+            assert!(app.state.pat_ui.name_box.is_none());
+            let pattern = app.state.project.pattern(number).expect("confirmed pattern exists");
+            assert_eq!(pattern.name, Some(format!("Pattern {number}")));
+            assert!(crate::views::playlist::pick_items(&app.state).contains(&ClipSource::Pattern(number)));
+        }
+        let bytes = os_flp::project::create(&app.state.project).unwrap().to_bytes().unwrap();
+        let reopened = os_flp::project::load(&os_flp::FlpFile::parse(&bytes).unwrap()).unwrap();
+        for number in [4, 6] {
+            assert_eq!(reopened.pattern(number).unwrap().name, Some(format!("Pattern {number}")));
+        }
+    }
+
+    #[test]
+    fn enter_accepts_the_default_pattern_name() {
+        let mut app = app();
+        let state = &mut app.state;
+        state.pattern = 3;
+        run(state, Cmd::FindNext, (0.0, 0.0));
+        assert_eq!(state.pattern, 4);
+        assert!(key(state, &winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter), false));
+        assert!(state.pat_ui.name_box.is_none());
+        assert_eq!(state.project.pattern(4).unwrap().name.as_deref(), Some("Pattern 4"));
+        assert!(crate::views::playlist::pick_items(state).contains(&ClipSource::Pattern(4)));
+    }
+
+    #[test]
+    fn canceling_the_default_name_does_not_create_a_pattern() {
+        let mut app = app();
+        let state = &mut app.state;
+        let before = listed(state);
+        run(state, Cmd::FindFirst, (0.0, 0.0));
+        hit(state, Hit::Cancel);
+        assert_eq!(listed(state), before);
+        assert!(state.project.pattern(4).is_none());
+        run(state, Cmd::FindFirst, (0.0, 0.0));
+        key(state, &winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), false);
+        assert_eq!(listed(state), before);
+        assert!(state.project.pattern(4).is_none());
+    }
+
+    #[test]
+    fn clearing_an_existing_pattern_name_still_removes_it() {
+        let mut app = app();
+        let state = &mut app.state;
+        state.pattern = 1;
+        run(state, Cmd::Rename, (0.0, 0.0));
+        state.pat_ui.name_box.as_mut().unwrap().text.clear();
+        hit(state, Hit::Accept);
+        assert!(state.project.pattern(1).unwrap().name.is_none());
+        assert!(!state.project.pattern(1).unwrap().notes.is_empty());
     }
 
     #[test]
