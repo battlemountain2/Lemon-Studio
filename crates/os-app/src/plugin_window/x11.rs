@@ -164,7 +164,7 @@ struct Frame {
     gc: xproto::Gcontext,
     state: RefCell<State>,
     canvas: RefCell<Canvas>,
-    scale: f32,
+    scale: Cell<f32>,
     /// The frame needs painting (`paint_dirty`).
     dirty: Cell<bool>,
     /// The last left press (server time, position) for double clicks.
@@ -181,6 +181,17 @@ fn px(v: f32, k: f32) -> u16 {
     (v * k).round().clamp(1.0, f32::from(u16::MAX)) as u16
 }
 
+fn frame_scale(owner: isize, parent_scale: f32, server_scale: f32) -> f32 {
+    let scale = if owner != 0 { parent_scale } else { server_scale };
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else if server_scale.is_finite() && server_scale > 0.0 {
+        server_scale
+    } else {
+        1.0
+    }
+}
+
 fn pixel(c: Color) -> u32 {
     u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
 }
@@ -188,12 +199,12 @@ fn pixel(c: Color) -> u32 {
 impl FrameWindow {
     /// A hidden frame for an editor of `editor` logical px; `raise` shows it. Docked (a child of `owner`, the main
     /// window, at screen position `pos`) unless `detached` or the main window is not an X11 one (`owner` 0); a detached
-    /// frame is placed by the window manager, transient for `owner`. The scale is the X server's (`Xft.dpi`), not
-    /// `_scale`: under Wayland the main window's scale does not apply to X11 windows.
-    pub fn new(owner: isize, info: ChannelInfo, editor: (f32, f32), _scale: f32, pos: (i32, i32), detached: bool) -> Result<FrameWindow, String> {
+    /// frame is placed by the window manager, transient for `owner`. With an X11 main window it shares the main
+    /// window's scale; a native Wayland main window has no X11 owner, so the frame uses the X server's scale.
+    pub fn new(owner: isize, info: ChannelInfo, editor: (f32, f32), scale: f32, pos: (i32, i32), detached: bool) -> Result<FrameWindow, String> {
         let conn = conn()?;
         let fail = |e: &dyn std::fmt::Display| format!("could not create the plugin window: {e}");
-        let k = conn.scale;
+        let k = frame_scale(owner, scale, conn.scale);
         let owner = owner as xproto::Window;
         set_owner(&conn, owner);
         let docked = owner != 0 && !detached;
@@ -273,7 +284,7 @@ impl FrameWindow {
             gc,
             state: RefCell::new(state),
             canvas: RefCell::new(canvas),
-            scale: k,
+            scale: Cell::new(k),
             dirty: Cell::new(true),
             last_press: Cell::new(None),
         });
@@ -413,9 +424,20 @@ impl FrameWindow {
         }
     }
 
-    /// The scale the frame is drawn at (the X server's).
+    /// The scale the frame is drawn at.
     pub fn scale(&self) -> f32 {
-        self.f.scale
+        self.f.scale.get()
+    }
+
+    pub fn set_scale(&self, scale: f32) {
+        if !scale.is_finite() || scale <= 0.0 || self.f.scale.get() == scale {
+            return;
+        }
+        self.f.scale.set(scale);
+        self.f.state.borrow_mut().clip_key = None;
+        self.f.layout();
+        self.f.apply_clip();
+        expose();
     }
 
     /// Follows a new editor size (plugins may resize).
@@ -503,7 +525,7 @@ impl Frame {
         let (fw, fh) = st.size();
         let (ay, ed, show) = (st.area_y(), st.editor, !st.misc);
         drop(st);
-        let (k, c) = (self.scale, &self.conn.c);
+        let (k, c) = (self.scale.get(), &self.conn.c);
         let (w, h) = (px(fw, k), px(fh, k));
         let _ = fixed_size(c, self.win, w, h);
         let _ = c.configure_window(self.win, &ConfigureWindowAux::new().width(u32::from(w)).height(u32::from(h)));
@@ -571,7 +593,7 @@ impl Frame {
 
     /// A window point (logical px) on the X screen (physical px).
     fn to_screen(&self, x: f32, y: f32) -> (i32, i32) {
-        let k = self.scale;
+        let k = self.scale.get();
         let t = self.conn.c.translate_coordinates(self.win, self.conn.root, (x * k) as i16, (y * k) as i16);
         t.ok().and_then(|t| t.reply().ok()).map_or((0, 0), |r| (i32::from(r.dst_x), i32::from(r.dst_y)))
     }
@@ -622,7 +644,7 @@ impl Frame {
     }
 
     fn event(&self, e: Event) {
-        let k = self.scale;
+        let k = self.scale.get();
         let screen = |x: f32, y: f32| self.to_screen(x, y);
         match e {
             Event::Expose(_) => self.dirty.set(true),
@@ -1019,4 +1041,25 @@ pub fn default_position(owner: isize, scale: f32) -> (i32, i32) {
     }
     let (x, y) = to_root(&conn, owner as xproto::Window, (0, 0));
     (x + (420.0 * scale).round() as i32, y + (160.0 * scale).round() as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::frame_scale;
+
+    #[test]
+    fn x11_frames_share_the_host_scale() {
+        for scale in [0.75, 1.0, 1.25, 1.5, 2.0] {
+            assert_eq!(frame_scale(42, scale, 1.0), scale);
+        }
+        assert_eq!(frame_scale(0, 2.0, 1.25), 1.25);
+    }
+
+    #[test]
+    fn invalid_frame_scales_have_a_safe_fallback() {
+        for scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(frame_scale(42, scale, 1.25), 1.25);
+            assert_eq!(frame_scale(0, 2.0, scale), 1.0);
+        }
+    }
 }

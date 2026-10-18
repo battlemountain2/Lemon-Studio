@@ -18,6 +18,7 @@ do not reset or force-push main to update it.
 | Linux scan environment | Retain downstream additional library lookup for scanner children. | Scanner tests. This is not a guarantee that the runtime loader can instantiate every plugin found by scanning. |
 | Playlist double-click | Keep downstream picker double-click alongside upstream right-click pattern menus. | App/editor tests. |
 | Default pattern names | Keep an explicitly confirmed `Pattern N` name so an empty new pattern appears in the picker without custom typing. Browsing and cancellation must not create patterns. | Checkmark hit-testing, repeated creation, Enter, cancel/Escape, clearing an existing name and FLP save/reopen regressions in `os-app::patterns`. |
+| Hyprland/XWayland scaling | Retain X11 docking. Linux plugin frames inherit the X11 host scale and docked editors follow scale changes, preserving their active page; docking requests reconcile stale scales. Native Wayland's separate plugin frames retain X-server scaling. | Scale-selection/validation unit tests and the explicit display-dependent `docked_editor_follows_xwayland_parent_scale` check, covering real Lemon Sampler geometry and docking at fractional/integer scales. |
 | CI and bundles | Run inherited platform matrix on main, integrate, feat and fix branches as well as PRs. Lock nested plugin builds. | CI must actually run remotely before claiming Windows/macOS verification. |
 
 ## Source attribution
