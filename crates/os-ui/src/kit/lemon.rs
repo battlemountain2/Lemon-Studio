@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Widget looks of the Lemon design: flat rounded squares on neutral greys, one lemon brand colour; knobs stay
 //! round. Every painter takes the same geometry as its Classic twin in `kit.rs`: the design changes the look,
@@ -231,8 +229,12 @@ pub fn scrollbar(c: &mut Canvas, t: &Palette, track: Rect, vertical: bool, pos: 
     let len = if vertical { track.h } else { track.w };
     let (off, tl) = super::thumb(len, pos, view, total);
     let r = if vertical { Rect::new(track.x + 2.0, track.y + off + 1.0, track.w - 4.0, tl - 2.0) } else { Rect::new(track.x + off + 1.0, track.y + 2.0, tl - 2.0, track.h - 4.0) };
-    let col = if st.pressed { brand::DARK_HIGHLIGHT.shade(0.15) } else if st.hover { brand::DARK_HIGHLIGHT } else { t.overview };
-    c.fill_rrect(r, (r.w.min(r.h) / 2.0).max(0.0), col);
+    c.fill_rrect(r, (r.w.min(r.h) / 2.0).max(0.0), super::scroll_thumb(t, st, super::high_visibility()));
+}
+
+/// The scroll bar thumb's own colour (`super::scroll_thumb` without high visibility).
+pub fn scroll_thumb(t: &Palette, st: State) -> Color {
+    if st.pressed { brand::DARK_HIGHLIGHT.shade(0.15) } else if st.hover { brand::DARK_HIGHLIGHT } else { t.overview }
 }
 
 // ---------------------------------------------------------------- windows and popups

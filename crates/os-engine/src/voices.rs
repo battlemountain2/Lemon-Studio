@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! A hosted instrument's voices as the host can know them: from the notes it sends and what the instrument reports
 //! back. The plugin hosts keep one list per instance and give its count as `Instrument::voices`.
@@ -97,6 +95,18 @@ impl VoiceLedger {
             self.release(key);
         } else {
             self.voices.retain(|v| v.key != key);
+        }
+    }
+
+    /// A choke of the voice with note id `id` alone (an audio clip's end; the key's other voices play on).
+    pub fn choke_voice(&mut self, id: i32) {
+        if self.reports {
+            let left = self.release_left();
+            for v in self.voices.iter_mut().filter(|v| v.id == id && v.left.is_none()) {
+                v.left = Some(left);
+            }
+        } else {
+            self.voices.retain(|v| v.id != id);
         }
     }
 

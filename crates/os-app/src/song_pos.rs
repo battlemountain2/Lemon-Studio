@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! The song position slider in the toolbar's main panel (spec: ui/song-position-slider.md): where the song position
 //! is within the song (SONG mode) or the pattern (PAT mode), and a way to move it.
@@ -31,8 +29,7 @@ pub fn range(s: &State) -> Option<u32> {
     if s.song_mode {
         crate::playlist::clips(s).iter().map(|c| c.end()).max().filter(|&e| e > 0)
     } else {
-        let notes = s.project.pattern(s.pattern).map_or(&[][..], |p| &p.notes);
-        Some(crate::piano::pattern_length(s, notes).max(1))
+        Some(crate::piano::pattern_length(s, s.pattern).max(1))
     }
 }
 
@@ -89,6 +86,9 @@ impl App {
         let s = &mut self.state;
         if s.song_mode {
             s.playlist.pos = t;
+            // The initial values follow a song position move (spec: ui/settings-choices.md "Advanced: Initialize
+            // controls automatically").
+            crate::init::apply(s);
         } else {
             s.piano.marker = t;
         }
@@ -124,7 +124,8 @@ impl App {
     /// held, see `song_pos_tick`).
     pub(crate) fn song_pos_press(&mut self) {
         let Some(range) = range(&self.state) else { return };
-        let x = self.mouse.0;
+        // The slider is laid out in the top band's px (Toolbars scaling).
+        let x = self.band_mouse().0;
         let hx = handle_x(self.song_pos_now(), range);
         if (x - hx).abs() <= GRAB {
             self.drag = Some(Drag::SongPos { dx: x - hx });
@@ -138,7 +139,7 @@ impl App {
     fn song_pos_step(&mut self) {
         let Some(range) = range(&self.state) else { return };
         let now = self.song_pos_now();
-        let target = tick_at(self.mouse.0, range);
+        let target = tick_at(self.band_mouse().0, range);
         let step = click_step(range, self.state.project.ppq);
         let next = if target > now { (now + step).min(target) } else { now.saturating_sub(step).max(target) };
         if next != now {
@@ -149,7 +150,7 @@ impl App {
     /// Dragging the handle: the position follows the pointer (minus the grab offset).
     pub(crate) fn song_pos_drag(&mut self, dx: f32) {
         if let Some(range) = range(&self.state) {
-            self.set_song_pos(tick_at(self.mouse.0 - dx, range), false);
+            self.set_song_pos(tick_at(self.band_mouse().0 - dx, range), false);
         }
     }
 
@@ -161,7 +162,7 @@ impl App {
     /// Right click on the slider: straight to the pointer (§3).
     pub(crate) fn song_pos_jump(&mut self) {
         if let Some(range) = range(&self.state) {
-            self.set_song_pos(tick_at(self.mouse.0, range), true);
+            self.set_song_pos(tick_at(self.band_mouse().0, range), true);
         }
     }
 

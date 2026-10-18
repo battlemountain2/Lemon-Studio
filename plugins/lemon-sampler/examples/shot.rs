@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Renders the Lemon Sampler editor offscreen:
 //! `cargo run -p lemon-sampler --example shot -- out.png [tab] [sample.wav|""] [full|hosted|-] [sub] [fx-page] [x,y] [spectrum]`.
@@ -41,7 +39,7 @@ fn main() {
         }
         _ => None,
     };
-    let sv = SampleView { sample: sample.as_ref(), path, bits, spectrum: spec.as_ref().map(|(w, h, p)| (*w, *h, p.as_slice())) };
+    let sv = SampleView { sample: sample.as_ref(), path, bits, spectrum: spec.as_ref().map(|(w, h, p)| (*w, *h, p.as_slice())), tones: None };
     let theme = os_plugkit::palette();
     view::paint(&mut c, &theme, &vals, &st, &sv, "", hosted);
     if std::env::var_os("OS_BENCH").is_some() {

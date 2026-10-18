@@ -1,5 +1,9 @@
 # Gemini handoff — compare the maintained fork with upstream
 
+Historical checkpoint: Bry subsequently asked Codex to continue the work rather than delegate it. The completed
+local integration and current next steps are in [the October 17 integration record](upstream-integration-2026-10-17.md).
+The read-only instructions and revision/publication status below describe the earlier handoff, not the current task.
+
 Prepared October 17, 2026, America/Denver. Start with assessment, not an automatic merge or another feature implementation.
 
 ## Bry's request

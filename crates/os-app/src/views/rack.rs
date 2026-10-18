@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Channel rack window: a floating, resizable child window.
 // spec: ui/channel-rack.md
@@ -24,6 +22,9 @@ pub const DEFAULT_SIZE: (f32, f32) = (499.0 + rk::NAME_W - rk::FL_NAME_W, 246.0)
 pub const MIN_H: f32 = 96.0 + ROW_H;
 /// Space above the first row and below the last one inside the rows panel.
 const PAD: f32 = 18.0;
+/// The Classic name button's face: the channel colour mixed this far toward the theme's neutral face (`clip_colors`
+/// stores new clip channels' colours through it).
+pub const NAME_MIX: f32 = 0.35;
 /// Graph editor panel height (§14), its tab row included.
 pub const GRAPH_H: f32 = 240.0;
 const GRAPH_TABS_H: f32 = 20.0;
@@ -255,6 +256,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let (x, y, w, h) = (win.x, win.y, win.w, win.h);
     let c = cols(s);
     let lemon = super::lemon(ui);
+    let hv = crate::high_visibility::on();
     // Frame (§1). Lemon (spec: ui/lemon-design.md §5): one rounded outlined panel.
     if lemon {
         lk::outlined(ui.c, win, lk::r_panel(t), t.window_border, t.window_body);
@@ -288,6 +290,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let total_steps = len.max(steps_shown) + 256;
     let first_step = (sx / STEP_W).floor() as u32;
     let per_step = rk::per_step(s);
+    let (group, bars) = (rk::beat_steps(s), rk::pattern_bars(s, len * per_step));
     let pat = s.project.pattern(s.pattern);
     let notes: &[os_model::Note] = pat.map_or(&[], |p| &p.notes);
     // Playback position (pattern mode): the current step (§16).
@@ -344,7 +347,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
                 ui.c.fill_rrect(mb, 3.0, t.rack_control_border);
                 ui.c.fill_rect_gradient(mb.inset(1.0), face.shade(-0.04), face, 2.5);
             }
-            let num_c = if mhov { t.glyph } else { t.text_dim.shade(0.08) };
+            // Brighter under High visibility (the Lemon look's brightest text colour, also on hover).
+            let num_c = if mhov && !(hv && lemon) { t.glyph } else { crate::high_visibility::rack_number(t, lemon, hv) };
             let label = if ch.mixer_track == 0 { "M".to_string() } else { ch.mixer_track.to_string() };
             let nf = super::light(19.0);
             let lh = ui.c.line_height(nf);
@@ -353,16 +357,19 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         }
         // Name button (§13): the channel colour fills the face.
         let nhov = ui.hit(nb, Action::ChannelSelect(i), "Click: plugin window, Shift+click: rename, right-click: channel menu");
-        let base = ch.color.map_or(t.name_button, |col| rgb(col).mix(t.name_button, 0.35));
+        let base = ch.color.map_or(t.name_button, |col| rgb(col).mix(t.name_button, NAME_MIX));
         let face = if focused { base.shade(0.18).mix(t.name_button_sel, 0.5) } else { base };
         let face = if nhov { face.shade(0.06) } else { face };
+        // The name text is brighter under High visibility (`crate::high_visibility::rack_name`).
+        let name_c = crate::high_visibility::rack_name(t, lemon, hv);
         let col = if lemon {
-            lk::name_button(ui.c, t, nb, ch.color.map(rgb), focused, nhov)
+            let col = lk::name_button(ui.c, t, nb, ch.color.map(rgb), focused, nhov);
+            if focused { col } else { name_c }
         } else {
             ui.c.fill_rrect(nb, 3.0, t.rack_control_border.shade(0.08));
             ui.c.fill_rect(Rect::new(nb.x + 1.0, nb.y + 1.0, nb.w - 2.0, 1.0), face.shade(0.12));
             ui.c.fill_rect_gradient(Rect::new(nb.x + 1.0, nb.y + 2.0, nb.w - 2.0, nb.h - 4.0), face.shade(0.03), face.shade(-0.04), 1.5);
-            let col = if ch.color.is_some() { t.name_text.shade(0.2) } else { t.name_text };
+            let col = if ch.color.is_some() { name_c.shade(0.2) } else { name_c };
             if focused { col.shade(0.25) } else { col }
         };
         let label = ch.name.clone().unwrap_or_else(|| format!("Channel {}", ch.index + 1));
@@ -405,7 +412,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         let step_area = Rect::span(step_x0 - 1.0, steps_right, rows_clip.y, rows_clip.bottom());
         if s.rack_roll_view || !plain_steps(notes, ch.index) {
             let block = Rect::span(step_x0 - 2.0, steps_right + 2.0, ry - 2.0, ry + 28.0);
-            mini_roll(ui, block, notes, ch.index, per_step, sx, focused);
+            mini_roll(ui, block, notes, ch.index, per_step, &bars, focused);
             ui.hit(block.intersect(&rows_clip), Action::RackRoll(i), "Piano roll preview - click to open the Piano roll");
         } else {
             let row_len = rk::row_len(s, i);
@@ -414,7 +421,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
                 let sr = Rect::new(step_x0 + STEP_W * k as f32 - sx, ry + 4.0, 13.0, 19.0);
                 let on = rk::step_on(notes, ch.index, k, per_step);
                 let hov = ui.hit(sr.intersect(&step_area), Action::Step(i, k), "Step - click or drag to paint (left / right)");
-                step_button(ui, sr, k, on, k >= row_len, hov, on && cur_step.is_some_and(|c| c % len.max(1) == k));
+                step_button(ui, sr, (k / group) % 2 == 1, on, k >= row_len, hov, on && cur_step.is_some_and(|c| c % len.max(1) == k));
             }
             ui.c.pop_clip();
         }
@@ -465,8 +472,10 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
     let tlen = (view / total_px * track.w).clamp(16.0f32.min(track.w), track.w.max(0.0));
     let max = (total_px - view).max(0.0);
     let off = if max > 0.0 { sx / max * (track.w - tlen) } else { 0.0 };
-    ui.c.fill_rect(Rect::new(track.x + off + 6.0, track.y + 2.0, (tlen - 12.0).max(8.0), 3.0), ui.t.s(0x14181a));
-    let chev = ui.t.s(0x3c4042);
+    // Light thumb and chevrons under High visibility (`os_ui::kit::scroll_thumb`, `scroll_arrow`).
+    let thumb_c = if hv { os_ui::kit::scroll_thumb(t, os_ui::kit::State::NORMAL, true) } else { ui.t.s(0x14181a) };
+    ui.c.fill_rect(Rect::new(track.x + off + 6.0, track.y + 2.0, (tlen - 12.0).max(8.0), 3.0), thumb_c);
+    let chev = os_ui::kit::scroll_arrow(t, os_ui::kit::State::NORMAL, hv).unwrap_or(ui.t.s(0x3c4042));
     let cy = track.cy();
     ui.c.polyline(&[(track.x, cy - 3.0), (track.x - 3.0, cy), (track.x, cy + 3.0)], 1.3, chev);
     ui.c.polyline(&[(x + w - 23.0, cy - 3.0), (x + w - 20.0, cy), (x + w - 23.0, cy + 3.0)], 1.3, chev);
@@ -605,11 +614,14 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
     let sxc = r - 35.0;
     let br = Rect::new(sxc - 10.0, y + 5.0, 20.0, 20.0);
     let hov = ui.hit(br, Action::RackRollView, "Interactive step sequencer / piano roll overview");
-    // On (§6): orange outline with a dark orange fill; hover draws the outline.
+    // On (§6): orange outline with a dark orange fill; hover draws the outline. Off under High visibility: always the
+    // hover look, in the Classic look the measured 2 px orange outline (spec: ui/settings-choices.md "Display: PPI
+    // ruler, Force refreshes, Thick lines, High visibility").
+    let hv = crate::high_visibility::on();
     if lemon {
         if roll_view {
             lk::lit(ui.c, br, lk::r_btn(t), hov);
-        } else if hov {
+        } else if hov || hv {
             ui.c.fill_rrect(br, lk::r_btn(t), t.button_hi);
         }
         let oc = if roll_view { lk::ink_on_lemon() } else { t.accent };
@@ -620,6 +632,8 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
         if roll_view {
             ui.c.fill_rrect(br, 3.0, ui.t.h(0xc1923a));
             ui.c.fill_rrect(br.inset(1.0), 2.5, ui.t.h(0x574b30));
+        } else if hv {
+            ui.c.stroke_rrect(br, 3.0, 2.0, ui.t.h(0xf9b83f));
         } else if hov {
             ui.c.stroke_rrect(br, 3.0, 1.0, ui.t.h(0xc1923a));
         }
@@ -636,9 +650,9 @@ fn title_bar(ui: &mut Ui, s: &State, win: Rect, c: Cols, f: &FrameInfo) {
 }
 
 /// One step button (§3): bordered, lighter at the top, a dark dash below the top edge (red at the play position).
-fn step_button(ui: &mut Ui, r: Rect, k: u32, on: bool, past_len: bool, hov: bool, playing: bool) {
+/// `odd`: in an odd colour group (red; a group is a beat of the project's signature, §23).
+fn step_button(ui: &mut Ui, r: Rect, odd: bool, on: bool, past_len: bool, hov: bool, playing: bool) {
     let t = ui.t;
-    let odd = (k / 4) % 2 == 1;
     if super::lemon(ui) {
         return lk::step(ui.c, t, r, on, odd, past_len, hov, playing);
     }
@@ -678,10 +692,11 @@ fn graph_editor(ui: &mut Ui, s: &State, sx: f32, first: u32, shown: u32) {
     let notes = rk::row_notes(s, s.selected_channel);
     ui.c.push_clip(bars);
     let x0 = s.rack_pos.0 + cols(s).step_x;
+    let group = rk::beat_steps(s);
     for k in first..first + shown + 1 {
         let cx = x0 + STEP_W * k as f32 - sx;
         let col = Rect::new(cx - 1.0, bars.y, STEP_W, bars.h);
-        ui.c.fill_rect(col, if (k / 4) % 2 == 0 { ui.t.s(0x1b1e20) } else { ui.t.s(0x202326) });
+        ui.c.fill_rect(col, if (k / group) % 2 == 0 { ui.t.s(0x1b1e20) } else { ui.t.s(0x202326) });
         ui.c.fill_rect(Rect::new(col.right() - 1.0, col.y, 1.0, col.h), ui.t.s(0x111315));
         let Some(n) = notes.iter().find(|n| n.position / ps == k) else { continue };
         let v = tab.get(n, ps);
@@ -721,26 +736,23 @@ fn graph_editor(ui: &mut Ui, s: &State, sx: f32, first: u32, shown: u32) {
     }
 }
 
-/// Mini piano roll of one channel (§6) in `block` (one 30 px row); `sx` is the step scroll in pixels.
-fn mini_roll(ui: &mut Ui, block: Rect, notes: &[os_model::Note], ch: u16, per_step: u32, sx: f32, focused: bool) {
+/// Mini piano roll of one channel (§6) in `block` (one 30 px row): the pattern's whole length spans the block,
+/// whatever the step scroll (§23). `bars`: the pattern's bars in ticks, the last ending at its length.
+fn mini_roll(ui: &mut Ui, block: Rect, notes: &[os_model::Note], ch: u16, per_step: u32, bars: &[(u32, u32)], focused: bool) {
     // (separator, fill) for odd and even bars.
     let shades = if focused {
         [(ui.t.s(0x040709), ui.t.s(0x111416)), (ui.t.s(0x000002), ui.t.s(0x0a0d0f))]
     } else {
         [(ui.t.s(0x0a0d0f), ui.t.s(0x171a1c)), (ui.t.s(0x030608), ui.t.s(0x101315))]
     };
-    let bar = 16.0 * STEP_W;
-    let mut k = (sx / bar).floor();
-    loop {
-        let x0 = block.x + 2.0 + k * bar - sx;
-        if x0 >= block.right() {
-            break;
-        }
-        let span = Rect::span(x0.max(block.x), (x0 + bar).min(block.right()), block.y, block.bottom());
-        let (sep, fill) = shades[(k as i64 % 2) as usize];
+    let end = bars.last().map_or(1, |b| b.1).max(1);
+    let scale = block.w / end as f32;
+    let x_of = |tick: u32| block.x + tick as f32 * scale;
+    for (k, &(a, b)) in bars.iter().enumerate() {
+        let span = Rect::span(x_of(a).round(), x_of(b).round(), block.y, block.bottom());
+        let (sep, fill) = shades[k % 2];
         ui.c.fill_rect(span, sep);
         ui.c.fill_rect(Rect::span(span.x, span.right(), span.y + 1.0, span.bottom() - 1.0), fill);
-        k += 1.0;
     }
     let mine: Vec<&os_model::Note> = notes.iter().filter(|n| n.channel == ch).collect();
     let lo = mine.iter().map(|n| n.key).min().unwrap_or(60);
@@ -748,9 +760,9 @@ fn mini_roll(ui: &mut Ui, block: Rect, notes: &[os_model::Note], ch: u16, per_st
     let range = f32::from((hi - lo).max(1));
     ui.c.push_clip(block);
     for n in mine {
-        let nx = block.x + 2.0 + n.position as f32 / per_step as f32 * STEP_W - sx;
+        let nx = x_of(n.position);
         let len = if n.length == 0 { per_step } else { n.length };
-        let nw = (len as f32 / per_step as f32 * STEP_W - 1.0).max(2.0);
+        let nw = (len as f32 * scale - 1.0).max(2.0);
         let t = if hi == lo { 0.5 } else { f32::from(n.key - lo) / range };
         let ny = (block.bottom() - 7.0 - t * (block.h - 10.0)).round();
         ui.c.fill_rect(Rect::new(nx, ny, nw, 1.0), ui.t.a(0x698a6f));

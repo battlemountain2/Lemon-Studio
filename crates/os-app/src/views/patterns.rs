@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Pattern name box (with suggestions and colour swatches) and the delete confirmation.
 // spec: ui/pattern-menu.md §3, §4
@@ -193,6 +191,8 @@ pub fn paint(ui: &mut Ui, s: &State) {
             None => format!("{} is about to be deleted.", pt::name_of(s, s.pattern.max(1))),
         };
         ui.c.text_clip(font, r.x + 12.0, r.y + 40.0, r.w - 24.0, t.glyph, &msg);
+        // spec: ui/settings-choices.md "Hints and warnings: Manage messages and Project data size warning (2026-10-16)"
+        super::remember_check(ui, r.x + 12.0, r.bottom() - 22.0, s.pat_ui.remember, Action::Pat(Hit::ConfirmRemember));
         for (i, (label, hit)) in [("Ok", Hit::ConfirmOk), ("Cancel", Hit::ConfirmCancel)].into_iter().enumerate() {
             let br = Rect::new(r.right() - 180.0 + i as f32 * 86.0, r.bottom() - 34.0, 80.0, 24.0);
             let hov = ui.hit(br, Action::Pat(hit), label);

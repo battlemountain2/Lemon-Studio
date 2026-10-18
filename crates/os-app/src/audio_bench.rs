@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Audio-thread load on a real project: opens it as the app does (Lemon Sampler instances, hosted effects), renders the
 //! song tick by tick and prints how long each second of audio took to render, as a share of one core. Ticks render the
@@ -44,6 +42,18 @@ impl Instrument for TimedInst {
     }
     fn choke(&mut self, offset: u32, key: u8) {
         self.0.lock().unwrap().choke(offset, key)
+    }
+    fn voice_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels, voice: u32) {
+        self.0.lock().unwrap().voice_start(offset, key, velocity, start, levels, voice)
+    }
+    fn voice_gains(&self) -> bool {
+        self.0.lock().unwrap().voice_gains()
+    }
+    fn voice_gain(&mut self, offset: u32, voice: u32, gain: f32) {
+        self.0.lock().unwrap().voice_gain(offset, voice, gain)
+    }
+    fn voice_choke(&mut self, offset: u32, key: u8, voice: u32) {
+        self.0.lock().unwrap().voice_choke(offset, key, voice)
     }
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
         self.0.lock().unwrap().tune(offset, key, semitones)

@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! The sequencer's tick clock: song positions in ticks become sample positions through a running sum of the
 //! samples per tick, so every tick lasts a whole number of samples that varies by one from tick to tick.
@@ -10,9 +8,9 @@
 // spec: audio/timing.md ("Samples per tick", "The tick clock", "Tempo that changes")
 
 /// Samples per tick at `bpm`: the tempo is held as a single, the division is done in doubles.
-/// Bounded to supported tempo range 10.0..=999.0 to protect against division by zero, NaN, and infinite tick sizes.
+/// Bounded to quarter-note tempos derived from supported tempos and bar divisions; invalid inputs use 130 BPM.
 pub fn samples_per_tick(rate: u32, ppq: u16, bpm: f64) -> f64 {
-    let bpm = if bpm.is_finite() && bpm > 0.0 { bpm.clamp(10.0, 999.0) } else { 130.0 };
+    let bpm = if bpm.is_finite() && bpm > 0.0 { bpm.clamp(2.5, 999.0 * f64::from(u16::MAX) / 4.0) } else { 130.0 };
     let ppq = ppq.clamp(1, 960);
     f64::from(rate) * 60.0 / (f64::from(bpm as f32) * f64::from(ppq))
 }
@@ -109,6 +107,16 @@ impl Clock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derived_meter_tempos_are_not_clamped_to_the_display_tempo_range() {
+        for (tempo, steps) in [(10.0, 1), (999.0, 16), (120.0, 2)] {
+            let project = os_model::Project { bar: Some((6, steps)), ppq: 96, ..Default::default() };
+            let quarter_tempo = project.tick_tempo(tempo);
+            let expected = 44100.0 * 60.0 / (f64::from(quarter_tempo as f32) * 96.0);
+            assert_eq!(samples_per_tick(44100, 96, quarter_tempo), expected);
+        }
+    }
 
     /// spec: audio/timing.md: at 185 BPM, 96 PPQ and 44100 Hz a tick is 148.986... samples, so ticks are 148 or 149
     /// samples long in the pattern the running sum gives.

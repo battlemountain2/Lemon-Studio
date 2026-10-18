@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! "Type in value...": the value box of the knob and parameter menus. It is the playlist's inline text box
 //! (`EditTarget::TypeIn`) drawn as FL's value box, reading the text in the knob's own unit or as a normalized value.
@@ -159,7 +157,10 @@ fn get(s: &State, t: Target) -> Option<f64> {
 
 fn set(s: &mut State, t: Target, v: f64) {
     match t {
-        Target::Knob(k) => s.set_knob(k, v as f32),
+        Target::Knob(k) => {
+            crate::history::knob(s, k, false);
+            s.set_knob(k, v as f32);
+        }
         Target::Fader(m) => {
             if let Some(t) = crate::mixer::track_mut(s, m) {
                 t.volume = Some(v.clamp(0.0, 1.0));

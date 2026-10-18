@@ -11,13 +11,15 @@ do not reset or force-push main to update it.
 | Metronome | Reuse upstream's engine, sounds and settings; no parallel downstream click engine. | Engine metronome and app transport tests. |
 | Cut groups and channel settings | Use upstream `os-flp::project::write_misc` as the sole writer. Retain the fork's rack self-cut controls. | Create/apply round trips, missing-event insertion, unchanged-save idempotence. |
 | Plugin hosting and UI | Keep upstream VST2, CLAP mono/wakeup work, plugin/editor and interface changes. | Workspace tests plus bundled VST3/CLAP hosting tests. These do not prove arbitrary third-party plugins work. |
-| Safer disk saves | Retain the fork's synced temporary-file/rename approach in `os-app::app`. | Existing save test. Unique temporary names, recovery backups and crash/durability testing remain open. |
+| Safer disk saves | Retain the fork's synced temporary-file/rename approach in `os-app::app`, alongside upstream overwrite backups, autosave and data-folder selection. | App save and upstream backup tests. Unique temporary names, backup failure reporting and crash/durability testing remain open. |
 | Live effect replacement | Keep the fork's effect identity/state check before transferring live DSP in `os-engine::engine`. | Name/state transfer tests and an audio-output delay-to-reverb replacement regression. |
-| Note recording | Retain downstream recording, wait-for-input, count-in and blend/loop controls in `os-app`. Check SONG eligibility before clearing notes; derive count-in beats and duration from meter. | App recording tests, including failed-start note preservation and 3/4 and 6/8 count-in tests. Experimental: callback timestamps, loop-boundary handling, device/channel identity and undo need further work. |
+| Note recording | Retain downstream recording, wait-for-input, count-in and blend/loop controls in `os-app`. Check SONG eligibility before clearing notes; derive count-in from upstream's bar-beat tempo model. Keep upstream step edit separately. | App recording tests, including failed-start note preservation and 3/4 and 6/8 count-in tests. Experimental: callback timestamps, loop-boundary handling, device/channel identity and whole-take undo need further work. Upstream's global history is available but not yet wired to recording takes. |
 | Drums and effects | Retain downstream procedural drum synthesis/template, delay, distortion and reverb in `os-engine`. | Engine/DSP unit tests and template assertions. No claim of FL Studio sonic parity. |
 | Linux scan environment | Retain downstream additional library lookup for scanner children. | Scanner tests. This is not a guarantee that the runtime loader can instantiate every plugin found by scanning. |
 | Playlist double-click | Keep downstream picker double-click alongside upstream right-click pattern menus. | App/editor tests. |
 | Default pattern names | Keep an explicitly confirmed `Pattern N` name so an empty new pattern appears in the picker without custom typing. Browsing and cancellation must not create patterns. | Checkmark hit-testing, repeated creation, Enter, cancel/Escape, clearing an existing name and FLP save/reopen regressions in `os-app::patterns`. |
+| Shared history and editing | Use upstream's global undo/redo, step-edit chord handling, preferences and responsive toolbar instead of parallel downstream versions. Keep audible step preview without changing upstream's left-paint/right-erase drag behavior. | Workspace history, step-edit, toolbar and mouse-button regressions. Live recording is not yet an undoable take. |
+| Meter and tempo | Use upstream `Project::bar`, bar-beat BPM and derived quarter-note tick tempo. Preserve runtime invalid-input bounds without clamping the derived tick tempo to displayed-BPM limits; preserve raw tempo metadata in FLP loading. | Meter/count-in tests, derived-tempo clock regression and FLP tests. |
 | Hyprland/XWayland scaling | Retain X11 docking. Linux plugin frames inherit the X11 host scale and docked editors follow scale changes, preserving their active page; docking requests reconcile stale scales. Native Wayland's separate plugin frames retain X-server scaling. | Scale-selection/validation unit tests and the explicit display-dependent `docked_editor_follows_xwayland_parent_scale` check, covering real Lemon Sampler geometry and docking at fractional/integer scales. |
 | CI and bundles | Run inherited platform matrix on main, integrate, feat and fix branches as well as PRs. Lock nested plugin builds. | CI must actually run remotely before claiming Windows/macOS verification. |
 
@@ -62,3 +64,11 @@ Combined downstream `36e483c4c70b5cb4c5dbae2f0363a6d2788ccb0c` with upstream
   an opening/render smoke test, not a complete physical MIDI/audio/editor acceptance run.
 
 Windows/macOS CI and physical MIDI/controller validation remain unverified for this downstream merge.
+
+## Follow-up integration — October 17, 2026
+
+Merged upstream `b6807951d64a37229a49f1c7522d4c7c1afb1a83` into the saved combined fork at `bc755a8`, preserving
+history and the XWayland repair. See [the comparison, validation record and ordered next steps](upstream-integration-2026-10-17.md).
+Linux workspace validation reported 980 passes, zero failures and 28 ignored, plus a separately passed real
+XWayland docked-editor scaling regression. Fifteen corpus cases remain conditional without private fixtures.
+Rebuilt and installed the app and all three VST3/CLAP pairs; this does not certify third-party plugins or other OSes.

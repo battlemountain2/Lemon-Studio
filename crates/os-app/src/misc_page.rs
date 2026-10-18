@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! The plugin window's Misc tab (a host feature, the same for every channel): levels adjustment, polyphony, time,
 //! tracking, cut groups, arpeggiator, echo delay and the root note with its keyboard. The frame draws it with the
@@ -277,10 +275,9 @@ pub fn range_of(m: M) -> (f32, f32) {
     }
 }
 
-/// Note name ("C5", "F#4"): FL's naming, C5 = MIDI 60.
+/// Note name ("C5", "F#4"): FL's naming, C5 = MIDI 60, as the settings choose it (`crate::note_names`).
 pub fn note_name(key: i32) -> String {
-    const N: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-    format!("{}{}", N[key.rem_euclid(12) as usize], key.div_euclid(12))
+    crate::note_names::note_name(key)
 }
 
 /// The hint value text.

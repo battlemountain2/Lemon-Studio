@@ -1,8 +1,7 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Piano roll state and note editing (view geometry, selection, undo).
 // spec: ui/piano-roll.md §3, §5, §7a, §7b, §8, §9; flp/events/patterns.md (note records, control points)
@@ -12,9 +11,6 @@ use os_ui::Rect;
 
 use crate::app::State;
 use crate::views::piano::{ROW, TOP_KEY};
-
-/// Undo depth (snapshots of one pattern's notes).
-const UNDO_DEPTH: usize = 200;
 
 /// Piano-roll tools (§9), with their shortcut letters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -109,11 +105,12 @@ pub struct PianoState {
     pub split: crate::piano_split::Split,
     /// Last press on the splitter, for its double click.
     pub split_click: Option<std::time::Instant>,
+    /// Whether the window was shown at the last tick (`None` = not yet seen), to notice it opening ([`open_tick`]).
+    pub was_shown: Option<bool>,
     /// The magnet button's setting (spec: ui/piano-snap.md): a program setting, kept in the user folder (crate::snap).
     pub snap: crate::snap::EditorSnap,
     sel: Vec<usize>,
     sel_key: (u16, u16),
-    undo: Vec<(u16, Vec<Note>, Vec<ControlPoint>)>,
 }
 
 impl Default for PianoState {
@@ -140,10 +137,10 @@ impl Default for PianoState {
             rng: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1,
             split: crate::piano_split::load(),
             split_click: None,
+            was_shown: None,
             snap: crate::snap::EditorSnap::default(),
             sel: Vec::new(),
             sel_key: (0, 0),
-            undo: Vec::new(),
         }
     }
 }
@@ -183,13 +180,20 @@ pub struct Geom {
     /// Key row pitch in pixels (§3a).
     pub row: f32,
     pub step: u32,
+    /// Beat and bar of the pattern's grid at its start.
     pub beat: u32,
     pub bar: u32,
+    /// The pattern's own bar grid, `(start, bar, beat)` per time-signature region (`Project::pattern_bars`): its
+    /// time-signature markers set its bars and beats (3/8: a bar every 6 steps, spec: ui/pattern-time-signature.md §2).
+    pub bars: Vec<(u32, u32, u32)>,
 }
 
 impl Geom {
     pub fn new(s: &State, grid: Rect) -> Geom {
         let ppq = u32::from(s.project.ppq.max(4));
+        // A beat is the signature's note value: a quarter in 4/4, an eighth in 3/8.
+        let bars: Vec<(u32, u32, u32)> =
+            s.project.pattern_bars(s.pattern).into_iter().map(|(start, bar, (num, _))| (start, bar, (bar / u32::from(num.max(1))).max(1))).collect();
         Geom {
             grid,
             ppt: s.piano.px_per_beat / ppq as f32,
@@ -197,9 +201,31 @@ impl Geom {
             scroll_y: s.piano.scroll_y,
             row: s.piano.row_h,
             step: ppq / 4,
-            beat: ppq,
-            bar: ppq * 4,
+            beat: bars[0].2,
+            bar: bars[0].1,
+            bars,
         }
+    }
+
+    /// Whether `tick` is on a bar line and on a beat line of the pattern's grid.
+    pub fn line_at(&self, tick: u32) -> (bool, bool) {
+        let &(start, bar, beat) = self.bars.iter().rev().find(|r| r.0 <= tick).unwrap_or(&self.bars[0]);
+        let d = tick.saturating_sub(start);
+        (d % bar == 0, d % beat == 0)
+    }
+
+    /// The bar lines before `end` ticks, with their bar numbers from 1.
+    pub fn bar_lines(&self, end: f32) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for (i, &(start, bar, _)) in self.bars.iter().enumerate() {
+            let next = self.bars.get(i + 1).map_or(u32::MAX, |r| r.0);
+            let mut t = start;
+            while t < next && (t as f32) < end {
+                out.push((t, out.len() as u32 + 1));
+                t = t.saturating_add(bar);
+            }
+        }
+        out
     }
 
     pub fn x_of(&self, tick: f32) -> f32 {
@@ -239,19 +265,55 @@ impl Geom {
     }
 }
 
+/// Where the current pattern plays in the song: each clip of it that sounds (not muted, on a track that is on), as
+/// (song tick of the clip's start, pattern tick there, length), in song order. A clip that plays its whole pattern
+/// (no window) lasts the pattern's length.
+pub fn song_spans(s: &State) -> Vec<(u32, u32, u32)> {
+    let whole = pattern_length(s, s.pattern);
+    let track_on = |t: u16| s.project.arrangement().and_then(|a| a.tracks.get(usize::from(t))).is_none_or(|t| t.enabled);
+    let mut v: Vec<(u32, u32, u32)> = crate::playlist::clips(s)
+        .iter()
+        .filter(|c| c.source == os_model::ClipSource::Pattern(s.pattern) && !c.muted && track_on(c.track))
+        .map(|c| match c.window {
+            Some(w) => (c.position, w.0.max(0.0).round() as u32, c.length),
+            None => (c.position, 0, whole),
+        })
+        .collect();
+    v.sort_unstable();
+    v
+}
+
+/// The pattern tick at song tick `t`, when a clip of the current pattern plays there (the latest-starting one).
+pub fn pattern_tick_in_song(s: &State, t: f64) -> Option<f64> {
+    song_spans(s)
+        .into_iter()
+        .rev()
+        .find(|&(at, _, len)| t >= f64::from(at) && t < f64::from(at) + f64::from(len))
+        .map(|(at, from, _)| f64::from(from) + (t - f64::from(at)))
+}
+
+/// The song tick where pattern tick `t` plays: in the clip that plays at song tick `near` if it shows `t`, else in the
+/// first clip after `near` that does, else in the first one. None when no clip of the pattern shows `t`.
+pub fn song_tick_of(s: &State, t: u32, near: u32) -> Option<u32> {
+    let shows: Vec<(u32, u32, u32)> = song_spans(s).into_iter().filter(|&(_, from, len)| t >= from && t < from + len).collect();
+    let place = |&(at, from, _): &(u32, u32, u32)| at + (t - from);
+    shows
+        .iter()
+        .find(|&&(at, _, len)| near >= at && near < at + len)
+        .or_else(|| shows.iter().find(|&&(at, _, _)| at >= near))
+        .or_else(|| shows.first())
+        .map(place)
+}
+
 /// Length used for drawing: a plain step (length 0) is shown one step long (Lemon Studio choice).
 pub fn shown_len(s: &State, n: &Note) -> u32 {
     if n.length == 0 { u32::from(s.project.ppq.max(4)) / 4 } else { n.length }
 }
 
-/// Pattern length in ticks as the engine loops it: the rack's explicit length, else whole bars past the last note end.
-pub fn pattern_length(s: &State, notes: &[Note]) -> u32 {
-    if let Some(l) = s.project.pattern(s.pattern).and_then(|p| p.length).filter(|&l| l > 0) {
-        return l;
-    }
-    let bar = u32::from(s.project.ppq.max(1)) * 4;
-    let end = notes.iter().map(|n| n.position + shown_len(s, n)).max().unwrap_or(0);
-    (end / bar + 1) * bar
+/// Pattern `n`'s length in ticks as the engine loops it: the rack's explicit length, else its last note's end rounded
+/// up to a bar line of its own time signature (`Project::pattern_length`, spec: audio/song-structure.md).
+pub fn pattern_length(s: &State, n: u16) -> u32 {
+    s.project.pattern_length(n)
 }
 
 /// What the event panel edits (spec: ui/piano-roll.md §7a, §7b). The first seven are note properties, the
@@ -483,29 +545,41 @@ pub fn erase_controls(s: &mut State, channel: u16, param: u16, from: u32, to: u3
     gone
 }
 
-/// Remember the current pattern's notes and control points for undo.
+/// Remember the current pattern's notes and control points for undo: a step of the project's undo history
+/// (`crate::history`).
 pub fn snapshot(s: &mut State) {
-    let number = s.pattern;
-    let notes = notes(s).to_vec();
-    let controls = controls(s).to_vec();
-    s.piano.dirty = true;
-    let u = &mut s.piano.undo;
-    if u.len() >= UNDO_DEPTH {
-        u.remove(0);
-    }
-    u.push((number, notes, controls));
+    snapshot_as(s, "Piano roll edit");
 }
 
-/// Restore the last snapshot; returns false when there is nothing to undo.
-pub fn undo(s: &mut State) -> bool {
-    let Some((number, notes, controls)) = s.piano.undo.pop() else { return false };
-    s.pattern = number;
-    let p = pattern_mut(s);
-    p.notes = notes;
-    p.controls = controls;
+/// `snapshot`, the step named `name` (as the browser's History lists it; spec: ui/settings-choices.md "Undo history:
+/// the four checks (2026-10-16)").
+pub fn snapshot_as(s: &mut State, name: &'static str) {
     s.piano.dirty = true;
-    s.piano.clear_selection();
-    true
+    let snap = crate::history::Snap::pattern(s, s.pattern);
+    crate::history::record(s, name, snap);
+}
+
+/// Undo the newest step of the project's history; returns false when there is nothing to undo.
+#[cfg(test)]
+pub fn undo(s: &mut State) -> bool {
+    crate::history::undo(s).is_some()
+}
+
+/// The timebase changed from `from` to `to` ticks per quarter (`Project::set_ppq` rescaled the project): the scroll,
+/// the last note length, the play-start marker, the time selection, the clipboard and the undo steps follow, so the
+/// view stays on the same beats and an undo brings back nothing of the old timebase.
+pub fn rescale(s: &mut State, from: u16, to: u16) {
+    use os_model::{rescale_length, rescale_tick};
+    let k = f32::from(to.max(1)) / f32::from(from.max(1));
+    let p = &mut s.piano;
+    p.scroll_x *= k;
+    p.last_len = rescale_length(p.last_len, from, to);
+    p.marker = rescale_tick(p.marker, from, to);
+    p.range = p.range.map(|(a, b)| (rescale_tick(a, from, to), rescale_tick(b, from, to)));
+    p.clipboard.iter_mut().for_each(|n| n.rescale(from, to));
+    if let Some((_, x, _)) = &mut p.zoom_back {
+        *x *= k;
+    }
 }
 
 /// Add a note with the defaults of a step (patterns.md) at `tick`/`key`; returns its index.
@@ -519,6 +593,35 @@ pub fn add_note(s: &mut State, channel: u16, tick: u32, key: i32) -> usize {
     let p = pattern_mut(s);
     p.notes.push(note);
     p.notes.len() - 1
+}
+
+/// "Monophonic painting in piano roll" (spec: ui/settings-choices.md "Miscellaneous: seven more checks"): with the
+/// check on, painting note `i` (a draw-tool click, each note a paint drag lays) deletes the notes of other keys of its
+/// channel whose time overlaps it (start before its end, end after its start; a step counts one step long). Notes on
+/// its own key are left to the paint rules. Run after the paint's snapshot, so the deletion undoes with the paint.
+/// Returns note `i`'s index after the deletion.
+pub fn paint_mono(s: &mut State, i: usize) -> usize {
+    if !crate::prefs::check(&crate::prefs::MONO_PAINTING) {
+        return i;
+    }
+    let Some(&n) = notes(s).get(i) else { return i };
+    let (start, end) = (n.position, n.position + shown_len(s, &n));
+    let gone: Vec<usize> = notes(s)
+        .iter()
+        .enumerate()
+        .filter(|&(j, m)| j != i && m.channel == n.channel && m.key != n.key && m.position < end && m.position + shown_len(s, m) > start)
+        .map(|(j, _)| j)
+        .collect();
+    if gone.is_empty() {
+        return i;
+    }
+    let p = pattern_mut(s);
+    for &j in gone.iter().rev() {
+        p.notes.remove(j);
+    }
+    s.piano.clear_selection();
+    s.piano.dirty = true;
+    i - gone.iter().filter(|&&j| j < i).count()
 }
 
 /// The controls a new note takes from the last one touched; never its place, length, key or mute.
@@ -677,6 +780,42 @@ pub fn center_keys(s: &mut State, view_h: f32) {
     let max = (TOP_KEY + 1) as f32 * row - view_h;
     s.piano.scroll_y = ((TOP_KEY as f32 - center) * row - view_h / 2.0 + row / 2.0).clamp(0.0, max.max(0.0)).round();
     s.piano.scroll_x = 0.0;
+}
+
+/// "Auto zoom in piano roll" (spec: ui/settings-choices.md "Miscellaneous"): run on every tick and before each frame
+/// (`App::follow_settings`); when the window opens (hidden → shown) with the check on, [`auto_zoom`] on its note grid. Returns whether it zoomed. The
+/// window shown when a project opens or the program starts is not an opening.
+pub fn open_tick(s: &mut State) -> bool {
+    let shown = s.shown(crate::app::Win::PianoRoll);
+    let was = s.piano.was_shown.replace(shown);
+    if !(shown && was == Some(false) && crate::prefs::check(&crate::prefs::AUTO_ZOOM_PIANO)) {
+        return false;
+    }
+    let grid = crate::views::piano::grid_rect(s);
+    if grid.w < 1.0 || grid.h < 1.0 {
+        return false; // collapsed to its title bar: nothing to fit
+    }
+    auto_zoom(s, grid);
+    true
+}
+
+/// Zoom on the pattern and the channel's notes in a note grid `grid`: from bar 1, the pattern's length plus half a
+/// bar fills the width (FL: a 2-bar pattern shows 2.49 bars); the rows are the tallest that fit the channel's pitch
+/// range plus four spare rows, whole pixels between [`MIN_ROW`] and the default × 1.25, and the range is centred. A
+/// channel without notes: C5 centred at [`MIN_ROW`] rows.
+pub fn auto_zoom(s: &mut State, grid: Rect) {
+    let ppq = f32::from(s.project.ppq.max(4));
+    let span = pattern_length(s, s.pattern) as f32 + s.project.bar_ticks() as f32 / 2.0;
+    s.piano.px_per_beat = (grid.w / span * ppq).clamp(6.0, 1600.0);
+    let ch = channel(s);
+    let keys = notes(s).iter().filter(|n| Some(n.channel) == ch).map(|n| i32::from(n.key));
+    let range = keys.clone().min().zip(keys.max());
+    s.piano.row_h = match range {
+        Some((lo, hi)) => (grid.h / (hi - lo + 1 + 4) as f32).floor().clamp(MIN_ROW, (ROW * 1.25).floor()),
+        None => MIN_ROW,
+    };
+    s.piano.zoom_back = None;
+    center_keys(s, grid.h);
 }
 
 pub fn clamp_scroll(s: &mut State, view_h: f32) {
@@ -1074,5 +1213,64 @@ mod tests {
 
     fn key_name_check(k: i32) -> String {
         crate::views::piano::key_name(k)
+    }
+
+    /// "Auto zoom in piano roll" (spec: ui/settings-choices.md "Miscellaneous"): opening the window zooms on the
+    /// pattern (from bar 1, its length plus half a bar fills the grid) and on the channel's pitch range (centred, rows
+    /// the tallest fitting it plus four spare rows, at most the default × 1.25); without notes, C5 is centred at the
+    /// smallest rows. Off: the zoom stays.
+    #[test]
+    fn auto_zoom_in_piano_roll() {
+        use super::*;
+        use crate::app::{Action, App, Win};
+        use crate::prefs::{set_check, AUTO_ZOOM_PIANO};
+        for on in [false, true] {
+            set_check(&AUTO_ZOOM_PIANO, on);
+            let mut app = App::new(None);
+            app.state.project = crate::app::test_project();
+            app.state.selected_channel = 0;
+            // A floating window: a grid about 300 px tall.
+            let ws = &mut app.state.wins[Win::PianoRoll.slot().expect("a window")];
+            (ws.maxed, ws.rect) = (false, Rect::new(300.0, 150.0, 1000.0, 560.0));
+            // C4, D4 ... F#5 (19 keys), an eighth each from the second eighth on: they end in bar 2, a 2-bar pattern.
+            let notes: Vec<Note> = (0..10u16).map(|k| Note { key: 48 + 2 * k, length: 48, ..Note::step(0, 48 * (u32::from(k) + 1)) }).collect();
+            pattern_mut(&mut app.state).notes = notes;
+            let open = |app: &mut App| {
+                app.state.hide(Win::PianoRoll);
+                app.tick();
+                app.act(Action::ToggleWin(Win::PianoRoll));
+                app.tick();
+                let grid = crate::views::piano::grid_rect(&app.state);
+                (grid, Geom::new(&app.state, grid))
+            };
+            let before = (app.state.piano.px_per_beat, app.state.piano.row_h);
+            let (grid, g) = open(&mut app);
+            if !on {
+                assert_eq!((app.state.piano.px_per_beat, app.state.piano.row_h), before, "off: the zoom stays");
+                continue;
+            }
+            let bar = app.state.project.bar_ticks() as f32;
+            assert!((grid.w / g.ppt / bar - 2.5).abs() < 0.01, "2 bars + half a bar fill the grid: {}", grid.w / g.ppt / bar);
+            assert_eq!(g.scroll_x, 0.0, "from bar 1");
+            assert_eq!(g.row, (grid.h / 23.0).floor(), "19 keys + 4 spare rows in {} px", grid.h);
+            assert!(g.row < 22.0);
+            let mid = (g.y_of(66) + g.y_of(48) + g.row) / 2.0;
+            assert!((mid - grid.cy()).abs() <= g.row, "the range is centred: {mid} in {grid:?}");
+            // The grid opened is where the window paints it.
+            if let Ok(mut c) = os_ui::Canvas::new(1920, 1080, 1.0) {
+                app.paint(&mut c, None);
+                assert_eq!(app.piano_grid, Some(grid));
+            }
+            // Short notes on few keys: the rows stop at the default × 1.25.
+            pattern_mut(&mut app.state).notes.truncate(1);
+            let (_, g) = open(&mut app);
+            assert_eq!(g.row, (ROW * 1.25).floor());
+            // No notes: C5 centred at the smallest rows.
+            pattern_mut(&mut app.state).notes.clear();
+            let (grid, g) = open(&mut app);
+            assert_eq!(g.row, MIN_ROW);
+            assert!((g.y_of(60) + g.row / 2.0 - grid.cy()).abs() <= g.row, "C5 centred");
+        }
+        set_check(&AUTO_ZOOM_PIANO, false);
     }
 }

@@ -1,8 +1,7 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Pattern selector and PATTERNS menu commands: find empty, rename / colour, clone, insert, delete, move,
 //! transpose, plus the name box and the delete confirmation.
@@ -45,6 +44,13 @@ pub enum Cmd {
     Delete,
     MoveUp,
     MoveDown,
+    /// Set time signature...: a dialog, run by `App::pattern_cmd` (spec: ui/pattern-time-signature.md).
+    TimeSignature,
+    /// Open in project browser: the browser's Patterns section, run by `App::pattern_cmd`
+    /// (spec: ui/browser-commands.md §4).
+    OpenInBrowser,
+    /// Split by channel: one pattern per channel with notes (spec: ui/split-by-channel.md §2).
+    SplitByChannel,
 }
 
 impl Cmd {
@@ -64,6 +70,9 @@ impl Cmd {
             "Delete" => Cmd::Delete,
             "Move up" => Cmd::MoveUp,
             "Move down" => Cmd::MoveDown,
+            "Set time signature..." => Cmd::TimeSignature,
+            "Open in project browser" => Cmd::OpenInBrowser,
+            "Split by channel" => Cmd::SplitByChannel,
             _ => return None,
         })
     }
@@ -78,9 +87,11 @@ pub enum Hit {
     /// Column, row of a suggestion (column 0 = recent names).
     Suggest(usize, usize),
     Color,
-    Swatch(usize), // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+    Swatch(usize), // This code is a part of L e m o n S t u d i o.
     ConfirmOk,
     ConfirmCancel,
+    /// The confirmation's Remember my choice check.
+    ConfirmRemember,
     Inside,
 }
 
@@ -102,6 +113,9 @@ pub struct NameBox {
     pub at: (f32, f32),
     pub suggestions: bool,
     pub palette: bool,
+    /// Opened for a new pattern (find empty, insert one): accepting it makes the pattern the playlist's clip
+    /// source, listed in the picker even while empty, so it can be placed at once.
+    pub created: bool,
 }
 
 #[derive(Debug, Default)]
@@ -109,6 +123,10 @@ pub struct PatternUi {
     pub name_box: Option<NameBox>,
     /// "The selected pattern is about to be deleted." is showing.
     pub confirm: bool,
+    /// The confirmation's "Remember my choice" check: off each time it opens; Ok with it ticked turns the
+    /// confirmation's Manage messages entry off, Cancel never does (spec: ui/settings-choices.md "Hints and warnings:
+    /// Manage messages and Project data size warning (2026-10-16)").
+    pub remember: bool,
     pub recent: Vec<String>,
     /// Where the PATTERNS menu opens (`None` = under its menu-bar title).
     pub menu_at: Option<(f32, f32)>,
@@ -127,11 +145,24 @@ pub fn used(p: &Pattern) -> bool {
     !p.notes.is_empty() || !p.controls.is_empty() || p.name.is_some()
 }
 
-/// Numbers of the used patterns, ascending.
+/// Numbers of the listed patterns, ascending: the used ones, those placed in the playlist, and the playlist's clip
+/// source (a new pattern, empty until notes are added).
 pub fn listed(s: &State) -> Vec<u16> {
     let mut v: Vec<u16> = s.project.patterns.iter().filter(|p| used(p)).map(|p| p.number).collect();
+    v.extend(crate::playlist::clips(s).iter().filter_map(|c| if let ClipSource::Pattern(n) = c.source { Some(n) } else { None }));
+    if let Some(ClipSource::Pattern(n)) = s.playlist.source {
+        v.push(n);
+    }
     v.sort_unstable();
+    v.dedup();
     v
+}
+
+/// A new pattern's name box: accepting it lists the pattern and makes it the playlist's clip source.
+fn created_box(s: &mut State) {
+    if let Some(b) = s.pat_ui.name_box.as_mut() {
+        b.created = true;
+    }
 }
 
 pub fn name_of(s: &State, n: u16) -> String {
@@ -260,7 +291,7 @@ pub fn open_name_box(s: &mut State, target: BoxTarget, at: (f32, f32)) {
         BoxTarget::Transpose(_) => String::new(),
         BoxTarget::Rack(b) => crate::rack::box_text(s, b),
     };
-    s.pat_ui.name_box = Some(NameBox { target, text, fresh: true, at, suggestions: false, palette: false });
+    s.pat_ui.name_box = Some(NameBox { target, text, fresh: true, at, suggestions: false, palette: false, created: false });
 }
 
 /// Where a box opened from a menu / key goes: the mouse over its colour tab (§4).
@@ -278,12 +309,17 @@ pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
         Cmd::FindFirst => {
             s.pattern = first_empty(s);
             open_name_box(s, BoxTarget::Name(s.pattern), at);
+            created_box(s);
         }
         Cmd::FindNext => {
             s.pattern = next_empty(s, cur);
             open_name_box(s, BoxTarget::Name(s.pattern), at);
+            created_box(s);
         }
-        Cmd::FindNextNoName => s.pattern = next_empty(s, cur),
+        Cmd::FindNextNoName => {
+            s.pattern = next_empty(s, cur);
+            s.playlist.source = Some(ClipSource::Pattern(s.pattern));
+        }
         Cmd::SelectInPlaylist => {
             let sel: Vec<usize> = crate::playlist::clips(s)
                 .iter()
@@ -314,6 +350,7 @@ pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
         Cmd::InsertOne => {
             renumber(s, |n| Some(if n >= cur { (n + 1).min(MAX) } else { n }));
             open_name_box(s, BoxTarget::Name(cur), at);
+            created_box(s);
         }
         Cmd::Clone => {
             if cur >= MAX {
@@ -326,7 +363,9 @@ pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
             *pat_mut(s, cur + 1) = copy;
             s.pattern = cur + 1;
         }
-        Cmd::Delete => s.pat_ui.confirm = true,
+        // Its Manage messages entry off: as if Ok was pressed.
+        Cmd::Delete if !crate::messages::on(&crate::messages::DELETE_PATTERN) => delete_pattern(s),
+        Cmd::Delete => open_confirm(s),
         Cmd::MoveUp if cur > 1 => {
             swap(s, cur, cur - 1);
             s.pattern = cur - 1;
@@ -336,20 +375,107 @@ pub fn run(s: &mut State, cmd: Cmd, at: (f32, f32)) -> Option<String> {
             s.pattern = cur + 1;
         }
         Cmd::MoveUp | Cmd::MoveDown => {}
+        Cmd::SplitByChannel => split_by_channel(s),
+        // Dialogs and the browser: `App::pattern_cmd` runs them.
+        Cmd::TimeSignature | Cmd::OpenInBrowser => {}
     }
     None
 }
 
-/// Ok in the delete confirmation (channels waiting in the rack go to the app, which removes them).
-pub fn delete_current(s: &mut State) {
-    if let Some(rows) = s.rack.pending_delete.take() {
-        s.rack.delete_now = Some(rows);
-        s.pat_ui.confirm = false;
+/// Shows the delete confirmation (the pattern's, or the channels' waiting in `rack.pending_delete`), its Remember my
+/// choice off.
+pub fn open_confirm(s: &mut State) {
+    s.pat_ui.confirm = true;
+    s.pat_ui.remember = false;
+}
+
+/// The Manage messages entry of the delete confirmation showing: the channels' or the pattern's.
+fn confirming(s: &State) -> &'static crate::messages::Message {
+    if s.rack.pending_delete.is_some() {
+        &crate::messages::DELETE_CHANNEL
+    } else {
+        &crate::messages::DELETE_PATTERN
+    }
+}
+
+/// PATTERNS > Split by channel (spec: ui/split-by-channel.md §2). Channels with notes in the current pattern, in rack
+/// order: the pattern keeps the first one's notes and takes its name; each further one gets a pattern of its own named
+/// after it, right after the current one in channel order (later patterns move up with their clips, as Insert one),
+/// with the original's colour, markers and other settings but only that channel's notes. Every playlist clip of the
+/// original gets one clip per new pattern at the same place, under it. No notes: nothing happens. One undo step.
+pub fn split_by_channel(s: &mut State) {
+    let cur = s.pattern.max(1);
+    let Some(orig) = s.project.pattern(cur).cloned() else { return };
+    let chans: Vec<(u16, String)> = s
+        .project
+        .channels
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| orig.notes.iter().any(|n| n.channel == c.index))
+        .map(|(r, c)| (c.index, crate::rack::channel_name(s, r)))
+        .collect();
+    let Some(((first, name), rest)) = chans.split_first() else { return };
+    let k = rest.len() as u16;
+    // Room for the new numbers: no used pattern may move past the last one.
+    let last = s.project.patterns.iter().filter(|p| used(p)).map(|p| p.number).max().unwrap_or(cur).max(cur);
+    if usize::from(last) + rest.len() > usize::from(MAX) {
         return;
     }
+    let undo = crate::history::Snap::Patterns { patterns: s.project.patterns.clone(), current: cur };
+    crate::playlist::snapshot_with(s, "Split by channel", undo);
+    // Notes of a channel no longer in the rack stay with the original.
+    let p = pat_mut(s, cur);
+    p.notes.retain(|n| n.channel == *first || !chans.iter().any(|c| c.0 == n.channel));
+    p.name = Some(name.clone());
+    s.piano.dirty = true;
+    if k == 0 {
+        return;
+    }
+    renumber(s, |n| Some(if n > cur { n + k } else { n }));
+    for (j, (ch, name)) in (1..).zip(rest) {
+        // Control points stay with the original (only notes are divided).
+        let notes = orig.notes.iter().filter(|n| n.channel == *ch).copied().collect();
+        *pat_mut(s, cur + j) = Pattern { number: cur + j, name: Some(name.clone()), notes, controls: Vec::new(), ..orig.clone() };
+    }
+    if let Some(a) = s.project.arrangement_mut() {
+        // Clips are drawn in record order: the new ones go just before their original, which stays on top.
+        let mut clips = Vec::with_capacity(a.clips.len());
+        for c in std::mem::take(&mut a.clips) {
+            if c.source == ClipSource::Pattern(cur) {
+                clips.extend((1..=k).map(|j| os_model::Clip { source: ClipSource::Pattern(cur + j), ..c }));
+            }
+            clips.push(c);
+        }
+        a.clips = clips;
+    }
+}
+
+/// Ok in the delete confirmation (channels waiting in the rack go to the app, which removes them). With Remember my
+/// choice ticked, the confirmation's Manage messages entry turns off.
+pub fn delete_current(s: &mut State) {
+    if s.pat_ui.remember {
+        crate::messages::set(confirming(s), false);
+    }
+    s.pat_ui.confirm = false;
+    s.pat_ui.remember = false;
+    if let Some(rows) = s.rack.pending_delete.take() {
+        s.rack.delete_now = Some(rows);
+        return;
+    }
+    delete_pattern(s);
+}
+
+/// Cancel in the delete confirmation: nothing is deleted and Remember my choice is not kept.
+fn cancel_confirm(s: &mut State) {
+    s.pat_ui.confirm = false;
+    s.pat_ui.remember = false;
+    s.rack.pending_delete = None;
+}
+
+/// Deletes the current pattern: later ones move down a number, its clips go.
+fn delete_pattern(s: &mut State) {
     let cur = s.pattern.max(1);
     renumber(s, |n| if n == cur { None } else if n > cur { Some(n - 1) } else { Some(n) });
-    s.pat_ui.confirm = false;
 }
 
 /// Accept the name box.
@@ -361,6 +487,9 @@ pub fn accept(s: &mut State) {
             let name = (!text.is_empty()).then_some(text.clone());
             if name.is_some() || s.project.pattern(n).is_some() {
                 pat_mut(s, n).name = name;
+            }
+            if b.created {
+                s.playlist.source = Some(ClipSource::Pattern(n));
             }
             if !text.is_empty() {
                 s.pat_ui.recent.retain(|r| *r != text);
@@ -430,10 +559,8 @@ pub fn hit(s: &mut State, h: Hit) {
         }
         Hit::Swatch(i) => set_color(s, i),
         Hit::ConfirmOk => delete_current(s),
-        Hit::ConfirmCancel => {
-            s.pat_ui.confirm = false;
-            s.rack.pending_delete = None;
-        }
+        Hit::ConfirmCancel => cancel_confirm(s),
+        Hit::ConfirmRemember => s.pat_ui.remember = !s.pat_ui.remember,
         Hit::Inside => {}
     }
 }
@@ -444,10 +571,7 @@ pub fn key(s: &mut State, key: &winit::keyboard::Key, ctrl: bool) -> bool {
     if s.pat_ui.confirm {
         match key {
             Key::Named(NamedKey::Enter) => delete_current(s),
-            Key::Named(NamedKey::Escape) => {
-                s.pat_ui.confirm = false;
-                s.rack.pending_delete = None;
-            }
+            Key::Named(NamedKey::Escape) => cancel_confirm(s),
             _ => {}
         }
         return true;
@@ -522,6 +646,24 @@ mod tests {
         assert_eq!(name_of(s, 4), "Probe");
     }
 
+    /// A new pattern is placeable at once: accepting its name box, default name included, lists it in the picker
+    /// and makes it the playlist's clip source while it is still empty; placed, it stays listed.
+    #[test]
+    fn a_new_empty_pattern_is_listed_and_picked() {
+        let mut app = app();
+        let s = &mut app.state;
+        s.playlist.source = Some(ClipSource::Pattern(1));
+        run(s, Cmd::FindFirst, (0.0, 0.0));
+        accept(s);
+        assert_eq!((s.pattern, s.playlist.source), (4, Some(ClipSource::Pattern(4))));
+        assert_eq!(listed(s), vec![1, 2, 3, 4, 5]);
+        assert_eq!(crate::playlist::source(s), ClipSource::Pattern(4));
+        // Without a name box (Ctrl+F4) alike.
+        run(s, Cmd::FindNextNoName, (0.0, 0.0));
+        assert_eq!((s.pattern, s.playlist.source), (6, Some(ClipSource::Pattern(6))));
+        assert_eq!(listed(s), vec![1, 2, 3, 4, 5, 6]);
+    }
+
     #[test]
     fn clone_insert_delete_move_renumber_clips() {
         let mut app = app();
@@ -551,6 +693,36 @@ mod tests {
         s.pattern = 1;
         delete_current(s);
         assert_eq!(clip_pats(s), vec![3]);
+    }
+
+    // spec: ui/settings-choices.md "Hints and warnings: Manage messages and Project data size warning (2026-10-16)"
+    /// Delete's confirmation has Remember my choice, off each time it opens. Ticked with Cancel nothing goes and the
+    /// "Delete pattern" entry stays on; ticked with Ok the pattern goes and the entry turns off; while it is off,
+    /// Delete deletes at once with no box.
+    #[test]
+    fn delete_confirmation_remembers_ok_only() {
+        use crate::messages::{on, set, DELETE_PATTERN};
+        use winit::keyboard::{Key, NamedKey};
+        let mut app = app();
+        let s = &mut app.state;
+        s.pattern = 2;
+        run(s, Cmd::Delete, (0.0, 0.0));
+        assert!(s.pat_ui.confirm && !s.pat_ui.remember);
+        hit(s, Hit::ConfirmRemember);
+        assert!(s.pat_ui.remember);
+        key(s, &Key::Named(NamedKey::Escape), false);
+        assert_eq!((listed(s), on(&DELETE_PATTERN), s.pat_ui.confirm), (vec![1, 2, 3, 5], true, false), "Cancel");
+        run(s, Cmd::Delete, (0.0, 0.0));
+        assert!(s.pat_ui.confirm && !s.pat_ui.remember, "Remember my choice is off again");
+        hit(s, Hit::ConfirmRemember);
+        hit(s, Hit::ConfirmOk);
+        assert_eq!((listed(s), on(&DELETE_PATTERN), s.pat_ui.confirm), (vec![1, 2, 4], false, false), "Ok");
+        // Off: as if Ok was pressed.
+        s.pattern = 1;
+        run(s, Cmd::Delete, (0.0, 0.0));
+        assert!(!s.pat_ui.confirm);
+        assert_eq!((listed(s), clip_pats(s)), (vec![1, 3], vec![1]));
+        set(&DELETE_PATTERN, true);
     }
 
     #[test]

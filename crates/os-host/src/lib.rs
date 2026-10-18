@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Lemon Studio's format-neutral plugin hosting layer.
 //!
@@ -213,6 +211,13 @@ pub trait Plugin: Instrument + HostedEffect + Send {
     /// them (UI thread). For the built-in Lemon plugins only (an OpenStudio choice: other plugins have no agreed way to
     /// take FL-style note levels). False when the format cannot.
     fn use_note_levels(&mut self) -> bool {
+        false
+    }
+
+    /// Sends the gains the engine gives audio clip voices (`Instrument::voice_gain`) to the instance, which then puts
+    /// each clip's fades and gain on that clip's voice (UI thread). For Lemon Sampler only (it moves to them as the
+    /// engine expects). False when the format cannot.
+    fn use_voice_gains(&mut self) -> bool {
         false
     }
 

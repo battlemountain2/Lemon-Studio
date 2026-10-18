@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 // spec: flp/events/*.md
 //
@@ -386,6 +384,48 @@ fn rack_settings_survive() {
         apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
         let back = load(&FlpFile::parse(&file.to_bytes().unwrap()).unwrap()).unwrap();
         assert_eq!(back, project, "{path}");
+        checked += 1;
+    }
+    assert!(checked > 40, "only {checked} files checked");
+}
+
+/// Project info edited in every file (spec: flp/events/project-info.md): each field changed, or set where the file has
+/// none (comments and URL are missing in many), reads back with nothing else changed. A file whose information events
+/// stand in FL's order (spec: flp/engine-events.md "Order in the file": 194, 206, 207, 167, 202, 195, 197, 237) keeps
+/// it.
+#[test]
+fn project_info_edits_survive() {
+    let Some(paths) = corpus() else { return };
+    // Where each of the information events first stands, in FL's order: whether they ascend.
+    let fl_order = |file: &FlpFile| {
+        let ev = file
+            .chunks
+            .iter()
+            .find_map(|c| match &c.body {
+                os_flp::ChunkBody::Events(e) => Some(e),
+                _ => None,
+            })
+            .unwrap();
+        let at: Vec<usize> = [194u8, 206, 207, 167, 202, 195, 197, 237].iter().filter_map(|&id| ev.iter().position(|e| e.id == id)).collect();
+        at.windows(2).all(|w| w[0] < w[1])
+    };
+    let mut checked = 0;
+    for path in &paths {
+        let mut file = FlpFile::parse(&std::fs::read(path).unwrap()).unwrap();
+        let Ok(mut project) = load(&file) else { continue };
+        let ordered = fl_order(&file);
+        project.info = os_model::ProjectInfo {
+            title: Some("Edited title".into()),
+            author: Some("Edited author".into()),
+            genre: Some("Edited genre".into()),
+            comments: Some("Line one\nLine two".into()),
+            url: Some("https://example.org/edited".into()),
+        };
+        apply(&project, &mut file).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let file = FlpFile::parse(&file.to_bytes().unwrap()).unwrap();
+        let back = load(&file).unwrap();
+        assert_eq!(back, project, "{path}");
+        assert!(!ordered || fl_order(&file), "{path}: information events out of FL's order");
         checked += 1;
     }
     assert!(checked > 40, "only {checked} files checked");

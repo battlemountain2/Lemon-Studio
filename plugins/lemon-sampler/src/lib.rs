@@ -1,8 +1,6 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Lemon Sampler: Lemon Studio's sampler instrument as a VST3 / CLAP plugin (nih-plug).
 //!
@@ -381,7 +379,9 @@ impl LemonSampler {
         match ev {
             NoteEvent::NoteOn { note, velocity, voice_id, .. } => self.engine.note_on_id(note, velocity, voice_id, blk),
             NoteEvent::NoteOff { note, .. } => self.engine.note_off(note, blk),
-            NoteEvent::Choke { note, .. } => self.engine.choke(note, blk),
+            NoteEvent::Choke { note, voice_id, .. } => self.engine.choke(voice_id, note, blk),
+            // An audio clip's fades and gain, on its own voice.
+            NoteEvent::PolyVolume { voice_id, note, gain, .. } => self.engine.volume(voice_id, note, gain),
             NoteEvent::PolyTuning { note, tuning, .. } => self.engine.tune(note, f64::from(tuning)),
             // The note's own pan, also while it sounds (spec: audio/voice-levels.md "Final levels").
             NoteEvent::PolyPan { voice_id, note, pan, .. } => self.engine.pan(voice_id, note, pan),
@@ -458,6 +458,9 @@ impl Plugin for LemonSampler {
             if let Err(e) = self.shared.load(&path, &self.params) {
                 nih_log!("Lemon Sampler: {e}");
             }
+        } else if path.is_empty() && !self.shared.loaded_path().is_empty() {
+            // A restored state without a sample (the host undid a load into an empty channel): nothing plays.
+            self.shared.clear(&self.params);
         } else {
             self.shared.precompute(&self.params);
         }

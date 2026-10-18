@@ -1,15 +1,13 @@
-// Copyright (C) 2026 ItsAlphaNeon. Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
+// Copyright (C) 2026 ItsAlphaNeon
 // SPDX-License-Identifier: GPL-3.0-or-later
-//
-// This code, in its entirety, is NOT to be used as part of the ArtCraft suite: not this file, not any part of it,
-// and not any other part of Lemon Studio.
+// This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! A mixer track's fader matrix and its three-band equaliser.
 //!
 // spec: audio/mixer.md ("Fader matrix", "Equaliser", "Sends")
 
 use crate::glide::Ramp;
-use crate::level::{R12800, R6400, R65536, curve, knob, pan_split, unity_at_centre};
+use crate::level::{PanLaw, R12800, R6400, R65536, curve, knob, pan_split_law, unity_at_centre};
 
 /// Stored defaults of the three equaliser bands: gain (0.01 dB), frequency and width positions (0..65536).
 pub const EQ_DEFAULT: [[i32; 3]; 3] = [[0, 5777, 17500], [0, 33145, 17500], [0, 55825, 17500]];
@@ -18,14 +16,23 @@ pub const EQ_DEFAULT: [[i32; 3]; 3] = [[0, 5777, 17500], [0, 33145, 17500], [0, 
 /// `right' = RR * right + LR * left`. `volume` 0..16000 (12800 = unity), `pan` -6400..6400, `separation` -64..64
 /// (positive merges towards mono, negative widens). A track that is switched off, or at volume 0, has all four at 0.
 /// Centred without separation `LL = RR = vol`; a panned track attenuates one side by the constant-power law and
-/// feeds half of what that side lost across, so a hard-panned track still carries both inputs.
+/// feeds half of what that side lost across, so a hard-panned track still carries both inputs. This is the Circular
+/// panning law, the default: [`fader_matrix_law`].
 pub fn fader_matrix(volume: i32, pan: i32, separation: i32, on: bool) -> [f32; 4] {
+    fader_matrix_law(volume, pan, separation, on, PanLaw::Circular)
+}
+
+/// [`fader_matrix`] under the project's panning law (spec: audio/gain-laws.md "Panning law: Triangular"): the side a
+/// track pans away from is attenuated by the law's split, and half of what it lost crosses over as before. Triangular
+/// keeps the louder side at `vol`, so a track panned right by `q` gives `L = (1 - q) L_in` and
+/// `R = (1 - q/2) R_in + (q/2) L_in` (left mirrors it).
+pub fn fader_matrix_law(volume: i32, pan: i32, separation: i32, on: bool, law: PanLaw) -> [f32; 4] {
     if !on || volume <= 0 {
         return [0.0; 4];
     }
     let vol = curve(knob(volume, R12800));
     let p = knob(pan, R6400);
-    let (g0, g1) = pan_split(unity_at_centre(vol), p);
+    let (g0, g1) = pan_split_law(unity_at_centre(vol), p, law);
     let (mut xl, mut xr) = (0.0f64, 0.0f64);
     if p > 0.0 {
         xr = (1.0 - f64::from(g0) / f64::from(vol)) * 0.5;
@@ -155,7 +162,7 @@ impl Default for TrackEq {
     }
 }
 
-impl TrackEq { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+impl TrackEq { // This code is a part of L e m o n S t u d i o.
     /// The equaliser for stored band settings `[gain, frequency, width]` (gain -1800..1800 in 0.01 dB, frequency and
     /// width 0..65536) at `rate`.
     pub fn new(settings: [[i32; 3]; 3], rate: u32) -> Self {
@@ -288,7 +295,7 @@ fn design(k: usize, [gain, freq, width]: [i32; 3], rate: u32) -> [f64; 5] {
 }
 
 #[cfg(test)]
-mod tests { // This code is a part of L e m o n S t u d i o. Please don't upload it to Art Craft!
+mod tests { // This code is a part of L e m o n S t u d i o.
     use super::*;
 
     /// The default bands sit at 90 Hz, 1500 Hz and 8000 Hz (spec: ui/mixer.md §8); the knob spans 10 Hz .. 16 kHz.
@@ -327,6 +334,32 @@ mod tests { // This code is a part of L e m o n S t u d i o. Please don't upload
         assert_eq!(fader_matrix(0, 0, 0, true), [0.0; 4]);
         // 16000 is curve(1.25).
         assert!((fader_matrix(16000, 0, 0, true)[0] - 1.90327).abs() < 1e-5);
+    }
+
+    /// spec: audio/gain-laws.md "Panning law: Triangular", the mixer table (to 4 decimals): `[L_in->L, R_in->L,
+    /// L_in->R, R_in->R]` at right 0.5, left 0.5, right 1, left 1; centred the same as Circular, which is
+    /// `fader_matrix`.
+    #[test]
+    fn fader_matrix_triangular() {
+        let tri = |pan: i32| {
+            let [ll, rl, rr, lr] = fader_matrix_law(12800, pan, 0, true, PanLaw::Triangular);
+            [ll, rl, lr, rr]
+        };
+        let table = [
+            (3200, [0.5001, -0.0001, 0.2501, 0.7499]),
+            (-3200, [0.7501, 0.2499, 0.0001, 0.4999]),
+            (6400, [0.0, 0.0, 0.5, 0.5]),
+            (-6400, [0.5, 0.5, 0.0, 0.0]),
+        ];
+        for (pan, want) in table {
+            let got = tri(pan);
+            assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() < 2e-4), "{pan}: {got:?}");
+        }
+        assert_eq!(tri(0), [1.0, 0.0, 0.0, 1.0]);
+        for (vol, pan, sep) in [(12800, 0, 0), (10000, -3200, 0), (16000, 1600, 20), (12800, 6400, -30)] {
+            assert_eq!(fader_matrix_law(vol, pan, sep, true, PanLaw::Circular), fader_matrix(vol, pan, sep, true));
+        }
+        assert_eq!(fader_matrix_law(10000, 0, 0, true, PanLaw::Triangular), fader_matrix(10000, 0, 0, true), "the same centre");
     }
 
     /// Positive separation merges (mono at 64), negative widens (the side doubled at -64).
