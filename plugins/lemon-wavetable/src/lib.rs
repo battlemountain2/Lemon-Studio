@@ -4,6 +4,7 @@ pub mod dsp;
 pub mod fft;
 pub mod params;
 pub mod table;
+pub mod warp;
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -116,7 +117,7 @@ impl Plugin for LemonWavetable {
                 }
                 match event {
                     NoteEvent::NoteOn { voice_id, channel, note, velocity, .. } => {
-                        self.engine.note_on(voice_id, channel, note, velocity);
+                        self.engine.note_on(voice_id, channel, note, velocity, &settings);
                     }
                     NoteEvent::NoteOff { voice_id, channel, note, .. } => {
                         self.engine.note_off(voice_id, channel, note);
