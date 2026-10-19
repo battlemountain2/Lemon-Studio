@@ -1,7 +1,11 @@
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
 pub mod dsp;
+pub mod env;
 pub mod fft;
+pub mod filter;
+pub mod lfo;
+pub mod mod_matrix;
 pub mod params;
 pub mod table;
 pub mod warp;

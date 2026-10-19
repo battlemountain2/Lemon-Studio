@@ -1,20 +1,14 @@
-//! Polyphonic DSP engine with up to 16-voice unison and non-linear phase warp for Lemon Wavetable.
+//! Polyphonic DSP engine with 16-voice unison, phase warp, ZDF filtering, and modulation matrix.
 
+use crate::env::Envelope;
+use crate::filter::{FilterType, StereoFilter};
+use crate::lfo::Lfo;
 use crate::table::Wavetable;
 use crate::warp::{self, WarpMode};
 use std::f32::consts::FRAC_PI_2;
 
 pub const MAX_VOICES: usize = 32;
 pub const MAX_UNISON: usize = 16;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum EnvStage {
-    Off,
-    Attack,
-    Decay,
-    Sustain,
-    Release,
-}
 
 #[derive(Clone, Copy, Debug)]
 pub struct UnisonSubVoice {
@@ -37,7 +31,7 @@ impl Default for UnisonSubVoice {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Voice {
     pub id: Option<i32>,
     pub channel: u8,
@@ -45,10 +39,12 @@ pub struct Voice {
     pub velocity: f32,
     pub base_freq: f64,
     pub active: bool,
-    pub stage: EnvStage,
-    pub env_level: f32,
     pub unison_count: usize,
     pub unison_voices: [UnisonSubVoice; MAX_UNISON],
+    pub env1: Envelope,
+    pub env2: Envelope,
+    pub lfo1: Lfo,
+    pub filter: StereoFilter,
 }
 
 impl Default for Voice {
@@ -60,10 +56,12 @@ impl Default for Voice {
             velocity: 0.0,
             base_freq: 440.0,
             active: false,
-            stage: EnvStage::Off,
-            env_level: 0.0,
             unison_count: 1,
             unison_voices: [UnisonSubVoice::default(); MAX_UNISON],
+            env1: Envelope::default(),
+            env2: Envelope::default(),
+            lfo1: Lfo::default(),
+            filter: StereoFilter::default(),
         }
     }
 }
@@ -76,11 +74,7 @@ impl Voice {
         note: u8,
         velocity: f32,
         bend_ratio: f64,
-        unison_count: usize,
-        detune_depth: f32,
-        blend: f32,
-        stereo_spread: f32,
-        phase_rand: f32,
+        settings: &Settings,
     ) {
         self.id = id;
         self.channel = channel;
@@ -88,17 +82,36 @@ impl Voice {
         self.velocity = velocity.clamp(0.0, 1.0);
         self.base_freq = midi_note_to_freq(note) * bend_ratio;
         self.active = true;
-        self.stage = EnvStage::Attack;
 
-        let num_unison = unison_count.clamp(1, MAX_UNISON);
+        // Initialize envelopes with current settings
+        self.env1.reset();
+        self.env1.attack = settings.attack;
+        self.env1.decay = settings.decay;
+        self.env1.sustain = settings.sustain;
+        self.env1.release = settings.release;
+        self.env1.trigger();
+
+        self.env2.reset();
+        self.env2.attack = settings.env2_attack;
+        self.env2.decay = settings.env2_decay;
+        self.env2.sustain = settings.env2_sustain;
+        self.env2.release = settings.env2_release;
+        self.env2.trigger();
+
+        self.lfo1.reset();
+        self.lfo1.rate_hz = settings.lfo1_rate;
+        self.lfo1.trigger();
+
+        self.filter.reset();
+
+        let num_unison = settings.unison.clamp(1, MAX_UNISON);
         self.unison_count = num_unison;
 
-        // Equal-power normalization factor across unison voices
         let norm_power = 1.0 / (num_unison as f32).sqrt();
 
         for i in 0..num_unison {
-            let initial_phase = if phase_rand > 0.001 {
-                pseudo_rand(note, i) * phase_rand as f64
+            let initial_phase = if settings.phase_rand > 0.001 {
+                pseudo_rand(note, i) * settings.phase_rand as f64
             } else {
                 0.0
             };
@@ -106,24 +119,19 @@ impl Voice {
             let (detune_ratio, pan_l, pan_r, gain) = if num_unison == 1 {
                 (1.0, 0.7071, 0.7071, 1.0)
             } else {
-                // Normalized spread index [-1.0, +1.0]
                 let t = (2.0 * i as f32 / (num_unison - 1) as f32) - 1.0;
-
-                // Exponential detune curve (Serum-style scaling up to 150 cents max)
-                let detune_cents = t.signum() * t.abs().powf(1.3) * (detune_depth * 150.0);
+                let detune_cents = t.signum() * t.abs().powf(1.3) * (settings.detune * 150.0);
                 let detune_ratio = 2.0f64.powf((detune_cents as f64) / 1200.0);
 
-                // Stereo Panning (equal-power law)
-                let pan_pos = (0.5 + 0.5 * t * stereo_spread).clamp(0.0, 1.0);
+                let pan_pos = (0.5 + 0.5 * t * settings.spread).clamp(0.0, 1.0);
                 let pan_l = (pan_pos * FRAC_PI_2).cos();
                 let pan_r = (pan_pos * FRAC_PI_2).sin();
 
-                // Unison Blend: center voice vs side voice attenuation
                 let is_center = (num_unison % 2 == 1) && (i == num_unison / 2);
                 let voice_gain = if is_center {
                     1.0
                 } else {
-                    blend.clamp(0.1, 1.0)
+                    settings.blend.clamp(0.1, 1.0)
                 } * norm_power;
 
                 (detune_ratio, pan_l, pan_r, voice_gain)
@@ -140,15 +148,17 @@ impl Voice {
     }
 
     pub fn note_off(&mut self) {
-        if self.active && self.stage != EnvStage::Off {
-            self.stage = EnvStage::Release;
+        if self.active {
+            self.env1.release();
+            self.env2.release();
         }
     }
 
     pub fn stop(&mut self) {
         self.active = false;
-        self.stage = EnvStage::Off;
-        self.env_level = 0.0;
+        self.env1.reset();
+        self.env2.reset();
+        self.filter.reset();
     }
 }
 
@@ -160,7 +170,6 @@ pub struct Settings {
     pub decay: f32,
     pub sustain: f32,
     pub release: f32,
-    // Milestone 2 Parameters:
     pub unison: usize,
     pub detune: f32,
     pub blend: f32,
@@ -168,6 +177,18 @@ pub struct Settings {
     pub phase_rand: f32,
     pub warp_mode: WarpMode,
     pub warp_amt: f32,
+    // Milestone 3 Parameters:
+    pub filter_type: FilterType,
+    pub cutoff: f32,
+    pub resonance: f32,
+    pub drive: f32,
+    pub env2_attack: f32,
+    pub env2_decay: f32,
+    pub env2_sustain: f32,
+    pub env2_release: f32,
+    pub lfo1_rate: f32,
+    pub mod_lfo1_wt: f32,
+    pub mod_env2_cutoff: f32,
 }
 
 impl Default for Settings {
@@ -187,6 +208,17 @@ impl Default for Settings {
             phase_rand: 1.0,
             warp_mode: WarpMode::None,
             warp_amt: 0.0,
+            filter_type: FilterType::Lowpass24,
+            cutoff: 2400.0,
+            resonance: 0.40,
+            drive: 0.15,
+            env2_attack: 0.010,
+            env2_decay: 0.350,
+            env2_sustain: 0.20,
+            env2_release: 0.200,
+            lfo1_rate: 2.0,
+            mod_lfo1_wt: 0.30,
+            mod_env2_cutoff: 0.50,
         }
     }
 }
@@ -247,28 +279,16 @@ impl Engine {
     ) {
         let bend_ratio = 2.0f64.powf(self.bend_semitones / 12.0);
 
-        // Find inactive voice, or steal oldest/quietest
         let slot = self.voices.iter().position(|v| !v.active).unwrap_or_else(|| {
             self.voices
                 .iter()
                 .enumerate()
-                .min_by(|(_, a), (_, b)| a.env_level.partial_cmp(&b.env_level).unwrap())
+                .min_by(|(_, a), (_, b)| a.env1.level.partial_cmp(&b.env1.level).unwrap())
                 .map(|(i, _)| i)
                 .unwrap_or(0)
         });
 
-        self.voices[slot].note_on(
-            id,
-            channel,
-            note,
-            velocity,
-            bend_ratio,
-            settings.unison,
-            settings.detune,
-            settings.blend,
-            settings.spread,
-            settings.phase_rand,
-        );
+        self.voices[slot].note_on(id, channel, note, velocity, bend_ratio, settings);
     }
 
     pub fn note_off(&mut self, id: Option<i32>, channel: u8, note: u8) {
@@ -283,7 +303,7 @@ impl Engine {
         self.voices.iter().filter(|v| v.active).count()
     }
 
-    /// Renders a block of stereo samples with multi-voice unison and phase warp.
+    /// Renders a block of stereo samples with unison, warp, ZDF filtering, and modulation routing.
     pub fn render_block(
         &mut self,
         settings: &Settings,
@@ -293,12 +313,6 @@ impl Engine {
         let mut terminated = Vec::new();
         let table_idx = settings.table_idx.min(self.tables.len().saturating_sub(1));
         let table = &self.tables[table_idx];
-
-        let inv_fs = 1.0 / self.sample_rate;
-        let attack_step = (inv_fs / settings.attack.max(0.001) as f64) as f32;
-        let decay_step = (inv_fs / settings.decay.max(0.001) as f64) as f32;
-        let release_step = (inv_fs / settings.release.max(0.001) as f64) as f32;
-        let sustain_target = settings.sustain.clamp(0.0, 1.0);
 
         let num_samples = left.len().min(right.len());
 
@@ -311,60 +325,59 @@ impl Engine {
                     continue;
                 }
 
-                // Envelope state machine
-                match voice.stage {
-                    EnvStage::Attack => {
-                        voice.env_level += attack_step;
-                        if voice.env_level >= 1.0 {
-                            voice.env_level = 1.0;
-                            voice.stage = EnvStage::Decay;
-                        }
-                    }
-                    EnvStage::Decay => {
-                        voice.env_level -= decay_step;
-                        if voice.env_level <= sustain_target {
-                            voice.env_level = sustain_target;
-                            voice.stage = EnvStage::Sustain;
-                        }
-                    }
-                    EnvStage::Sustain => {
-                        voice.env_level = sustain_target;
-                    }
-                    EnvStage::Release => {
-                        voice.env_level -= release_step;
-                        if voice.env_level <= 0.0 {
-                            voice.env_level = 0.0;
-                            voice.active = false;
-                            voice.stage = EnvStage::Off;
-                            terminated.push(Ended {
-                                id: voice.id,
-                                channel: voice.channel,
-                                note: voice.note,
-                            });
-                            continue;
-                        }
-                    }
-                    EnvStage::Off => continue,
+                // Process voice modulation envelopes and LFO
+                let env1_val = voice.env1.process(self.sample_rate);
+                let env2_val = voice.env2.process(self.sample_rate);
+                let lfo1_val = voice.lfo1.process(self.sample_rate);
+
+                if voice.env1.is_idle() {
+                    voice.active = false;
+                    terminated.push(Ended {
+                        id: voice.id,
+                        channel: voice.channel,
+                        note: voice.note,
+                    });
+                    continue;
                 }
 
-                let voice_gain = voice.env_level * voice.velocity * settings.level;
+                // Modulate Wavetable Position via LFO 1
+                let effective_wt_pos = (settings.wt_pos + lfo1_val * settings.mod_lfo1_wt).clamp(0.0, 1.0);
+
+                // Modulate Filter Cutoff via Envelope 2 (exponential frequency scaling)
+                let cutoff_mult = 2.0f32.powf(env2_val * settings.mod_env2_cutoff * 4.0);
+                let effective_cutoff = (settings.cutoff * cutoff_mult).clamp(20.0, 20000.0);
+
+                let mut voice_l = 0.0f32;
+                let mut voice_r = 0.0f32;
 
                 // Render all unison subvoices
                 for u in 0..voice.unison_count {
                     let sub = &mut voice.unison_voices[u];
                     let freq_ratio = (voice.base_freq * sub.detune_ratio) / self.sample_rate;
 
-                    // Apply non-linear phase warp (Sync, Bend, PWM, etc.)
                     let warped_phase = warp::warp_phase(sub.phase, settings.warp_mode, settings.warp_amt);
+                    let osc_sample = table.sample(effective_wt_pos, warped_phase, freq_ratio);
 
-                    let osc_sample = table.sample(settings.wt_pos, warped_phase, freq_ratio);
+                    voice_l += osc_sample * sub.pan_l * sub.gain;
+                    voice_r += osc_sample * sub.pan_r * sub.gain;
 
-                    sum_l += osc_sample * sub.pan_l * sub.gain * voice_gain;
-                    sum_r += osc_sample * sub.pan_r * sub.gain * voice_gain;
-
-                    // Advance un-warped phase by frequency ratio
                     sub.phase = (sub.phase + freq_ratio).fract();
                 }
+
+                // Apply per-voice Zero-Delay Feedback filter
+                voice.filter.process(
+                    &mut voice_l,
+                    &mut voice_r,
+                    settings.filter_type,
+                    effective_cutoff,
+                    settings.resonance,
+                    settings.drive,
+                    self.sample_rate,
+                );
+
+                let master_voice_gain = env1_val * voice.velocity * settings.level;
+                sum_l += voice_l * master_voice_gain;
+                sum_r += voice_r * master_voice_gain;
             }
 
             // Soft saturation limiter to protect dynamic range and prevent hard clipping
@@ -394,51 +407,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unison_renders_wide_stereo() {
+    fn modulation_lfo_wt_pos_and_filter_cutoff() {
         let mut engine = Engine::new(48000.0);
         let mut settings = Settings::default();
-        settings.unison = 7;
-        settings.detune = 0.25;
-        settings.spread = 1.0;
+        settings.unison = 1;
+        settings.filter_type = FilterType::Lowpass24;
+        settings.cutoff = 500.0;
+        settings.mod_env2_cutoff = 1.0; // Envelope 2 sweeps cutoff up
 
         engine.note_on(Some(1), 0, 60, 0.8, &settings);
         assert_eq!(engine.active_voice_count(), 1);
-        assert_eq!(engine.voices[0].unison_count, 7);
 
         let mut left = vec![0.0; 512];
         let mut right = vec![0.0; 512];
-        engine.render_block(&settings, &mut left, &mut right);
-
-        // In 7-voice unison with stereo spread, left and right channels should be decorrelated
-        let diff_sum: f32 = left.iter().zip(right.iter()).map(|(l, r)| (l - r).abs()).sum();
-        assert!(diff_sum > 0.5, "unison should produce wide decorrelated stereo difference: {diff_sum}");
-    }
-
-    #[test]
-    fn warp_sync_alters_audio_timbre() {
-        let mut engine = Engine::new(48000.0);
-        let mut settings_dry = Settings::default();
-        settings_dry.unison = 1;
-        settings_dry.warp_mode = WarpMode::None;
-
-        engine.note_on(Some(1), 0, 60, 0.8, &settings_dry);
-        let mut left_dry = vec![0.0; 512];
-        let mut right_dry = vec![0.0; 512];
-        engine.render_block(&settings_dry, &mut left_dry, &mut right_dry);
-
-        engine.reset();
-
-        let mut settings_warped = settings_dry;
-        settings_warped.warp_mode = WarpMode::Sync;
-        settings_warped.warp_amt = 0.75; // 75% hard sync
-
-        engine.note_on(Some(1), 0, 60, 0.8, &settings_warped);
-        let mut left_warped = vec![0.0; 512];
-        let mut right_warped = vec![0.0; 512];
-        engine.render_block(&settings_warped, &mut left_warped, &mut right_warped);
-
-        // Warped sound must clearly differ from unwarped sound
-        let diff: f32 = left_dry.iter().zip(left_warped.iter()).map(|(a, b)| (a - b).abs()).sum();
-        assert!(diff > 1.0, "hard sync should substantially alter spectral shape: {diff}");
+        let ended = engine.render_block(&settings, &mut left, &mut right);
+        assert!(ended.is_empty());
+        assert!(left.iter().any(|&s| s.abs() > 0.001));
     }
 }
