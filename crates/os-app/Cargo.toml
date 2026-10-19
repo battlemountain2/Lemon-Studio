@@ -27,6 +27,7 @@ os-paths.workspace = true
 lemon-sampler = { path = "../../plugins/lemon-sampler", features = ["linked"] }
 lemon-parametric-eq-2 = { path = "../../plugins/lemon-parametric-eq-2", features = ["linked"] }
 lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", features = ["linked"] }
+lemon-ray = { path = "../../plugins/lemon-ray", features = ["linked"] }
 winit = "0.30"
 softbuffer = "0.4"
 cpal = "0.18"
@@ -41,6 +42,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["resource_manager", "shape"] }
+libc = "0.2"
 
 # The main window's chrome (`macos`) and plugin windows (`plugin_window::cocoa`): the objc2 crates softbuffer already
 # uses.

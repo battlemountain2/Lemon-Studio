@@ -58,7 +58,7 @@ pub fn is_wrapped(d: &Descriptor) -> bool {
     if WRAP_BUILTINS.with(|w| w.get()) {
         return matches!(d.format, Format::Clap | Format::Vst3 | Format::Vst2);
     }
-    matches!(d.format, Format::Clap | Format::Vst3 | Format::Vst2) && !is_builtin(d)
+    matches!(d.format, Format::Clap | Format::Vst3 | Format::Vst2) && (!is_builtin(d) || d.id == lemon_ray::CLAP_ID)
 }
 
 /// The project-file identity of a hosted plugin with its saved state.
@@ -69,7 +69,7 @@ pub fn plugin_ref(d: &Descriptor, state: Vec<u8>) -> PluginRef {
         id: if matches!(d.format, Format::Vst3 | Format::Vst2) { d.id.clone() } else { String::new() },
         name: d.name.clone(),
         vendor: d.vendor.clone(),
-        path: d.path.to_string_lossy().into_owned(),
+        path: if is_builtin(d) && d.id == lemon_ray::CLAP_ID { "builtin/lemon-ray.clap".into() } else { d.path.to_string_lossy().into_owned() },
         state,
     }
 }
@@ -522,6 +522,162 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crate::plugins::{fx_key, LEMON_EQ, LEMON_SAMPLER};
+
+    #[test]
+    fn lemon_ray_is_wrapped_without_changing_legacy_builtin_storage() {
+        WRAP_BUILTINS.with(|value| value.set(false));
+        let plugins = crate::plugins::builtin();
+        for plugin in plugins {
+            assert!(is_builtin(&plugin.desc));
+            assert_eq!(is_wrapped(&plugin.desc), plugin.desc.id == lemon_ray::CLAP_ID);
+        }
+        for plugin in crate::plugins::builtin_effects() { assert!(!is_wrapped(&plugin.desc)); }
+    }
+
+    #[test]
+    fn lemon_ray_saves_reopens_and_keeps_its_sound_and_mixer_track() {
+        WRAP_BUILTINS.with(|value| value.set(false));
+        let path = std::env::temp_dir().join(format!("lemon-ray-roundtrip-{}.flp", std::process::id()));
+        let mut app = App::new(None);
+        app.state.project = crate::app::test_project();
+        app.state.file = None;
+        app.state.path = None;
+        app.plugins.available = crate::plugins::builtin();
+        let row = crate::app::add_plugin_channel(&mut app.state.project, "Lemon Ray");
+        let track = app.state.project.channels[row].mixer_track;
+        app.plugins.create(row, app.plugins.index_of("Lemon Ray").unwrap()).unwrap();
+        app.state.hosted_rows.push(row);
+        assert!(app.plugins.set_param_named(row, "Sweep", 17.0));
+        assert!(app.plugins.set_param_named(row, "Bite", 28.0));
+        assert!(app.plugins.set_param_named(row, "Length", 750.0));
+        app.plugins.hosted[&row].plugin.lock().unwrap().idle();
+        let sound = |plugins: &Plugins| {
+            let instrument = plugins.hosted[&row].plugin.clone() as os_engine::SharedInstrument;
+            let mut instrument = instrument.lock().unwrap();
+            instrument.reset();
+            instrument.note_on(0, 60, 0.8);
+            let (mut left, mut right) = (vec![0.0; 4800], vec![0.0; 4800]);
+            instrument.process(48000, &mut left, &mut right);
+            assert!(left.iter().any(|value| value.abs() > 0.005));
+            left
+        };
+        let before = sound(&app.plugins);
+        let state = app.plugins.state(row).unwrap();
+        app.save_to(path.clone());
+        assert!(app.state.message.as_deref().is_some_and(|message| message.starts_with("Saved") && !message.contains("not stored")), "{:?}", app.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let wrapped = wrapped_channel(&saved.channels[row]).unwrap();
+        assert_eq!((wrapped.name.as_str(), wrapped.format.as_str()), ("Lemon Ray", "clap"));
+        assert_eq!(wrapped.path, "builtin/lemon-ray.clap");
+        assert_eq!(wrapped.state, state);
+        let mut reopened = App::new(None);
+        reopened.plugins.available = crate::plugins::builtin();
+        reopened.open(path.clone());
+        reopened.sync_wrapped();
+        assert!(reopened.state.hosted_rows.contains(&row), "{:?}", reopened.state.message);
+        assert_eq!(reopened.state.project.channels[row].mixer_track, track);
+        assert_eq!(reopened.plugins.state(row), Some(state));
+        assert_eq!(before, sound(&reopened.plugins));
+        reopened.save_to(path.clone());
+        let again = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        assert_eq!(saved.channels[row], again.channels[row]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn lemon_ray_reaches_its_insert_and_master_effects() {
+        struct Halve;
+        impl os_engine::HostedEffect for Halve {
+            fn process_fx(&mut self, _rate: u32, left: &mut [f32], right: &mut [f32]) {
+                for value in left.iter_mut().chain(right) { *value *= 0.5; }
+            }
+        }
+        let render = |effect_track: Option<usize>, muted: bool| {
+            let mut project = crate::app::test_project();
+            project.channels.truncate(1);
+            project.channels[0].kind = ChannelKind::Plugin;
+            project.channels[0].plugin = Some("Lemon Ray".into());
+            project.channels[0].mixer_track = 2;
+            project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 96, ..os_model::Note::step(0, 0) }], ..Default::default() }];
+            project.mixer = (0..3).map(os_model::MixerTrack::new).collect();
+            project.mixer[0].enabled = !muted;
+            let mut plugins = Plugins::default();
+            plugins.available = crate::plugins::builtin();
+            plugins.create(0, plugins.index_of("Lemon Ray").unwrap()).unwrap();
+            let instrument = plugins.hosted[&0].plugin.clone() as os_engine::SharedInstrument;
+            let mut samples = os_engine::SampleLibrary::default();
+            let mut engine = os_engine::Engine::new(&project, &mut samples, 48000, os_engine::PlayMode::Pattern(1));
+            engine.set_instrument(0, instrument);
+            if let Some(track) = effect_track { engine.set_effect(track, 0, std::sync::Arc::new(std::sync::Mutex::new(Halve))); }
+            engine.render_all(512)
+        };
+        let peak = |audio: &[f32]| audio.iter().map(|value| value.abs()).fold(0.0, f32::max);
+        let dry = render(None, false);
+        let dry_peak = peak(&dry);
+        assert!(dry_peak > 0.005);
+        for track in [0, 2] { assert!((peak(&render(Some(track), false)) / dry_peak - 0.5).abs() < 0.001); }
+        assert!((peak(&render(Some(1), false)) - dry_peak).abs() < 0.00001);
+        assert_eq!(peak(&render(None, true)), 0.0);
+        if let Some(directory) = std::env::var_os("OS_SHOT_DIR") {
+            std::fs::create_dir_all(&directory).unwrap();
+            let path = std::path::Path::new(&directory).join("lemon-ray-arc-zap.wav");
+            os_engine::wav::write_f32_stereo(&mut std::fs::File::create(path).unwrap(), 48000, &dry).unwrap();
+        }
+    }
+
+    #[test]
+    fn lemon_ray_host_note_offsets_release_and_stop() {
+        let mut plugins = Plugins::default();
+        plugins.available = crate::plugins::builtin();
+        plugins.create(0, plugins.index_of("Lemon Ray").unwrap()).unwrap();
+        let instrument = plugins.hosted[&0].plugin.clone() as os_engine::SharedInstrument;
+        let mut instrument = instrument.lock().unwrap();
+        instrument.note_on(240, 60, 0.8);
+        let (mut left, mut right) = (vec![0.0; 480], vec![0.0; 480]);
+        instrument.process(48000, &mut left, &mut right);
+        assert!(left[..240].iter().all(|value| *value == 0.0));
+        assert!(left[240..].iter().any(|value| value.abs() > 0.001));
+        assert_eq!(instrument.voices(), 1);
+        instrument.note_off(120, 60);
+        for _ in 0..4 { instrument.process(48000, &mut left, &mut right); }
+        assert_eq!(instrument.voices(), 0);
+        assert!(left.iter().all(|value| *value == 0.0));
+        instrument.note_on(0, 60, 0.8);
+        instrument.process(48000, &mut left, &mut right);
+        instrument.reset();
+        instrument.process(48000, &mut left, &mut right);
+        assert_eq!(instrument.voices(), 0);
+        assert!(left.iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn lemon_ray_standalone_clap_and_vst3_round_trip() {
+        let Some(directory) = std::env::var_os("LEMON_RAY_BUNDLES") else { return };
+        for (format, extension) in [(Format::Clap, "clap"), (Format::Vst3, "vst3")] {
+            let path = std::path::Path::new(&directory).join(format!("Lemon Ray.{extension}"));
+            let library = crate::plugins::load_file(&path, format).unwrap();
+            let descriptor = library.plugins().iter().find(|plugin| plugin.name == "Lemon Ray").unwrap().clone();
+            assert!(descriptor.is_instrument());
+            assert!(!is_builtin(&descriptor));
+            let plugin = library.create(&descriptor.id).unwrap();
+            let mut plugin = plugin.lock().unwrap();
+            assert!(plugin.activate(48000));
+            let parameter = (0..plugin.param_count()).filter_map(|index| plugin.param_info(index)).find(|parameter| parameter.name == "Sweep").unwrap();
+            assert!(plugin.set_param(parameter.id, 0.25));
+            plugin.idle();
+            let (mut left, mut right) = (vec![0.0; 480], vec![0.0; 480]);
+            plugin.process(48000, &mut left, &mut right);
+            let state = plugin.save_state().unwrap();
+            assert!(!state.is_empty());
+            assert!(plugin.load_state(&state));
+            plugin.reset();
+            plugin.note_on(0, 60, 0.8);
+            plugin.process(48000, &mut left, &mut right);
+            assert!(left.iter().any(|value| value.abs() > 0.001));
+            assert_eq!(state, plugin.save_state().unwrap());
+            assert!(left.iter().chain(&right).all(|value| value.is_finite()));
+        }
+    }
 
     /// A hosted plugin channel and a mixer slot plugin are saved as wrapped plugins holding their identity and state,
     /// and the reopened project hosts them again with that state; a second save keeps working on the saved file

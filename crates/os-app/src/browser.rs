@@ -21,6 +21,11 @@ const PREVIEW_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 impl App {
     /// Browser actions; returns whether `a` was one.
     pub(crate) fn browser_act(&mut self, a: &Action) -> bool {
+        if self.state.assistant_enabled && !self.loading() {
+            if let Action::BrowserRow(index) = *a {
+                if view::rows(&self.state).get(index).is_some_and(|row| matches!(row.item, Item::History(_))) { crate::assistant::capture(self); }
+            }
+        }
         let s = &mut self.state;
         match *a {
             Action::BrowserTab(i) => {

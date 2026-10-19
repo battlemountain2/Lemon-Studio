@@ -36,6 +36,7 @@ pub const STEP_EDIT: &str = "Step edit";
 /// What a step changes, as it is on the other side of the step.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Snap {
+    Assistant(Box<crate::assistant::Snapshot>),
     /// Pattern `number`'s notes, control points and length (the piano roll, the step sequencer).
     Pattern { number: u16, notes: Vec<Note>, controls: Vec<ControlPoint>, length: Option<u32> },
     /// The playlist (`playlist::capture`).
@@ -116,6 +117,7 @@ impl Snap {
     /// What this covers, as the project has it now.
     fn now(&self, s: &State) -> Snap {
         match self {
+            Snap::Assistant(_) => Snap::Assistant(Box::new(crate::assistant::Snapshot::now(s))),
             Snap::Pattern { number, .. } => Snap::pattern(s, *number),
             Snap::Playlist(_) => Snap::Playlist(Box::new(crate::playlist::capture(s))),
             Snap::Knob(id, _) => Snap::Knob(*id, knob_value(s, *id)),
@@ -141,6 +143,7 @@ impl Snap {
     /// `rescale` for this.
     fn rescale(&mut self, from: u16, to: u16) {
         match self {
+            Snap::Assistant(snapshot) => snapshot.rescale(to),
             Snap::Pattern { notes, controls, length, .. } => {
                 notes.iter_mut().for_each(|n| n.rescale(from, to));
                 controls.iter_mut().for_each(|c| c.rescale(from, to));
@@ -167,6 +170,7 @@ impl Snap {
     /// Puts this into the project. A pattern's step also shows that pattern, as the piano roll's undo always did.
     fn put(self, s: &mut State) {
         match self {
+            Snap::Assistant(snapshot) => snapshot.put(s),
             Snap::Pattern { number, notes, controls, length } => {
                 s.pattern = number;
                 let p = crate::patterns::pat_mut(s, number);

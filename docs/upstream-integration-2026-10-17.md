@@ -1,5 +1,8 @@
 # Upstream integration and next steps — October 17, 2026
 
+The later local [plugin-search usability update](plugin-search.md) builds on this checkpoint. The installed hash
+and original test counts below identify the integration build before that update, not the newest executable.
+
 Bry asked Codex to finish the current work, compare and integrate upstream, then plan the next feature work.
 The chosen Linux direction remains **XWayland with docked plugin editors**, not a native Wayland main window.
 

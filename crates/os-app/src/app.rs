@@ -289,6 +289,7 @@ pub enum Action {
     PlPickAdd,
     PlPopup(usize),
     PlPopupSub(usize),
+    PluginMenu(crate::plugin_menu::Hit),
     /// Channel rack title bar (spec: ui/channel-rack.md §7): options ▸, display filter combo, name-width dots,
     /// speaker (play / pause pattern), pattern length box, loop mode, graph editor; per-row loop boxes (§15),
     /// graph editor area and tabs (§14), Advanced fill dialog (§22).
@@ -815,12 +816,15 @@ pub enum Drag {
 }
 
 pub struct State {
+    pub assistant_enabled: bool,
+    pub assistant_restore: bool,
     pub project: Project,
     /// The toolbar's scope / analyzer and peak bars (fed from the audio tap in `App::tick`).
     pub monitor: crate::monitor::Monitor,
     /// The plugin database: choices, last scan, the plugin menus' lists, the plugin manager's table (spec:
     /// ui/plugin-manager.md, ui/plugin-menu.md).
     pub plugdb: crate::plugin_db::Db,
+    pub plugin_search: crate::plugin_menu::Search,
     /// The toolbar's CPU panel (read in `App::tick`).
     pub cpu: crate::cpu::Cpu,
     /// The Plugin performance monitor's readings and options (read with the CPU panel while it is shown).
@@ -1163,7 +1167,8 @@ pub struct App {
     /// An opened project is still loading its samplers (spec: ui/project-loading.md): progress shows, input waits.
     loading: Option<crate::loading::Loading>,
     /// A WAV export is rendering (FILE > Export): its file name and progress (0..1); the same panel shows, input waits.
-    export: Option<(String, f32)>,
+    pub(crate) export: Option<(String, f32)>,
+    pub(crate) assistant_export: bool,
     /// The project and tempo as last opened, saved or created: anything else has unsaved changes.
     pub(crate) saved: (Project, f64),
     /// The Autosave timer and the last backup (spec: ui/settings-choices.md "Backup files").
@@ -1182,8 +1187,11 @@ impl App {
         let mut app = App {
             plugins: crate::plugins::Plugins::default(),
             state: State {
+                assistant_enabled: false,
+                assistant_restore: false,
                 project,
                 plugdb: Default::default(),
+                plugin_search: Default::default(),
                 hosted_rows: Vec::new(),
                 pending_plugin: None,
                 pending_open: None,
@@ -1337,6 +1345,7 @@ impl App {
             native_failed: Vec::new(),
             loading: None,
             export: None,
+            assistant_export: false,
             saved: (Project::default(), 0.0),
             backup: Default::default(),
         };
@@ -1358,10 +1367,11 @@ impl App {
         let name = s.project.info.title.clone().filter(|t| !t.is_empty()).or_else(|| {
             s.path.as_ref().and_then(|p| p.file_stem()).map(|n| n.to_string_lossy().into_owned())
         });
-        match name {
+        let title = match name {
             Some(n) => format!("[{n}]"),
             None => "[untitled]".into(),
-        }
+        };
+        if s.assistant_enabled { format!("{title} [Assistant]") } else { title }
     }
 
     pub fn open(&mut self, path: PathBuf) {
@@ -1523,6 +1533,7 @@ impl App {
 
     /// Follows a running export: moves the progress bar, then reports the result.
     fn export_tick(&mut self) {
+        if self.assistant_export { return; }
         let Some((name, _)) = self.export.clone() else { return };
         match self.transport.export_status() {
             crate::transport::Export::Running(p) => {
@@ -2014,6 +2025,10 @@ impl App {
 
     /// Plugin host work on the UI thread: create / open requested plugins, apply plugin-window edits to the channel.
     pub(crate) fn plugin_tick(&mut self) {
+        if std::mem::take(&mut self.state.assistant_restore) {
+            self.transport.stop();
+            self.reset_hosted();
+        }
         self.countdown_tick();
         // Rows gone without the app (an undone drop that made a channel, `rack::remove_last`): their instruments go.
         let len = self.state.project.channels.len();
@@ -4456,6 +4471,9 @@ impl App {
         self.hold = None;
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
+        if !matches!(action, Some(Action::PluginMenu(_))) {
+            self.state.plugin_search = Default::default();
+        }
         // A press stops the views easing where they are drawn; a scroll bar's arrow steps on from where its ease is
         // going (`crate::smooth`).
         if !matches!(action, Some(Action::ScrollStep(..))) {
@@ -4493,7 +4511,7 @@ impl App {
             return;
         }
         // Playlist popup menus close on any click outside them; a click elsewhere accepts an open text box.
-        if self.state.playlist.popup.is_some() && !matches!(action, Some(Action::PlPopup(_) | Action::PlPopupSub(_))) {
+        if self.state.playlist.popup.is_some() && !matches!(action, Some(Action::PlPopup(_) | Action::PlPopupSub(_) | Action::PluginMenu(_))) {
             self.state.playlist.popup = None;
             // A dropdown's submenu: the click goes on to the dropdown (below), but one on the submenu's own ▸ entry only
             // closes it.
@@ -4538,7 +4556,7 @@ impl App {
         }
         // Any click outside an open menu closes it. VIEW's window entries are window toggles: one clicked in the menu
         // closes the menu and toggles its window. Its open submenu takes its own clicks.
-        if self.state.menu_open.is_some() && !matches!(action, Some(Action::MenuItem(..) | Action::MenuSub(..) | Action::Menu(_) | Action::PlPopup(_) | Action::PlPopupSub(_))) {
+        if self.state.menu_open.is_some() && !matches!(action, Some(Action::MenuItem(..) | Action::MenuSub(..) | Action::Menu(_) | Action::PlPopup(_) | Action::PlPopupSub(_) | Action::PluginMenu(_))) {
             self.state.menu_open = None;
             if !(matches!(action, Some(Action::ToggleWin(_))) && self.overlays.iter().any(|r| r.contains(x, y))) {
                 return;
@@ -5375,6 +5393,10 @@ impl App {
         if self.modal_open() {
             return self.dialog_wheel(dy);
         }
+        if crate::plugin_menu::active(&self.state).is_some() {
+            crate::plugin_menu::scroll(&mut self.state, -(dy + dx) * 3.0);
+            return self.invalidate();
+        }
         // Scrolling or zooming one window repaints just that window; scrolling the playlist moves its pixels.
         let before = self.damage.clone();
         let s = &self.state;
@@ -5598,10 +5620,16 @@ impl App {
     }
 
     pub fn key(&mut self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) {
+        if self.state.assistant_enabled && ctrl && matches!(key, winit::keyboard::Key::Character(character) if character.eq_ignore_ascii_case("z")) && !self.loading() {
+            crate::assistant::capture(self);
+        }
         self.invalidate();
         // A dialog takes every key.
         if self.modal_open() {
             return self.dialog_key(key, ctrl, alt);
+        }
+        if crate::plugin_menu::key(self, key, ctrl, alt) {
+            return;
         }
         // So does a box of the settings window's Info page while it is edited, and a cell of File ▸ Browser extra
         // search folders.
@@ -6023,6 +6051,9 @@ impl App {
     /// the octave keys while the switch is on, or the release of a held note); the caller then
     /// skips the normal shortcut handling. Spec: ui/typing-keyboard.md.
     pub fn typing_key(&mut self, code: KeyCode, pressed: bool, ctrl: bool, alt: bool) -> bool {
+        if pressed && crate::plugin_menu::active(&self.state).is_some() {
+            return false;
+        }
         // A playlist text box (track / marker name, point value) takes the letters.
         if pressed && (self.modal_open() || self.state.playlist.edit.is_some() || self.state.plugdb.finding || self.state.pat_ui.name_box.is_some() || self.state.pat_ui.confirm || self.browser_takes_typing() || self.state.perf.finding) {
             return false;
@@ -6530,6 +6561,10 @@ impl App {
     }
 
     pub fn act(&mut self, a: Action) {
+        if self.state.assistant_enabled && matches!(a, Action::PianoUndo | Action::Util(Util::Undo)) && !self.loading() { crate::assistant::capture(self); }
+        if let Action::PluginMenu(hit) = a {
+            return crate::plugin_menu::click(self, hit);
+        }
         if let Action::Settings(sa) = a {
             return self.settings_act(sa);
         }
@@ -6907,7 +6942,8 @@ impl App {
             | Action::PlPickTab(_)
             | Action::PlPick(_)
             | Action::PlPopup(_)
-            | Action::PlPopupSub(_) => {}
+            | Action::PlPopupSub(_)
+            | Action::PluginMenu(_) => {}
         }
     }
 
@@ -6959,6 +6995,7 @@ impl App {
     /// Ctrl+Z (`alt` = Ctrl+Alt+Z) and EDIT's entries: a move in the project's undo history (`crate::history`; spec:
     /// ui/settings-choices.md "Undo history: the four checks (2026-10-16)").
     pub(crate) fn undo_key(&mut self, alt: bool) {
+        if self.state.assistant_enabled && !self.loading() { crate::assistant::capture(self); }
         let s = &mut self.state;
         if let Some(m) = if alt { crate::history::ctrl_alt_z(s) } else { crate::history::ctrl_z(s) } {
             self.say(m);
@@ -14234,8 +14271,9 @@ mod tests {
             let p = app.state.playlist.popup.clone().expect("the effect menu opens");
             assert!(!p.items.iter().any(|i| i.label == "Generators"), "effects only");
             assert!(p.items.iter().any(|i| i.label == "Manage plugins..."));
-            let i = p.items.iter().position(|i| i.cmd == Cmd::Plugin(PlugCmd::Effect { index, slot: None })).expect("Test FX is listed");
-            let item = hit_rect(app, &Action::PlPopup(i));
+            let command = PlugCmd::Effect { index, slot: None };
+            assert!(p.items.iter().any(|item| item.cmd == Cmd::Plugin(command)), "Test FX is listed");
+            let item = hit_rect(app, &Action::PluginMenu(crate::plugin_menu::Hit::Pick(command)));
             click(app, c, item);
         };
         app.state.project.mixer[2].slots[0] = Some(os_model::SlotPlugin { name: "Taken".into(), state: Vec::new() });

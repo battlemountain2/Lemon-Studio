@@ -1177,12 +1177,25 @@ fn tool_face(ui: &mut Ui, b: Rect, on: bool, hov: bool) -> Color {
 pub fn paint_overlays(ui: &mut Ui, s: &State) {
     if let Some(p) = &s.playlist.popup {
         // At the Pop-ups scaling (spec: ui/ui-scaling.md §1).
-        ui.scaled(super::popup_scale(ui.c.scale), |ui, k| {
+        let scale = if crate::plugin_menu::active(s).is_some() {
+            crate::plugin_menu::scale(s)
+        } else {
+            super::popup_scale(ui.c.scale)
+        };
+        ui.scaled(scale, |ui, k| {
             let (w, h) = ui.c.size();
+            if crate::plugin_menu::searchable(&p.items) {
+                crate::plugin_menu::paint(ui, s, &p.items, (p.x / k, p.y / k), (w, h));
+                return;
+            }
             let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, false);
             if let Some(i) = p.sub {
                 if let (Some(item), Some(rr)) = (p.items.get(i), rows.get(i)) {
-                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true);
+                    if crate::plugin_menu::searchable(&item.children) {
+                        crate::plugin_menu::paint(ui, s, &item.children, (rr.right(), rr.y - 2.0), (w, h));
+                    } else {
+                        popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true);
+                    }
                 }
             }
         });

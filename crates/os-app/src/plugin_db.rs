@@ -487,7 +487,7 @@ fn walk(dir: &Path, depth: u32, formats: Formats, walked: &mut HashSet<(PathBuf,
 /// A file named like a built-in Lemon plugin, or like one by an earlier name (same plugin id): the built-in copy
 /// is used (a second copy in the process would share the built-in one's editor window class).
 fn builtin_file(p: &Path) -> bool {
-    let builtin = [crate::plugins::LEMON_SAMPLER, crate::plugins::LEMON_EQ, crate::osc3::LEMON_TRIO];
+    let builtin = [crate::plugins::LEMON_SAMPLER, crate::plugins::LEMON_EQ, crate::osc3::LEMON_TRIO, "Lemon Ray"];
     let old = crate::plugins::OLD_NAMES.map(|(old, _)| old);
     p.file_stem().is_some_and(|s| builtin.iter().chain(&old).any(|b| s.eq_ignore_ascii_case(b)))
 }
@@ -1188,6 +1188,8 @@ mod tests {
         w("added/Bundle.vst3/Contents/x86_64-win/Bundle.vst3");
         w("added/Bundle.vst3/Contents/x86_64-win/Inner.clap");
         w("added/Lemon Sampler.clap");
+        w("added/Lemon Ray.clap");
+        w("added/Lemon Ray.vst3/Contents/x86_64-linux/Lemon Ray.so");
         w("added/Open Parametric EQ 2.vst3/Contents/x86_64-win/Open Parametric EQ 2.vst3");
         w("added/readme.txt");
         // A macOS CLAP bundle: a plugin on macOS, a plain folder elsewhere.

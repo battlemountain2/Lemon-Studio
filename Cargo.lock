@@ -1673,6 +1673,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-ray"
+version = "0.0.1"
+dependencies = [
+ "nih_plug",
+ "os-hostlink",
+ "os-plugkit",
+ "os-theme",
+ "os-ui",
+]
+
+[[package]]
 name = "lemon-sampler"
 version = "0.0.1"
 dependencies = [
@@ -2417,6 +2428,7 @@ dependencies = [
  "cpal",
  "lemon-3x-osc",
  "lemon-parametric-eq-2",
+ "lemon-ray",
  "lemon-sampler",
  "libc",
  "midir",

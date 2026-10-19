@@ -55,11 +55,22 @@ mod tests {
         ("crates/os-ui/src/tabler.rs", "GPL-3.0-or-later AND MIT"),
     ];
 
-    const FORK_SOURCES: [&str; 4] = [
+    const FORK_SOURCES: [&str; 15] = [
+        "crates/os-app/src/assistant.rs",
+        "crates/os-app/src/assistant_io.rs",
         "crates/os-engine/src/drums.rs",
         "crates/os-engine/src/effects/delay.rs",
         "crates/os-engine/src/effects/distortion.rs",
         "crates/os-engine/src/effects/reverb.rs",
+        "plugins/lemon-ray/src/lib.rs",
+        "plugins/lemon-ray/src/dsp.rs",
+        "plugins/lemon-ray/src/editor.rs",
+        "plugins/lemon-ray/src/params.rs",
+        "plugins/lemon-ray/src/view.rs",
+        "tools/lemon-mcp/server.py",
+        "tools/lemon-mcp/sketch.py",
+        "tools/lemon-mcp/test_server.py",
+        "tools/lemon-mcp/test_sketch.py",
     ];
 
     /// The header lines a file needs after its copyright lines: with its licence expression, and the note for a file in

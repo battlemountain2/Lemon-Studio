@@ -3270,6 +3270,7 @@ pub fn commit_edit(s: &mut State) {
 
 /// Run a menu / shortcut command. Returns a status message, if any.
 pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
+    if app.state.assistant_enabled && matches!(cmd, Cmd::Undo) && !app.loading() { crate::assistant::capture(app); }
     let grid = app.pl_grid();
     app.state.playlist.popup = None;
     // Commands that need the whole app.

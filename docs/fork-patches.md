@@ -6,6 +6,12 @@ do not reset or force-push main to update it.
 
 ## Patch inventory
 
+Lemon Ray's first playable laser milestone is documented in [lemon-ray.md](lemon-ray.md). It is a separate
+downstream instrument with stable identities and wrapper-based persistence, not a replacement for Trio.
+
+The opt-in [local MCP bridge](lemon-mcp.md) reuses upstream project/history/host/export paths. It is a bounded
+scratch-session composition milestone, not a network service or a second editing engine.
+
 | Area | Decision and ownership | Verification |
 | --- | --- | --- |
 | Metronome | Reuse upstream's engine, sounds and settings; no parallel downstream click engine. | Engine metronome and app transport tests. |
@@ -19,6 +25,7 @@ do not reset or force-push main to update it.
 | Playlist double-click | Keep downstream picker double-click alongside upstream right-click pattern menus. | App/editor tests. |
 | Default pattern names | Keep an explicitly confirmed `Pattern N` name so an empty new pattern appears in the picker without custom typing. Browsing and cancellation must not create patterns. | Checkmark hit-testing, repeated creation, Enter, cancel/Escape, clearing an existing name and FLP save/reopen regressions in `os-app::patterns`. |
 | Shared history and editing | Use upstream's global undo/redo, step-edit chord handling, preferences and responsive toolbar instead of parallel downstream versions. Keep audible step preview without changing upstream's left-paint/right-erase drag behavior. | Workspace history, step-edit, toolbar and mouse-button regressions. Live recording is not yet an undoable take. |
+| Plugin discovery | Retain upstream's plugin database, visibility/format preferences and destination commands, but render plugin choices in a bounded searchable list instead of unlimited columns. Match names, vendors, categories and formats; keep favorites first and category/vendor/alphabetical modes. | Thousand-plugin search/navigation tests, destination preservation, real click/keyboard selection, held-key release, submenu behavior and small/scaled-window bounds in both designs. See [plugin search](plugin-search.md). |
 | Meter and tempo | Use upstream `Project::bar`, bar-beat BPM and derived quarter-note tick tempo. Preserve runtime invalid-input bounds without clamping the derived tick tempo to displayed-BPM limits; preserve raw tempo metadata in FLP loading. | Meter/count-in tests, derived-tempo clock regression and FLP tests. |
 | Hyprland/XWayland scaling | Retain X11 docking. Linux plugin frames inherit the X11 host scale and docked editors follow scale changes, preserving their active page; docking requests reconcile stale scales. Native Wayland's separate plugin frames retain X-server scaling. | Scale-selection/validation unit tests and the explicit display-dependent `docked_editor_follows_xwayland_parent_scale` check, covering real Lemon Sampler geometry and docking at fractional/integer scales. |
 | CI and bundles | Run inherited platform matrix on main, integrate, feat and fix branches as well as PRs. Lock nested plugin builds. | CI must actually run remotely before claiming Windows/macOS verification. |
@@ -28,9 +35,9 @@ do not reset or force-push main to update it.
 The downstream-only files `crates/os-engine/src/drums.rs`, `crates/os-engine/src/effects/delay.rs`,
 `crates/os-engine/src/effects/distortion.rs` and `crates/os-engine/src/effects/reverb.rs` came from the fork's
 feature history, not the newly merged upstream implementation. Do not stamp upstream authorship onto them.
-`tools/watermark` names these exact four paths as exceptions to its upstream-specific header requirement, validates
-that each path still exists, and continues checking every other source. This exception does not change the project
-license or remove existing notices.
+`tools/watermark` names those exact paths, Ray's five new source files, and the local bridge/adapter's six new source
+and test files as exceptions to its upstream-specific header requirement. It validates that each path still exists
+and continues checking every other source. These exceptions do not change the project license or remove existing notices.
 
 ## Update workflow
 

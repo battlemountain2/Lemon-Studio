@@ -10,6 +10,7 @@
 #![cfg_attr(not(plugin_windows), allow(dead_code))]
 
 mod app;
+mod assistant;
 mod audio_cfg;
 mod auto_close;
 mod autoscroll;
@@ -110,6 +111,8 @@ use app::App;
 use os_ui::Canvas;
 
 struct Shell {
+    #[cfg(unix)]
+    assistant: Option<assistant::io::Bridge>,
     app: App,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
@@ -493,6 +496,8 @@ impl Shell {
             }
             menu_bar::update(views::menus::bar_model(&self.app.state));
         }
+        #[cfg(unix)]
+        if let Some(assistant) = self.assistant.as_mut() { assistant.poll(&mut self.app); }
         self.pending |= self.app.tick();
         // Linux: a docked plugin window uncovered part of the main window, which needs presenting again.
         #[cfg(target_os = "linux")]
@@ -1509,7 +1514,19 @@ fn wake_ui() {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(unix)]
+    if args.first().map(String::as_str) == Some("--assistant-headless") {
+        let result = args.get(1).ok_or("--assistant-headless needs an absolute workspace").and_then(|root| assistant::io::headless(std::path::Path::new(root)).map_err(|error| { eprintln!("{error}"); "Assistant startup failed" }));
+        if let Err(error) = result { eprintln!("{error}"); std::process::exit(1); }
+        return;
+    }
+    #[cfg(unix)]
+    let assistant_root = if let Some(index) = args.iter().position(|argument| argument == "--assistant") {
+        let root = args.get(index + 1).cloned().unwrap_or_else(|| { eprintln!("--assistant needs an absolute workspace"); std::process::exit(1); });
+        args.drain(index..=index + 1);
+        Some(std::path::PathBuf::from(root))
+    } else { None };
     // A plugin scanner process (spec: ui/plugin-manager.md §4): loads one file, prints its plugins, ends.
     if args.first().map(String::as_str) == Some(plugin_scan::ARG) {
         plugin_scan::child_main(&args[1..]);
@@ -1571,6 +1588,13 @@ fn main() {
     #[cfg(windows)]
     watchdog.start(wake_ui);
     let mut shell = Shell {
+        #[cfg(unix)]
+        assistant: assistant_root.map(|root| {
+            let bridge = assistant::io::Bridge::open(&root, false).unwrap_or_else(|error| { eprintln!("Assistant: {error}"); std::process::exit(1); });
+            app.state.assistant_enabled = true;
+            app.state.message = Some(format!("Assistant enabled for {} — edits are undoable", root.display()));
+            bridge
+        }),
         app,
         window: None,
         surface: None,

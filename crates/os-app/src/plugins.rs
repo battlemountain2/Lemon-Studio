@@ -227,8 +227,10 @@ pub struct Plugins {
 pub fn builtin() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static OSC3: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    static RAY: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
     v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_TRIO));
+    v.extend(linked(&RAY, &lemon_ray::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, "Lemon Ray"));
     v
 }
 
@@ -1711,6 +1713,57 @@ mod linux_tests {
         let area_size = connection.get_geometry(area).unwrap().reply().unwrap();
         assert_eq!((area_size.width, area_size.height), (1120, 780));
         assert_eq!(plugins.hosted[&0].link.as_ref().unwrap().page_now(), 1);
+        plugins.clear();
+        sweep_retired();
+        connection.destroy_window(parent).unwrap().check().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires an X11 display; creates only an unmapped test parent"]
+    fn lemon_ray_docks_scales_and_edits_over_xwayland() {
+        use x11rb::protocol::xproto::{ButtonPressEvent, EventMask, KeyButMask, BUTTON_PRESS_EVENT};
+        let (connection, screen) = x11rb::connect(None).expect("X11 test display");
+        let root = connection.setup().roots[screen].root;
+        let parent = connection.generate_id().unwrap();
+        connection.create_window(x11rb::COPY_DEPTH_FROM_PARENT, parent, root, 0, 0, 1920, 1080, 0, WindowClass::INPUT_OUTPUT, x11rb::COPY_FROM_PARENT, &CreateWindowAux::new()).unwrap().check().unwrap();
+        let mut plugins = Plugins { available: builtin(), owner: parent as isize, scale: 1.0, rate: 48000, ..Default::default() };
+        plugins.create(0, plugins.index_of("Lemon Ray").unwrap()).unwrap();
+        let info = ChannelInfo { name: "Lemon Ray".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        plugins.open_window(0, info).unwrap();
+        let pump = |plugins: &mut Plugins| {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(150);
+            while std::time::Instant::now() < until {
+                plugins.idle(|_| None);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        pump(&mut plugins);
+        for scale in [1.0, 1.5, 2.0, 1.25] {
+            plugins.set_scale(scale);
+            pump(&mut plugins);
+            let frame = plugins.hosted[&0].window.as_ref().unwrap();
+            assert!(!frame.detached());
+            assert_eq!(connection.query_tree(frame.hwnd() as u32).unwrap().reply().unwrap().parent, parent);
+            let area = frame.area() as usize as u32;
+            let children = connection.query_tree(area).unwrap().reply().unwrap().children;
+            assert_eq!(children.len(), 1);
+            let geometry = connection.get_geometry(children[0]).unwrap().reply().unwrap();
+            assert_eq!((geometry.width, geometry.height), ((lemon_ray::view::W as f32 * scale).round() as u16, (lemon_ray::view::H as f32 * scale).round() as u16));
+            assert!(plugins.hosted[&0].link.is_some());
+            let before = plugins.state(0).unwrap();
+            let rect = lemon_ray::view::track(0);
+            let event = ButtonPressEvent {
+                response_type: BUTTON_PRESS_EVENT, detail: 4, sequence: 0, time: x11rb::CURRENT_TIME,
+                root, event: children[0], child: x11rb::NONE, root_x: 0, root_y: 0,
+                event_x: (rect.cx() * scale) as i16, event_y: (rect.cy() * scale) as i16,
+                state: KeyButMask::default(), same_screen: true,
+            };
+            connection.send_event(false, children[0], EventMask::BUTTON_PRESS, event).unwrap().check().unwrap();
+            connection.flush().unwrap();
+            pump(&mut plugins);
+            plugins.hosted[&0].plugin.lock().unwrap().idle();
+            assert_ne!(plugins.state(0).unwrap(), before, "wheel reaches Ray at scale {scale}");
+        }
         plugins.clear();
         sweep_retired();
         connection.destroy_window(parent).unwrap().check().unwrap();
