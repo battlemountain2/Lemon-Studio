@@ -55,7 +55,7 @@ mod tests {
         ("crates/os-ui/src/tabler.rs", "GPL-3.0-or-later AND MIT"),
     ];
 
-    const FORK_SOURCES: [&str; 15] = [
+    const FORK_SOURCES: [&str; 27] = [
         "crates/os-app/src/assistant.rs",
         "crates/os-app/src/assistant_io.rs",
         "crates/os-engine/src/drums.rs",
@@ -67,6 +67,18 @@ mod tests {
         "plugins/lemon-ray/src/editor.rs",
         "plugins/lemon-ray/src/params.rs",
         "plugins/lemon-ray/src/view.rs",
+        "plugins/lemon-wavetable/src/dsp.rs",
+        "plugins/lemon-wavetable/src/editor.rs",
+        "plugins/lemon-wavetable/src/env.rs",
+        "plugins/lemon-wavetable/src/fft.rs",
+        "plugins/lemon-wavetable/src/filter.rs",
+        "plugins/lemon-wavetable/src/lfo.rs",
+        "plugins/lemon-wavetable/src/lib.rs",
+        "plugins/lemon-wavetable/src/mod_matrix.rs",
+        "plugins/lemon-wavetable/src/params.rs",
+        "plugins/lemon-wavetable/src/table.rs",
+        "plugins/lemon-wavetable/src/view.rs",
+        "plugins/lemon-wavetable/src/warp.rs",
         "tools/lemon-mcp/server.py",
         "tools/lemon-mcp/sketch.py",
         "tools/lemon-mcp/test_server.py",

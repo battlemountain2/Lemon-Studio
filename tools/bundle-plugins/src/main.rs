@@ -14,8 +14,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// (cargo package, library file stem, display name).
-const PLUGINS: &[(&str, &str, &str)] =
-    &[("lemon-sampler", "lemon_sampler", "Lemon Sampler"), ("lemon-parametric-eq-2", "lemon_parametric_eq_2", "Lemon Parametric EQ"), ("lemon-3x-osc", "lemon_3x_osc", "Lemon Trio"), ("lemon-ray", "lemon_ray", "Lemon Ray")];
+const PLUGINS: &[(&str, &str, &str)] = &[
+    ("lemon-sampler", "lemon_sampler", "Lemon Sampler"),
+    ("lemon-parametric-eq-2", "lemon_parametric_eq_2", "Lemon Parametric EQ"),
+    ("lemon-3x-osc", "lemon_3x_osc", "Lemon Trio"),
+    ("lemon-ray", "lemon_ray", "Lemon Ray"),
+    ("lemon-wavetable", "lemon_wavetable", "Lemon Wavetable"),
+];
 /// The plugins' earlier display names: an install removes bundles left under them (same plugin ids, so a DAW would
 /// list each plugin twice).
 const OLD_NAMES: &[&str] = &["Lemon Parametric EQ 2", "Lemon 3x Osc", "Open Sampler", "Open Parametric EQ 2", "Open 3x Osc"];

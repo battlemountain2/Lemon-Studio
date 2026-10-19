@@ -228,9 +228,11 @@ pub fn builtin() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static OSC3: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static RAY: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    static WAVETABLE: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
     v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_TRIO));
     v.extend(linked(&RAY, &lemon_ray::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, "Lemon Ray"));
+    v.extend(linked(&WAVETABLE, &lemon_wavetable::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_WAVETABLE));
     v
 }
 
@@ -1103,6 +1105,8 @@ pub fn retired_count() -> usize {
 pub const LEMON_SAMPLER: &str = "Lemon Sampler";
 /// Name of Lemon Studio's parametric EQ plugin.
 pub const LEMON_EQ: &str = "Lemon Parametric EQ";
+/// Name of Lemon Studio's wavetable synthesizer plugin.
+pub const LEMON_WAVETABLE: &str = "Lemon Wavetable";
 /// The plugin name a project file stores for the parametric EQ (file-format identifier, kept for interop): slots
 /// with it are played by Lemon Parametric EQ (spec: plugins/lemon-parametric-eq-2.md §8).
 pub const EQ_FILE_NAME: &str = "Fruity Parametric EQ 2";

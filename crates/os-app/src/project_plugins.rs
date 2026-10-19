@@ -58,7 +58,7 @@ pub fn is_wrapped(d: &Descriptor) -> bool {
     if WRAP_BUILTINS.with(|w| w.get()) {
         return matches!(d.format, Format::Clap | Format::Vst3 | Format::Vst2);
     }
-    matches!(d.format, Format::Clap | Format::Vst3 | Format::Vst2) && (!is_builtin(d) || d.id == lemon_ray::CLAP_ID)
+    matches!(d.format, Format::Clap | Format::Vst3 | Format::Vst2) && (!is_builtin(d) || d.id == lemon_ray::CLAP_ID || d.id == lemon_wavetable::CLAP_ID)
 }
 
 /// The project-file identity of a hosted plugin with its saved state.
@@ -69,7 +69,13 @@ pub fn plugin_ref(d: &Descriptor, state: Vec<u8>) -> PluginRef {
         id: if matches!(d.format, Format::Vst3 | Format::Vst2) { d.id.clone() } else { String::new() },
         name: d.name.clone(),
         vendor: d.vendor.clone(),
-        path: if is_builtin(d) && d.id == lemon_ray::CLAP_ID { "builtin/lemon-ray.clap".into() } else { d.path.to_string_lossy().into_owned() },
+        path: if is_builtin(d) && d.id == lemon_ray::CLAP_ID {
+            "builtin/lemon-ray.clap".into()
+        } else if is_builtin(d) && d.id == lemon_wavetable::CLAP_ID {
+            "builtin/lemon-wavetable.clap".into()
+        } else {
+            d.path.to_string_lossy().into_owned()
+        },
         state,
     }
 }
@@ -529,7 +535,10 @@ mod tests {
         let plugins = crate::plugins::builtin();
         for plugin in plugins {
             assert!(is_builtin(&plugin.desc));
-            assert_eq!(is_wrapped(&plugin.desc), plugin.desc.id == lemon_ray::CLAP_ID);
+            assert_eq!(
+                is_wrapped(&plugin.desc),
+                plugin.desc.id == lemon_ray::CLAP_ID || plugin.desc.id == lemon_wavetable::CLAP_ID
+            );
         }
         for plugin in crate::plugins::builtin_effects() { assert!(!is_wrapped(&plugin.desc)); }
     }
@@ -569,6 +578,56 @@ mod tests {
         let wrapped = wrapped_channel(&saved.channels[row]).unwrap();
         assert_eq!((wrapped.name.as_str(), wrapped.format.as_str()), ("Lemon Ray", "clap"));
         assert_eq!(wrapped.path, "builtin/lemon-ray.clap");
+        assert_eq!(wrapped.state, state);
+        let mut reopened = App::new(None);
+        reopened.plugins.available = crate::plugins::builtin();
+        reopened.open(path.clone());
+        reopened.sync_wrapped();
+        assert!(reopened.state.hosted_rows.contains(&row), "{:?}", reopened.state.message);
+        assert_eq!(reopened.state.project.channels[row].mixer_track, track);
+        assert_eq!(reopened.plugins.state(row), Some(state));
+        assert_eq!(before, sound(&reopened.plugins));
+        reopened.save_to(path.clone());
+        let again = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        assert_eq!(saved.channels[row], again.channels[row]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn lemon_wavetable_saves_reopens_and_keeps_its_sound_and_mixer_track() {
+        WRAP_BUILTINS.with(|value| value.set(false));
+        let path = std::env::temp_dir().join(format!("lemon-wavetable-roundtrip-{}.flp", std::process::id()));
+        let mut app = App::new(None);
+        app.state.project = crate::app::test_project();
+        app.state.file = None;
+        app.state.path = None;
+        app.plugins.available = crate::plugins::builtin();
+        let row = crate::app::add_plugin_channel(&mut app.state.project, "Lemon Wavetable");
+        let track = app.state.project.channels[row].mixer_track;
+        app.plugins.create(row, app.plugins.index_of("Lemon Wavetable").unwrap()).unwrap();
+        app.state.hosted_rows.push(row);
+        assert!(app.plugins.set_param_named(row, "Cutoff", 1500.0));
+        assert!(app.plugins.set_param_named(row, "WT Pos", 75.0));
+        assert!(app.plugins.set_param_named(row, "Unison Voices", 5.0));
+        app.plugins.hosted[&row].plugin.lock().unwrap().idle();
+        let sound = |plugins: &Plugins| {
+            let instrument = plugins.hosted[&row].plugin.clone() as os_engine::SharedInstrument;
+            let mut instrument = instrument.lock().unwrap();
+            instrument.reset();
+            instrument.note_on(0, 60, 0.8);
+            let (mut left, mut right) = (vec![0.0; 4800], vec![0.0; 4800]);
+            instrument.process(48000, &mut left, &mut right);
+            assert!(left.iter().any(|value| value.abs() > 0.005));
+            left
+        };
+        let before = sound(&app.plugins);
+        let state = app.plugins.state(row).unwrap();
+        app.save_to(path.clone());
+        assert!(app.state.message.as_deref().is_some_and(|message| message.starts_with("Saved") && !message.contains("not stored")), "{:?}", app.state.message);
+        let saved = os_flp::project::load(&os_flp::FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap()).unwrap();
+        let wrapped = wrapped_channel(&saved.channels[row]).unwrap();
+        assert_eq!((wrapped.name.as_str(), wrapped.format.as_str()), ("Lemon Wavetable", "clap"));
+        assert_eq!(wrapped.path, "builtin/lemon-wavetable.clap");
         assert_eq!(wrapped.state, state);
         let mut reopened = App::new(None);
         reopened.plugins.available = crate::plugins::builtin();

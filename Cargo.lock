@@ -2441,6 +2441,7 @@ dependencies = [
  "lemon-parametric-eq-2",
  "lemon-ray",
  "lemon-sampler",
+ "lemon-wavetable",
  "libc",
  "midir",
  "objc2 0.6.5",

@@ -184,5 +184,8 @@ impl Vst3Plugin for LemonWavetable {
     ];
 }
 
+#[cfg(not(feature = "linked"))]
 nih_export_clap!(LemonWavetable);
+#[cfg(not(feature = "linked"))]
 nih_export_vst3!(LemonWavetable);
+os_plugkit::linked_clap_entry!(LemonWavetable);

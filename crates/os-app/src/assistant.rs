@@ -339,7 +339,22 @@ impl Controller {
                             project.channels[row].plugin_state = Some(os_flp::wrapper::encode(None, &reference));
                             row
                         }
-                        _ => return Err("First-version instruments are sampler and ray.".into()),
+                        "wavetable" => {
+                            if asset.is_some() {
+                                return Err("Wavetable does not take a sample asset.".into());
+                            }
+                            let descriptor = crate::plugins::builtin()
+                                .into_iter()
+                                .find(|plugin| plugin.desc.id == lemon_wavetable::CLAP_ID)
+                                .ok_or("Built-in Wavetable unavailable")?
+                                .desc;
+                            let reference = crate::project_plugins::plugin_ref(&descriptor, Vec::new());
+                            let row = crate::app::add_plugin_channel(&mut project, "Lemon Wavetable");
+                            project.channels[row].plugin = Some(os_flp::wrapper::WRAPPER.into());
+                            project.channels[row].plugin_state = Some(os_flp::wrapper::encode(None, &reference));
+                            row
+                        }
+                        _ => return Err("Supported instruments are sampler, ray, and wavetable.".into()),
                     };
                     let channel = &mut project.channels[row];
                     channel.name = Some(name);
