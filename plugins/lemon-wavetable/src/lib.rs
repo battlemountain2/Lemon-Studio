@@ -1,6 +1,7 @@
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
 pub mod dsp;
+pub mod editor;
 pub mod env;
 pub mod fft;
 pub mod filter;
@@ -8,9 +9,11 @@ pub mod lfo;
 pub mod mod_matrix;
 pub mod params;
 pub mod table;
+pub mod view;
 pub mod warp;
 
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use nih_plug::prelude::*;
@@ -18,9 +21,14 @@ use params::WavetableParams;
 
 pub const CLAP_ID: &str = "org.lemonstudio.lemon-wavetable";
 
+pub struct Shared {
+    pub voices: AtomicU32,
+}
+
 pub struct LemonWavetable {
     params: Arc<WavetableParams>,
     engine: dsp::Engine,
+    shared: Arc<Shared>,
 }
 
 impl Default for LemonWavetable {
@@ -28,6 +36,9 @@ impl Default for LemonWavetable {
         Self {
             params: Arc::new(WavetableParams::default()),
             engine: dsp::Engine::new(48000.0),
+            shared: Arc::new(Shared {
+                voices: AtomicU32::new(0),
+            }),
         }
     }
 }
@@ -59,6 +70,13 @@ impl Plugin for LemonWavetable {
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        Some(Box::new(editor::WavetableEditor::new(
+            self.params.clone(),
+            self.shared.clone(),
+        )))
     }
 
     fn initialize(
@@ -135,6 +153,10 @@ impl Plugin for LemonWavetable {
                 next_event = context.next_event();
             }
         }
+
+        self.shared
+            .voices
+            .store(self.engine.active_voice_count() as u32, Ordering::Relaxed);
 
         ProcessStatus::KeepAlive
     }
