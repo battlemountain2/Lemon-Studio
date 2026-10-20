@@ -9,6 +9,7 @@ pub mod browser;
 pub mod cabledebug;
 pub mod channel_win;
 pub mod data_folder;
+pub mod device_strip;
 pub mod dialog;
 pub mod menus;
 pub mod mondebug;
@@ -168,6 +169,11 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         }
         ui.c.pop_clip();
         ui.win = None;
+    }
+    if s.show_device_strip {
+        let left = if s.show_browser { BROWSER_W } else { 0.0 };
+        let r = Rect::new(left, h - s.device_strip_h, (w - left).max(0.0), s.device_strip_h);
+        ui.part(Seg::DeviceStrip, r, |ui| device_strip::paint(ui, s, r, f));
     }
     if !s.toolbar.hidden {
         // At Toolbars scaling (spec: ui/ui-scaling.md §1): the band works in its own px, `k` of the window's each, so

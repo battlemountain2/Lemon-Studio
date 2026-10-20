@@ -30,6 +30,9 @@ pub enum KnobId {
     /// Channel rack row / plugin window (model).
     ChanVol(usize),
     ChanPan(usize),
+    /// Channel filter cutoff and resonance macros (0..=256 in model).
+    ChanCutoff(usize),
+    ChanRes(usize),
     /// Channel rack main swing, 0..100 % (spec: ui/channel-rack.md §7; playback: flp/events/project-info.md).
     Swing,
     /// Mixer track `.0`'s equaliser: band `.1` (0 low shelf, 1 peaking, 2 high shelf), setting `.2` (0 gain, the
@@ -57,6 +60,7 @@ impl KnobId {
             // spec: ui/channel-rack.md §11 (3 % per notch; pan percent spans half the range), §7 (swing 4-5 %).
             KnobId::ChanVol(_) => 0.03,
             KnobId::ChanPan(_) => 0.015,
+            KnobId::ChanCutoff(_) | KnobId::ChanRes(_) => 0.02,
             KnobId::Swing => 0.045,
             _ => PER_NOTCH,
         }
@@ -66,7 +70,7 @@ impl KnobId {
     pub fn drag_rate(self) -> f32 {
         match self {
             // spec: ui/channel-rack.md §11 (0.4 % / px volume, 0.8 % / px pan) and §7 (30 px = 17 % swing).
-            KnobId::ChanVol(_) | KnobId::ChanPan(_) => 0.004,
+            KnobId::ChanVol(_) | KnobId::ChanPan(_) | KnobId::ChanCutoff(_) | KnobId::ChanRes(_) => 0.004,
             KnobId::Swing => 0.17 / 30.0,
             // A band's gain fader: its handle about follows the mouse over the graph's height.
             KnobId::Eq(_, _, 0) => 1.0 / 160.0,
@@ -79,6 +83,8 @@ impl KnobId {
         match self {
             KnobId::MasterVol | KnobId::Send(..) => 0.8,
             KnobId::ChanVol(_) => 0.78125,
+            KnobId::ChanCutoff(_) => 1.0,
+            KnobId::ChanRes(_) => 0.0,
             KnobId::SlotMix(..) => 1.0,
             KnobId::Swing => 0.0,
             KnobId::Eq(_, b, f) => eq_pos(f, os_model::EQ_DEFAULT[usize::from(b.min(2))][usize::from(f.min(2))]),
@@ -114,6 +120,8 @@ impl State {
             KnobId::Send(a, b) => crate::mixer::send(self, a, b).unwrap_or(0.8) as f32,
             KnobId::ChanVol(i) => self.project.channels.get(i).map_or(0.8, |c| c.volume as f32).clamp(0.0, 1.0),
             KnobId::ChanPan(i) => self.project.channels.get(i).map_or(0.5, |c| 0.5 + c.pan as f32 / 2.0).clamp(0.0, 1.0),
+            KnobId::ChanCutoff(i) => self.project.channels.get(i).map_or(1.0, |c| c.sound.cutoff.clamp(0, 256) as f32 / 256.0),
+            KnobId::ChanRes(i) => self.project.channels.get(i).map_or(0.0, |c| c.sound.resonance.clamp(0, 256) as f32 / 256.0),
             // Main swing is project data, 0..=128 (spec: flp/events/project-info.md, event 11).
             KnobId::Swing => f32::from(self.project.swing.unwrap_or(0).min(128)) / 128.0,
             KnobId::MasterVol => f32::from(self.project.main_volume.unwrap_or(os_model::Project::MAIN_VOLUME_DEFAULT).min(16000)) / 16000.0,
@@ -174,6 +182,18 @@ impl State {
                     self.piano.dirty = true;
                 }
             }
+            KnobId::ChanCutoff(i) => {
+                if let Some(c) = self.project.channels.get_mut(i) {
+                    c.sound.cutoff = (v * 256.0).round() as i32;
+                    self.piano.dirty = true;
+                }
+            }
+            KnobId::ChanRes(i) => {
+                if let Some(c) = self.project.channels.get_mut(i) {
+                    c.sound.resonance = (v * 256.0).round() as i32;
+                    self.piano.dirty = true;
+                }
+            }
             KnobId::Swing => {
                 self.project.swing = Some((v * 128.0).round() as u8);
                 self.piano.dirty = true;
@@ -214,6 +234,8 @@ impl State {
             },
             KnobId::MixPan(_) => format!("Panning: {}", pan_text(bipolar)),
             KnobId::ChanPan(_) => format!("Channel panning: {}", pan_text(bipolar)),
+            KnobId::ChanCutoff(_) => format!("Channel filter cutoff: {:.0}%", n * 100.0),
+            KnobId::ChanRes(_) => format!("Channel filter resonance: {:.0}%", n * 100.0),
             KnobId::MixSep(_) => crate::mixer::sep_text(f64::from(bipolar)),
             KnobId::Send(_, b) => crate::mixer::level_text(&format!("To {}", crate::mixer::name(self, b)), f64::from(n)),
             KnobId::SlotMix(..) => format!("Mix level: {:.0}%", n * 100.0),
@@ -261,6 +283,12 @@ mod tests {
         assert_eq!(s.knob_text(KnobId::Swing), "Main swing: 0%");
         s.project.channels = vec![os_model::Channel { volume: 0.78, ..crate::app::test_project().channels[0].clone() }];
         assert_eq!(s.knob_text(KnobId::ChanVol(0)), "Channel volume: 78%  -5.2dB  0.55");
+        s.set_knob(KnobId::ChanCutoff(0), 0.5);
+        assert_eq!(s.knob_text(KnobId::ChanCutoff(0)), "Channel filter cutoff: 50%");
+        assert_eq!(s.project.channels[0].sound.cutoff, 128);
+        s.set_knob(KnobId::ChanRes(0), 0.25);
+        assert_eq!(s.knob_text(KnobId::ChanRes(0)), "Channel filter resonance: 25%");
+        assert_eq!(s.project.channels[0].sound.resonance, 64);
     }
 
     #[test]

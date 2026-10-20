@@ -201,6 +201,7 @@ const VIEW_ITEMS: &[Item] = &[
     it("Channel rack", "F6").on().tick(),
     it("Mixer", "F9").on().tick(),
     it("Browser", "Alt+F8").on().tick(),
+    it("Device strip", "Alt+D").on().tick(),
     it("Project picker", "Ctrl+F8"),
     it("Plugin picker", "F8").on(),
     it("Tempo tapper", "Ctrl+F5").tick(),
@@ -413,6 +414,9 @@ pub fn active(s: &State, menu: usize, item: &Item) -> bool {
 
 fn item_action(menu: usize, i: usize, item: &Item) -> Action {
     if menu == VIEW {
+        if item.label == "Device strip" {
+            return Action::ToggleDeviceStrip;
+        }
         if let Some(w) = win_of(item.label) {
             return Action::ToggleWin(w);
         }
@@ -470,6 +474,7 @@ fn mark_of(s: &State, menu: usize, item: &Item) -> Mark {
     match (item.mark, menu == VIEW) {
         // The browser is a panel of its own, shown by its own switch.
         (Mark::Check(_), true) if item.label == "Browser" => Mark::Check(s.show_browser),
+        (Mark::Check(_), true) if item.label == "Device strip" => Mark::Check(s.show_device_strip),
         (Mark::Check(_), true) => Mark::Check(win_of(item.label).is_some_and(|w| s.shown(w))),
         (Mark::Check(_), _) if item.label == "Typing keyboard to piano" => Mark::Check(s.toggles.contains(&"typing")),
         (Mark::Check(_), _) if item.label == METRONOME_LABEL => Mark::Check(crate::metronome::on()),

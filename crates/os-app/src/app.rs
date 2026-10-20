@@ -310,6 +310,17 @@ pub enum Action {
     Dlg(crate::dialog::DHit),
     /// The Song info box: a click closes it (spec: flp/events/project-info.md "The Song info box").
     SongInfo,
+    /// Bottom device strip actions (Phase 5).
+    ToggleDeviceStrip,
+    DeviceStripPrevChan,
+    DeviceStripNextChan,
+    DeviceStripFocusChan(usize),
+    DeviceStripOpenChan(usize),
+    DeviceStripSlotClick { track: u16, slot: u8 },
+    DeviceStripSlotArrow { track: u16, slot: u8 },
+    DeviceStripSlotLed { track: u16, slot: u8 },
+    DeviceStripAddEffect { track: u16 },
+    DeviceStripArea,
 }
 
 /// Scrollable view axes. Scroll values are in content pixels (see `App::scroll_get`).
@@ -558,6 +569,8 @@ pub enum Seg {
     Toolbar,
     /// The playlist's clip source list (inside `Win(Playlist)`: a scroll of the grid leaves it alone).
     PlPicker,
+    /// Bottom device strip dock (Bitwig / Ableton style signal chain).
+    DeviceStrip,
 }
 
 /// What each part registered and where it drew in the last paint, so a partial repaint can keep the hits of the parts
@@ -874,6 +887,10 @@ pub struct State {
     /// spec: ui/close-windows.md §2).
     pub no_focus: bool,
     pub show_browser: bool,
+    /// Bottom device strip dock visible (Phase 5).
+    pub show_device_strip: bool,
+    pub device_strip_h: f32,
+    pub device_strip_scroll_x: f32,
     pub rack_pos: (f32, f32),
     pub rack_size: (f32, f32),
     /// Horizontal step scroll of the rack, pixels.
@@ -1005,11 +1022,12 @@ impl State {
         self.z.iter().rev().copied().find(|&w| self.is_max(w))
     }
 
-    /// The workspace: right of the browser, below the toolbar.
+    /// The workspace: right of the browser, below the toolbar, above the bottom device strip dock.
     pub fn work_rect(&self) -> Rect {
         let left = if self.show_browser { views::BROWSER_W } else { 0.0 };
         let top = views::work_y(self);
-        Rect::new(left, top, (self.screen.0 - left).max(0.0), (self.screen.1 - top).max(0.0))
+        let bottom_dock = if self.show_device_strip { self.device_strip_h } else { 0.0 };
+        Rect::new(left, top, (self.screen.0 - left).max(0.0), (self.screen.1 - top - bottom_dock).max(0.0))
     }
 
     /// The window's floating rect, kept at least its minimum size and at most the screen's, with its part in the
@@ -1239,6 +1257,9 @@ impl App {
                 z: vec![Win::Playlist, Win::ChannelRack],
                 no_focus: false,
                 show_browser: true,
+                show_device_strip: false,
+                device_strip_h: 160.0,
+                device_strip_scroll_x: 0.0,
                 rack_pos: (317.0, 195.0),
                 rack_size: views::rack::DEFAULT_SIZE,
                 rack_scroll_x: 0.0,
@@ -6016,6 +6037,21 @@ impl App {
             self.browser_wheel(dy + dx);
             return None;
         }
+        if matches!(area, Some(Action::DeviceStripArea)) {
+            let delta = -(dy + dx) * 40.0;
+            self.state.device_strip_scroll_x = (self.state.device_strip_scroll_x + delta).max(0.0);
+            return None;
+        }
+        if matches!(area, Some(Action::DeviceStripFocusChan(_))) {
+            let n = self.state.project.channels.len();
+            if n > 0 {
+                let d = if dy + dx > 0.0 { -1 } else { 1 };
+                let cur = self.state.selected_channel as i32;
+                let next = (cur + d).rem_euclid(n as i32) as usize;
+                self.focus_channel(next);
+            }
+            return None;
+        }
         if matches!(area, Some(Action::Settings(views::settings::SAct::Plug(views::settings::Plug::Table | views::settings::Plug::Row(_) | views::settings::Plug::Star(_) | views::settings::Plug::Show(_)))) | Some(Action::Scrollbar(Scroll::PlugTable))) {
             let n = self.state.plugdb.rows.len();
             let top = self.state.plugdb.top as f32 - (dy + dx) * 3.0;
@@ -6401,6 +6437,8 @@ impl App {
             Key::Character(c) if ctrl && !self.shift && c.eq_ignore_ascii_case("n") => self.act(Action::MenuItem(0, views::menus::FILE_SAVE_VERSION)),
             Key::Character(c) if ctrl && !alt && c.eq_ignore_ascii_case("i") => self.toggle_rec_wait_input(),
             Key::Character(c) if !ctrl && !alt && c.eq_ignore_ascii_case("r") && !self.typing_on() => self.toggle_record(),
+            // VIEW > Device strip (Alt+D).
+            Key::Character(c) if !ctrl && alt && c.eq_ignore_ascii_case("d") => self.act(Action::ToggleDeviceStrip),
             // TOOLS > Browser find... (spec: ui/browser-commands.md §3).
             Key::Character(c) if ctrl && !alt && !self.shift && c.eq_ignore_ascii_case("f") => self.browser_jump(crate::browser::Jump::Find),
             _ => {}
@@ -7380,6 +7418,61 @@ impl App {
             Action::Pat(h) => crate::patterns::hit(s, h),
             Action::Dlg(h) => self.dialog_click(h),
             Action::SongInfo => self.close_song_info(),
+            Action::ToggleDeviceStrip => {
+                s.show_device_strip = !s.show_device_strip;
+                self.invalidate();
+            }
+            Action::DeviceStripPrevChan => {
+                let n = self.state.project.channels.len();
+                if n > 0 {
+                    let cur = self.state.selected_channel;
+                    let prev = if cur == 0 { n - 1 } else { cur - 1 };
+                    self.focus_channel(prev);
+                    self.invalidate();
+                }
+            }
+            Action::DeviceStripNextChan => {
+                let n = self.state.project.channels.len();
+                if n > 0 {
+                    let cur = self.state.selected_channel;
+                    let next = if cur + 1 >= n { 0 } else { cur + 1 };
+                    self.focus_channel(next);
+                    self.invalidate();
+                }
+            }
+            Action::DeviceStripFocusChan(i) => {
+                self.focus_channel(i);
+                self.invalidate();
+            }
+            Action::DeviceStripOpenChan(i) => {
+                self.focus_channel(i);
+                self.open_channel_window(i);
+                self.invalidate();
+            }
+            Action::DeviceStripSlotClick { track, slot } => {
+                self.state.selected_mixer = track;
+                crate::mixer::hit(self, crate::mixer::MHit::SlotName(slot));
+            }
+            Action::DeviceStripSlotArrow { track, slot } => {
+                self.state.selected_mixer = track;
+                crate::mixer::hit(self, crate::mixer::MHit::SlotArrow(slot));
+            }
+            Action::DeviceStripSlotLed { track, slot } => {
+                self.state.selected_mixer = track;
+                crate::mixer::hit(self, crate::mixer::MHit::SlotLed(slot));
+            }
+            Action::DeviceStripAddEffect { track } => {
+                self.state.selected_mixer = track;
+                let mut target_slot = 0u8;
+                for k in 0..10u8 {
+                    if crate::mixer::slot_name(&self.state, track, k).is_none() {
+                        target_slot = k;
+                        break;
+                    }
+                }
+                crate::mixer::hit(self, crate::mixer::MHit::SlotArrow(target_slot));
+            }
+            Action::DeviceStripArea => {}
             Action::PlPickList => {}
             Action::PlPickAdd => {
                 let at = crate::patterns::box_at_mouse(self.mouse);
@@ -17701,5 +17794,72 @@ mod tests {
         assert_eq!(pl::clips(&app.state)[ci].fade_in_tension(), 0.0, "double click reset tension to 0.0");
 
         let _ = std::fs::remove_file(&wav);
+    }
+
+    #[test]
+    fn device_strip_signal_chain_workflow() {
+        let mut app = App::new(None);
+        let mut c = os_ui::Canvas::new(1920, 1080, 1.0).unwrap();
+
+        // 1. Initial State: show_device_strip is false, work_rect is unconstrained at bottom
+        assert!(!app.state.show_device_strip);
+        let initial_work = app.state.work_rect();
+
+        // 2. Alt+D shortcut toggles device strip on
+        app.key(&winit::keyboard::Key::Character("d".into()), false, true);
+        assert!(app.state.show_device_strip, "Alt+D toggled device strip on");
+
+        // 3. work_rect() now subtracts device_strip_h (160.0 px)
+        let docked_work = app.state.work_rect();
+        assert_eq!(docked_work.h, initial_work.h - app.state.device_strip_h, "dock resizes work_rect height");
+
+        // 4. Channel cycling
+        let num_chans = app.state.project.channels.len();
+        assert!(num_chans > 0);
+        assert_eq!(app.state.selected_channel, 0);
+
+        app.act(Action::DeviceStripNextChan);
+        assert_eq!(app.state.selected_channel, 1.min(num_chans - 1));
+
+        app.act(Action::DeviceStripPrevChan);
+        assert_eq!(app.state.selected_channel, 0);
+
+        // 5. Channel filter cutoff & resonance macros
+        app.state.set_knob(crate::knobs::KnobId::ChanCutoff(0), 0.75);
+        assert!((app.state.knob(crate::knobs::KnobId::ChanCutoff(0)) - 0.75).abs() < 0.01);
+        assert_eq!(app.state.project.channels[0].sound.cutoff, 192);
+
+        app.state.set_knob(crate::knobs::KnobId::ChanRes(0), 0.50);
+        assert!((app.state.knob(crate::knobs::KnobId::ChanRes(0)) - 0.50).abs() < 0.01);
+        assert_eq!(app.state.project.channels[0].sound.resonance, 128);
+
+        // 6. Insert effect slot actions on target mixer track
+        let target_mixer = app.state.project.channels[0].mixer_track;
+        // Turn slot 0 off via device strip slot LED action
+        app.act(Action::DeviceStripSlotLed { track: target_mixer, slot: 0 });
+        let m = app.state.project.mixer.iter().find(|m| m.index == target_mixer).unwrap();
+        assert!(!m.slot_on[0], "slot 0 bypassed via DeviceStripSlotLed");
+
+        // Turn slot 0 back on
+        app.act(Action::DeviceStripSlotLed { track: target_mixer, slot: 0 });
+        let m = app.state.project.mixer.iter().find(|m| m.index == target_mixer).unwrap();
+        assert!(m.slot_on[0], "slot 0 re-enabled via DeviceStripSlotLed");
+
+        // Set slot mix knob
+        app.state.set_knob(crate::knobs::KnobId::SlotMix(target_mixer, 0), 0.42);
+        assert!((app.state.knob(crate::knobs::KnobId::SlotMix(target_mixer, 0)) - 0.42).abs() < 0.01);
+
+        // 7. Paint frame with device strip on, verify hits are generated
+        frame(&mut app, &mut c, None);
+        assert!(app.hits.iter().any(|h| matches!(h.action, Action::DeviceStripArea)));
+        assert!(app.hits.iter().any(|h| matches!(h.action, Action::DeviceStripPrevChan)));
+        assert!(app.hits.iter().any(|h| matches!(h.action, Action::DeviceStripNextChan)));
+        assert!(app.hits.iter().any(|h| matches!(h.action, Action::ToggleDeviceStrip)));
+        assert!(app.hits.iter().any(|h| matches!(h.action, Action::DeviceStripAddEffect { .. })));
+
+        // 8. Close button / Action::ToggleDeviceStrip turns it off
+        app.act(Action::ToggleDeviceStrip);
+        assert!(!app.state.show_device_strip);
+        assert_eq!(app.state.work_rect().h, initial_work.h);
     }
 }
