@@ -25,6 +25,7 @@ mod clip_colors;
 mod clock;
 mod cpu;
 mod data_folder;
+mod device;
 mod dialog;
 mod filedlg;
 mod enable_groups;
@@ -60,6 +61,7 @@ mod playlist;
 mod plugin_db;
 mod plugin_manager;
 mod plugin_menu;
+mod plugin_rebuild;
 mod plugin_scan;
 #[cfg(plugin_windows)]
 mod plugin_window;
@@ -672,6 +674,12 @@ impl ApplicationHandler for Shell {
         if press && self.app.loading() {
             return;
         }
+        // Linux: a wheel turn over a docked plugin window is the plugin window's alone; nothing behind it scrolls
+        // (`plugin_window::pointer_in_docked`).
+        #[cfg(target_os = "linux")]
+        if matches!(event, WindowEvent::MouseWheel { .. }) && crate::plugin_window::pointer_in_docked() {
+            return;
+        }
         // Linux: a click in the main window takes the keyboard back from a plugin editor that holds it (X11 leaves it
         // there), so the typing keyboard plays again.
         #[cfg(target_os = "linux")]
@@ -830,6 +838,12 @@ impl ApplicationHandler for Shell {
                     MouseScrollDelta::PixelDelta(p) => (p.x as f32 / 40.0, p.y as f32 / 40.0),
                 };
                 self.app.wheel(dx, dy, self.mods.shift_key(), ctrl(self.mods));
+                // A wheel step in a menu puts the cursor on the row it lit.
+                if let Some((x, y)) = self.app.warp.take() {
+                    let k = ui_scale(&window);
+                    let at = (f64::from(x) * k + f64::from(self.inset.0), f64::from(y) * k + f64::from(self.inset.1));
+                    let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(at.0, at.1));
+                }
                 self.pending = true;
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -1457,7 +1471,7 @@ fn screenshot(args: &[String]) {
         // Playback: what each tick repaints (spec: audio/transport.md; no device, the shown state is set directly).
         // About 4 ticks per frame = 60 frames a second at 140 BPM, 96 PPQ.
         for song in [false, true] {
-            let shown = |tick: f64, sounding: Vec<(u16, u16)>| app::Shown { playing: true, paused: false, tick, song, sounding };
+            let shown = |tick: f64, sounding: Vec<(u16, u16)>| app::Shown { playing: true, paused: false, tick, song, sounding, tempo: None };
             app.show_playback(shown(0.0, Vec::new()));
             let d = app.take_damage();
             app.paint_region(&mut canvas, d.flatten().as_deref());
@@ -1575,6 +1589,8 @@ fn main() {
         screenshot(&args);
         return;
     }
+    // Run from source: Lemon Studio's own plugins are rebuilt and installed before the plugin scan looks for them.
+    plugin_rebuild::run();
     let path = args.first().map(std::path::PathBuf::from);
     let mut builder = EventLoop::<()>::with_user_event();
     #[cfg(target_os = "linux")]

@@ -87,7 +87,7 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Exporting audio | 🚧 | Song or pattern to a 32-bit float WAV file; no MP3 or FLAC yet |
 | Note input | 🚧 | Mouse, computer keyboard and MIDI controllers; experimental pattern recording, count-in and overdub in this fork |
 | Undo | 🚧 | One history for the whole project, with redo and the browser's History; not yet for mixer faders, plugin parameters or project settings |
-| Audio drivers | 🚧 | WASAPI on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no ASIO or JACK yet |
+| Audio drivers | 🚧 | WASAPI (shared and exclusive) and ASIO® (output) on Windows, ALSA (and PipeWire / PulseAudio through it) on Linux, Core Audio on macOS; no JACK yet |
 | Platforms | 🚧 | Windows 10 / 11, Linux (X11, and Wayland through XWayland) and macOS 11 or newer; macOS is supported at the same level as Linux |
 | Look and themes | 🚧 | Lemon and Classic designs, theme files for Classic; Lemon plugin editors in the Lemon design only |
 | Settings | 🚧 | The General, Audio, File, Theme, Project and Info pages work; not yet the MIDI page or the recording settings |
@@ -97,6 +97,10 @@ Where Lemon Studio stands against what a complete DAW offers:
 | Plugin delay compensation | ❌ | |
 
 ✅ usable · 🚧 partial · ❌ not available yet
+
+<img alt="ASIO Compatible logo" src="crates/os-app/asiosdk/logo/ASIO-compatible-logo-Steinberg-TM-BW.png" width="96">
+
+ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 <table>
   <tr>
@@ -123,6 +127,14 @@ git clone https://github.com/ItsAlphaNeon/Lemon-Studio.git
 cd Lemon-Studio
 ```
 
+`cargo run -p os-app --release` builds and runs Lemon Studio. Before Lemon Studio starts, it also rebuilds Lemon
+Studio's own plugins (Lemon Sampler, Lemon Trio, Lemon Parametric EQ, Lemon Limiter and Lemon Reverb) and installs the
+ones that changed as VST3 and CLAP plugins, in the folders where Lemon Studio and other DAWs find them. A plugin that is
+new or updated in the repository shows up at the next run. The first run builds every plugin, which takes a few minutes
+more; later runs rebuild only what changed. Set `OPENSTUDIO_NO_PLUGIN_BUILD=1` to skip the plugin build. A Lemon Studio
+installed as below builds nothing: after pulling changes, either run the command above once, or build and install only
+the plugins with `cargo run -p bundle-plugins -- --install`.
+
 ### Windows
 
 Windows 10 or 11, x64.
@@ -132,8 +144,9 @@ Windows 10 or 11, x64.
 - The Microsoft C++ build tools that Rust uses (rustup offers them when it installs; otherwise the Visual Studio Build
   Tools with the "Desktop development with C++" workload). They include the Windows SDK, which embeds the application
   icon in the program; without the SDK the build still succeeds, without the icon.
-- LLVM, whose libclang generates the time stretcher's bindings at build time: `winget install LLVM.LLVM`. If
-  `libclang.dll` is not in LLVM's default folder, set `LIBCLANG_PATH` to the folder that holds it.
+- LLVM, whose libclang generates the time stretcher's and the ASIO SDK's bindings at build time:
+  `winget install LLVM.LLVM`. If `libclang.dll` is not in LLVM's default folder, set `LIBCLANG_PATH` to the folder
+  that holds it.
 
 **Build and run**
 
@@ -151,8 +164,9 @@ $link.TargetPath = "$env:USERPROFILE\.cargo\bin\lemonstudio.exe"
 $link.Save()
 ```
 
-**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon Trio and Lemon Parametric EQ as
-VST3 and CLAP plugins and installs them in `%LOCALAPPDATA%\Programs\Common\VST3` and `...\CLAP`, where DAWs find them.
+**Plugins:** `cargo run -p os-app --release` installs Lemon Studio's plugins in `%LOCALAPPDATA%\Programs\Common\VST3`
+and `...\CLAP`, where DAWs find them. To build and install them without starting Lemon Studio, run
+`cargo run -p bundle-plugins -- --install`.
 
 **Notes**
 
@@ -197,8 +211,8 @@ install -Dm644 crates/os-app/assets/lemonstudio.png ~/.local/share/icons/hicolor
 install -Dm644 crates/os-app/assets/lemonstudio.desktop ~/.local/share/applications/lemonstudio.desktop
 ```
 
-**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon Trio and Lemon Parametric EQ as
-VST3 and CLAP plugins and installs them in `~/.vst3` and `~/.clap`.
+**Plugins:** `cargo run -p os-app --release` installs Lemon Studio's plugins in `~/.vst3` and `~/.clap`. To build and
+install them without starting Lemon Studio, run `cargo run -p bundle-plugins -- --install`.
 
 **Notes**
 
@@ -249,9 +263,9 @@ Finder opens `.flp` projects with it. Without `--install` the app is only writte
 cargo run -p bundle-app -- --install
 ```
 
-**Plugins:** `cargo run -p bundle-plugins -- --install` builds Lemon Sampler, Lemon Trio and Lemon Parametric EQ as
-VST3 and CLAP plugin bundles, signed ad hoc so that Apple silicon loads them, and installs them in
-`~/Library/Audio/Plug-Ins/VST3` and `.../CLAP`.
+**Plugins:** `cargo run -p os-app --release` installs Lemon Studio's plugins as bundles, signed ad hoc so that Apple
+silicon loads them, in `~/Library/Audio/Plug-Ins/VST3` and `.../CLAP`. To build and install them without starting Lemon
+Studio, run `cargo run -p bundle-plugins -- --install`.
 
 **Notes**
 
@@ -288,8 +302,9 @@ Ctrl.
 
 Lemon Trio and Lemon Parametric EQ were called Lemon 3x Osc and Lemon Parametric EQ 2 before, and earlier all three
 plugins were called Open Sampler, Open 3x Osc and Open Parametric EQ 2. They keep their plugin IDs, so sessions saved
-with the old names still open with the new plugins. `bundle-plugins --install` removes bundles it installed under the
-old names; delete any others you copied yourself, or DAWs will list each plugin twice.
+with the old names still open with the new plugins. Installing the plugins (by the run from source or
+`bundle-plugins --install`) removes bundles installed under the old names; delete any others you copied yourself, or
+DAWs will list each plugin twice.
 
 ### Tests
 
@@ -322,7 +337,7 @@ see [the patch inventory](docs/fork-patches.md).
 | `flp-dump` | Print a project file's event stream and verify that it round-trips |
 | `os-render` | Render a project or pattern offline to a WAV file |
 | `os-play` | Play a project through the default audio output |
-| `bundle-plugins` | Build Lemon Studio's own plugins as VST3 and CLAP bundles, and optionally install them |
+| `bundle-plugins` | Build Lemon Studio's own plugins as VST3 and CLAP bundles, and optionally install them (`cargo run -p os-app --release` runs it with `--install`) |
 | `bundle-app` | Build Lemon Studio as a macOS app, and optionally install it |
 
 ## Architecture
@@ -347,14 +362,18 @@ Lemon Studio is a Cargo workspace of focused crates:
 | [`os-paths`](crates/os-paths) | Where Lemon Studio keeps its settings, themes and presets on each platform |
 | [`lemon-sampler`](plugins/lemon-sampler) | Lemon Sampler instrument (VST3 + CLAP) |
 | [`lemon-3x-osc`](plugins/lemon-3x-osc) | Lemon Trio instrument (VST3 + CLAP) |
+| [`lemon-wavetable`](plugins/lemon-wavetable) | Lemon Wavetable instrument (Serum V2 rebuild) |
+| [`lemon-ray`](plugins/lemon-ray) | Lemon Ray instrument |
 | [`lemon-parametric-eq-2`](plugins/lemon-parametric-eq-2) | Lemon Parametric EQ effect (VST3 + CLAP) |
+| [`lemon-limiter`](plugins/lemon-limiter) | Lemon Limiter effect (VST3 + CLAP) |
+| [`lemon-reverb`](plugins/lemon-reverb) | Lemon Reverb effect (VST3 + CLAP) |
 
 ## Roadmap
 
 The roadmap is kept on the [Lemon Studio Discord server](https://discord.gg/yC2uCuGs3M), where every item is
 marked as complete, in progress or not started. The broad next steps are the engine rework (sampler voice,
 automation, delay compensation), opening projects from older FL Studio versions, audio recording and robust note recording, MIDI
-settings, ASIO output, more built-in instruments and effects, and the rest of the plugin window features on Linux.
+settings, ASIO inputs, more built-in instruments and effects, and the rest of the plugin window features on Linux.
 
 ## Development approach
 
@@ -393,11 +412,14 @@ about the project. Please keep in mind that support is not offered at this stage
 | [FST](https://git.iem.at/zmoelnig/FST) by IOhannes m zmölnig | Reverse-engineered VST2 interface: the parts vst2sdk leaves out (time info, edit gestures) | GPLv3 or later |
 | [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) by Geraint Luff / Signalsmith Audio Ltd, with Signalsmith Linear | Time stretching and pitch shifting | MIT |
 | [signalsmith-stretch](https://github.com/colinmarc/signalsmith-stretch-rs) by Colin Marc | Rust bindings to Signalsmith Stretch | MIT |
+| [ASIO SDK](https://www.steinberg.net/asiosdk) by Steinberg Media Technologies GmbH (host files) | ASIO output on Windows | [GPLv3](crates/os-app/asiosdk/LICENSE.txt) (its GPL option); a Windows build with it is GPLv3 |
 | Rust crates listed in `Cargo.lock` | Various | Their respective licenses |
 
 Their copyright notices and licence texts are collected in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt), which
 goes with every copy of Lemon Studio next to [LICENSE](LICENSE). The notices of the other crates in `Cargo.lock` are
 to be added to it before binaries are published.
+
+ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 ## License
 

@@ -31,6 +31,9 @@
 //! A file that holds others' work (listed in `SHARED`, with the licences of those parts) names both licences in its SPDX
 //! line and adds a line saying that those parts keep their authors' copyright and licence, which the file names below
 //! the header.
+//!
+//! Third-party sources kept unchanged, in a folder of their own (listed in `VENDORED`, and in
+//! THIRD-PARTY-NOTICES.txt), keep their authors' headers instead.
 
 #[cfg(test)]
 mod tests {
@@ -47,6 +50,12 @@ mod tests {
     /// The line a file that holds others' work adds after the header's lines.
     const SHARED_NOTE: &str = "It also holds others' work, which keeps its authors' copyright and licence, named below.";
 
+    /// The folders of third-party sources kept unchanged (paths from the repository root), which keep their own headers.
+    const VENDORED: [&str; 1] = [
+        // The ASIO SDK's host files (GPL-3.0 option), built by asio-sys.
+        "crates/os-app/asiosdk/",
+    ];
+
     /// The files that hold others' work (paths from the repository root) and their licence expression.
     const SHARED: [(&str, &str); 2] = [
         // Bindings written from vst2sdk (BSD-3-Clause) and FST (GPL-3.0-or-later).
@@ -55,13 +64,12 @@ mod tests {
         ("crates/os-ui/src/tabler.rs", "GPL-3.0-or-later AND MIT"),
     ];
 
-    const FORK_SOURCES: [&str; 27] = [
+    const FORK_SOURCES: [&str; 26] = [
         "crates/os-app/src/assistant.rs",
         "crates/os-app/src/assistant_io.rs",
         "crates/os-engine/src/drums.rs",
         "crates/os-engine/src/effects/delay.rs",
         "crates/os-engine/src/effects/distortion.rs",
-        "crates/os-engine/src/effects/reverb.rs",
         "plugins/lemon-ray/src/lib.rs",
         "plugins/lemon-ray/src/dsp.rs",
         "plugins/lemon-ray/src/editor.rs",
@@ -216,6 +224,10 @@ mod tests {
         for (path, _) in SHARED {
             assert!(files.iter().any(|(p, _)| rel(p) == path), "{path}, listed as holding others' work, is not a source file");
         }
+        for dir in VENDORED {
+            assert!(files.iter().any(|(p, _)| rel(p).starts_with(dir)), "{dir}, listed as third-party sources, holds none");
+        }
+        files.retain(|(p, _)| !VENDORED.iter().any(|dir| rel(p).starts_with(dir)));
         for path in FORK_SOURCES {
             assert!(files.iter().any(|(source, _)| rel(source) == path), "{path}, listed as fork-only work, is not a source file");
         }

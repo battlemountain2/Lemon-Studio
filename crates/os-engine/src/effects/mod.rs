@@ -8,6 +8,7 @@
 mod biquad;
 pub mod delay;
 pub mod distortion;
+pub mod dynamics;
 pub mod eq;
 pub mod limiter;
 pub mod reverb;
@@ -24,6 +25,8 @@ pub trait Effect: Send {
     /// Empties delay lines and filter states (a slot switched on during the song, spec: audio/mixer.md "Changes while
     /// the song plays").
     fn reset(&mut self) {}
+    /// The song's tempo in BPM (effects with tempo-based times).
+    fn set_tempo(&mut self, _bpm: f64) {}
 }
 
 /// Creates a Lemon Studio effect for a slot plugin, if one exists for that plugin.
@@ -36,11 +39,15 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
         "Fruity Limiter" | "Lemon Limiter" => {
             limiter::Limiter::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>)
         }
+        "Fruity Reeverb 2" | "Lemon Reverb" | "Reverb" => {
+            if state.is_empty() {
+                Some(Box::new(reverb::Reverb::new(sample_rate, reverb::Settings::default(), 120.0)) as Box<dyn Effect>)
+            } else {
+                reverb::Reverb::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>)
+            }
+        }
         "Lemon Delay" | "Delay" => {
             Some(Box::new(delay::Delay::from_state(state, sample_rate)))
-        }
-        "Lemon Reverb" | "Reverb" => {
-            Some(Box::new(reverb::Reverb::from_state(state, sample_rate)))
         }
         "Lemon Distortion" | "Lemon Bitcrusher" | "Lemon Overdrive" | "Distortion" | "Bitcrusher"
         | "Overdrive" | "Waveshaper" => {
@@ -65,7 +72,6 @@ mod tests {
         assert!(from_slot("Fruity Delay 2", &[], 44100).is_none());
         assert!(from_slot("Fruity Delay 3", &[], 44100).is_none());
         assert!(from_slot("Fruity Reeverb", &[], 44100).is_none());
-        assert!(from_slot("Fruity Reeverb 2", &[], 44100).is_none());
         assert!(from_slot("Fruity Fast Dist", &[], 44100).is_none());
         assert!(from_slot("Fruity Blood Overdrive", &[], 44100).is_none());
         assert!(from_slot("Fruity Squeeze", &[], 44100).is_none());
