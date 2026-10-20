@@ -160,6 +160,10 @@ impl PianoState {
         self.range = None;
     }
 
+    pub fn has_selection(&self) -> bool {
+        !self.sel.is_empty() || self.range.is_some()
+    }
+
     pub fn clear_selection(&mut self) {
         self.sel.clear();
         self.range = None;
