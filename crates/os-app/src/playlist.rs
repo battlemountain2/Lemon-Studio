@@ -230,6 +230,8 @@ pub enum Cmd {
     /// Shift+Tab: the next common snap setting (§4).
     CycleSnap,
     Consolidate,
+    /// Shift+R: toggle sample reverse on selected audio clips.
+    ToggleReverse,
     SelectAll,
     Deselect,
     InvertSelection,
@@ -519,6 +521,8 @@ pub struct PlaylistState {
     pub last_header: Option<(u16, std::time::Instant)>,
     /// Last left click on an audio clip (clip, time): a second one soon after opens its sampler.
     pub last_clip: Option<(usize, std::time::Instant)>,
+    /// Last click on a clip handle (clip, handle, time): double-click resets it (gain to 0 dB, tension to 0.0).
+    pub last_handle_click: Option<(usize, Handle, std::time::Instant)>,
     /// Last left click on a picker item (source, time): double-click opens it (e.g. pattern in piano roll).
     pub last_pick: Option<(ClipSource, std::time::Instant)>,
     /// Waveform cache by sample path (`None` = could not be loaded).
@@ -557,6 +561,7 @@ impl Default for PlaylistState {
             row_h: ROW_H,
             last_header: None,
             last_clip: None,
+            last_handle_click: None,
             last_pick: None,
             waves: RefCell::new(HashMap::new()),
             tones: RefCell::new(HashMap::new()),
@@ -2128,6 +2133,12 @@ pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
         items.push(PItem::new("Edit pattern", Cmd::ClipEditSource(i)));
         items.push(PItem::new("Make unique", Cmd::ClipUnique(i)));
     }
+    if let ClipSource::Channel(ch) = c.source {
+        if s.project.channel(ch).is_some_and(|chan| chan.kind.is_sampler()) {
+            let is_rev = s.project.channel(ch).is_some_and(|chan| chan.sound.fx.flags & os_model::SampleFx::REVERSE != 0);
+            items.push(PItem::new("Reverse (Shift+R)", Cmd::ToggleReverse).mark(Mark::Check(is_rev)));
+        }
+    }
     items.push(PItem::new("Select all similar clips", Cmd::ClipSelectSimilar(i)));
     items.push(PItem::new("Delete", Cmd::ClipDelete(i)));
     Popup { x, y, items, sub: None }
@@ -2442,23 +2453,23 @@ pub fn handle_at(s: &State, g: &PGeom, i: usize, x: f32, y: f32) -> Option<Handl
     }
     if let Some((_, t)) = c.stored_fade_in().filter(|_| !managed(s, c, false)) {
         let (mx, my) = fade_mid(body, body.x, fx_in, t, false);
-        if fx_in - body.x > 10.0 && near(mx, my, 5.0) {
+        if fx_in - body.x > 10.0 && near(mx, my, 6.0) {
             return Some(Handle::TensionIn);
         }
     }
     if let Some((_, t)) = c.stored_fade_out().filter(|_| !managed(s, c, true)) {
         let (mx, my) = fade_mid(body, fx_out, body.right(), t, true);
-        if body.right() - fx_out > 10.0 && near(mx, my, 5.0) {
+        if body.right() - fx_out > 10.0 && near(mx, my, 6.0) {
             return Some(Handle::TensionOut);
         }
     }
-    if near(fx_in + 3.0, body.y + 3.0, 5.0) {
+    if near(fx_in + 3.0, body.y + 3.0, 7.0) {
         return Some(Handle::FadeIn);
     }
-    if near(fx_out - 3.0, body.y + 3.0, 5.0) {
+    if near(fx_out - 3.0, body.y + 3.0, 7.0) {
         return Some(Handle::FadeOut);
     }
-    if near(body.cx(), body.bottom() - 2.0, 6.0) {
+    if (x - body.cx()).abs() <= 14.0 && (y - (body.bottom() - 2.0)).abs() <= 8.0 {
         return Some(Handle::Gain);
     }
     None
@@ -2505,6 +2516,51 @@ pub fn press_grid(app: &mut App, grid: Rect, right: bool) {
         if let Some(h) = handle_at(s, &g, ci, x, y) {
             snapshot(s);
             let c = clips(s)[ci];
+            let now = std::time::Instant::now();
+            let double = s.playlist.last_handle_click.is_some_and(|(i, lh, t)| i == ci && lh == h && now.duration_since(t).as_millis() < 400);
+            s.playlist.last_handle_click = (!double).then_some((ci, h, now));
+            if double {
+                match h {
+                    Handle::Gain => {
+                        let c_mut = &mut arr_mut(s).clips[ci];
+                        c_mut.set_gain(1.0);
+                        app.hint = Cow::Owned("Clip gain: +0.0 dB (Reset)".into());
+                        app.state.piano.dirty = true;
+                        app.invalidate();
+                        return;
+                    }
+                    Handle::TensionIn => {
+                        let c_mut = &mut arr_mut(s).clips[ci];
+                        c_mut.set_fade_in_tension(0.0);
+                        app.hint = Cow::Owned("Fade in tension: +0.00 (Reset)".into());
+                        app.state.piano.dirty = true;
+                        app.invalidate();
+                        return;
+                    }
+                    Handle::TensionOut => {
+                        let c_mut = &mut arr_mut(s).clips[ci];
+                        c_mut.set_fade_out_tension(0.0);
+                        app.hint = Cow::Owned("Fade out tension: +0.00 (Reset)".into());
+                        app.state.piano.dirty = true;
+                        app.invalidate();
+                        return;
+                    }
+                    Handle::Crossfade => {
+                        if let Some(xf) = crossfade(s, &g, ci) {
+                            let arr = arr_mut(s);
+                            if xf.a < arr.clips.len() && xf.b < arr.clips.len() {
+                                arr.clips[xf.b].set_fade_in_tension(0.0);
+                                arr.clips[xf.a].set_fade_out_tension(0.0);
+                            }
+                        }
+                        app.hint = Cow::Owned("Crossfade tension: +0.00 (Reset)".into());
+                        app.state.piano.dirty = true;
+                        app.invalidate();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             app.drag = Some(Drag::Pl(match h {
                 Handle::FadeIn => PlDrag::Fade { clip: ci, out: false },
                 Handle::FadeOut => PlDrag::Fade { clip: ci, out: true },
@@ -3487,13 +3543,50 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return m;
         }
+        Cmd::ToggleReverse => {
+            let s = &mut app.state;
+            let targets: Vec<usize> = if !s.playlist.sel.is_empty() {
+                s.playlist.sel.iter().copied().filter(|&i| {
+                    i < clips(s).len() && matches!(clips(s)[i].source, ClipSource::Channel(ch) if s.project.channel(ch).is_some_and(|chan| chan.kind.is_sampler()))
+                }).collect()
+            } else if let Some(ci) = s.playlist.hover_clip {
+                if ci < clips(s).len() && matches!(clips(s)[ci].source, ClipSource::Channel(ch) if s.project.channel(ch).is_some_and(|chan| chan.kind.is_sampler())) {
+                    vec![ci]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+            if targets.is_empty() {
+                return Some("Reverse: select or hover an audio clip first".into());
+            }
+            snapshot(s);
+            let mut toggled_channels = std::collections::HashSet::new();
+            for &ci in &targets {
+                let c = clips(s)[ci];
+                if let ClipSource::Channel(ch) = c.source {
+                    toggled_channels.insert(usize::from(ch));
+                }
+            }
+            for &ch_idx in &toggled_channels {
+                if let Some(ch) = app.state.project.channels.get_mut(ch_idx) {
+                    ch.sound.fx.flags ^= os_model::SampleFx::REVERSE;
+                }
+                app.plugins.set_sampler_fx(ch_idx, &app.state.project.channels[ch_idx].sound);
+            }
+            app.state.piano.dirty = true;
+            app.invalidate();
+            let n = targets.len();
+            return Some(format!("Toggled reverse on {n} audio clip{}", if n == 1 { "" } else { "s" }));
+        }
         _ => {}
     }
     let s = &mut app.state;
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::TimeSig(..) | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::ToggleReverse | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::TimeSig(..) | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -4140,6 +4233,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if alt && !ctrl && shift && c.eq_ignore_ascii_case("t") => Cmd::AddSignature,
         Key::Character(c) if alt && !ctrl && c.eq_ignore_ascii_case("t") => Cmd::AddMarker,
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("z") => Cmd::ZoomSelection,
+        Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("r") => Cmd::ToggleReverse,
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("m") => Cmd::StretchMode,
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("i") => Cmd::InvertSelection,
         Key::Character(c) if shift && !ctrl && !alt && (c == "4" || c == "$") => Cmd::ZoomAll,

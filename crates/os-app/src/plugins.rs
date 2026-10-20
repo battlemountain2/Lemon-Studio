@@ -612,6 +612,12 @@ impl Plugins {
         self.set_sampler(row, None, &stretch_params(sound))
     }
 
+    /// Row `row`'s Lemon Sampler takes the fx/reverse settings `sound` holds.
+    pub fn set_sampler_fx(&mut self, row: usize, sound: &os_model::ChannelSound) -> bool {
+        let params = sample_params(sound);
+        self.set_sampler(row, None, &params)
+    }
+
     /// Loads sample `path` into row `row`'s Lemon Sampler: its current state with a new `sample-path`, so every other
     /// setting stays. False when the row hosts nothing or the plugin refused the state.
     pub fn load_sample(&mut self, row: usize, path: &str) -> bool {
