@@ -52,22 +52,28 @@ flowchart TD
 ---
 
 ### Phase 1: Smart Esc Detection (Navigation & Dismissal Cascade)
-*Priority: Immediate*
+*Status: Completed & Verified (Commit `e917af4`)*
 - **Problem**: In FL Studio and fast DAW workflows, hitting `Esc` should instinctively take you back to your main workspace without using the mouse to hunt for `✕` close buttons.
 - **Hierarchical Esc Cascade**:
   1. **Level 1 (Popups & Overlays)**: If any context menu, rename box, dropdown, or modal dialog is open $\rightarrow$ close it.
   2. **Level 2 (Active Filters & Selections)**: If Pattern Mixer Focus is active OR notes/clips are selected $\rightarrow$ clear the filter / deselect.
   3. **Level 3 (Focused Plugin Windows)**: If a synth/FX window (`Lemon Wavetable`, `Lemon Ray`, EQ, etc.) is in front $\rightarrow$ close that window and drop focus back to Piano Roll or Channel Rack.
   4. **Level 4 (Sub-Windows to Main Workspace)**: If Mixer or Piano Roll is frontmost $\rightarrow$ close it and return focus to Channel Rack / Playlist.
-- **Verification**: Unit tests simulating key sequences verifying window stack unwinding step-by-step.
+  5. **Level 5 (Background Floating Plugins)**: Closes any background/unfocused plugin windows.
+  6. **Level 6 (Channel Rack to Playlist)**: Closes Channel Rack, landing cleanly on the main Playlist arrangement workspace.
+- **Verification**: Verified with comprehensive unit test `app::tests::smart_esc_navigation_cascade` passing across all levels.
 
 ---
 
 ### Phase 2: Upstream Synchronization
-*Priority: High*
-- Reconcile `crates/os-engine/src/effects/mod.rs` and `reverb.rs` so upstream's `Lemon Reverb` and `Lemon Limiter` are added to our built-in plugins list.
-- Integrate upstream's low-latency audio queue improvements and picker UI icons.
-- Run workspace test suite to ensure 100% green across all crates.
+*Status: Completed & Verified (Commit `e1e4b0e`)*
+- Merged upstream `ItsAlphaNeon/Lemon-Studio` (commit `6e9c3b9`), reconciling:
+  - Upstream's `Lemon Reverb` (Fruity Reeverb 2 recreation) and `Lemon Limiter` (Fruity Limiter recreation).
+  - Native Windows ASIO driver support & WASAPI low-latency shared/exclusive mode.
+  - Render-ahead 3–6ms queued buffering.
+  - Playlist picker right-click menus and tab icons.
+- All 7 bundled plugins (`lemon-sampler`, `lemon-parametric-eq-2`, `lemon-3x-osc`, `lemon-ray`, `lemon-wavetable`, `lemon-limiter`, `lemon-reverb`) compiled, bundled, and installed to `~/.vst3` and `~/.clap`.
+- 100% green test suite across all 27 workspace crates. Release binary compiled and installed to `~/.cargo/bin/lemonstudio`.
 
 ---
 
