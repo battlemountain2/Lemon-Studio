@@ -42,6 +42,8 @@ pub enum MHit {
     Scale,
     /// The current track's equaliser graph: a press grabs the band nearest the cursor's frequency.
     EqGraph,
+    /// Clear pattern mixer focus badge.
+    ClearPatternFilter,
 }
 
 /// Menu commands (`Cmd::Mixer`).
@@ -138,6 +140,31 @@ pub fn max_insert_of(mixer: &[MixerTrack]) -> u16 {
 /// Inserts shown: stored tracks minus the master and the last (hidden) one (§1).
 pub fn inserts(s: &State) -> u16 {
     s.project.mixer.len().saturating_sub(2) as u16
+}
+
+/// Tracks shown in the inserts area, either all inserts or filtered by pattern focus.
+pub fn visible_tracks(s: &State) -> Vec<u16> {
+    let ins = inserts(s);
+    match s.pattern_mixer_filter {
+        Some(pat) => {
+            let mut tracks = std::collections::BTreeSet::new();
+            if let Some(p) = s.project.patterns.iter().find(|p| p.number == pat) {
+                for note in &p.notes {
+                    if let Some(ch) = s.project.channels.iter().find(|c| c.index == note.channel) {
+                        if ch.mixer_track > 0 && ch.mixer_track <= ins {
+                            tracks.insert(ch.mixer_track);
+                        }
+                    }
+                }
+            }
+            if tracks.is_empty() {
+                (1..=ins).collect()
+            } else {
+                tracks.into_iter().collect()
+            }
+        }
+        None => (1..=ins).collect(),
+    }
 }
 
 pub fn track(s: &State, n: u16) -> Option<&MixerTrack> {
@@ -321,6 +348,11 @@ pub fn hit(app: &mut App, h: MHit) -> Option<String> {
             let k = usize::from(i);
             m.slot_on[k] = !m.slot_on[k];
             changed(s);
+            None
+        }
+        MHit::ClearPatternFilter => {
+            s.pattern_mixer_filter = None;
+            s.message = Some("Mixer focus cleared (showing all tracks)".into());
             None
         }
         MHit::Scale | MHit::EqGraph => None,
@@ -1693,5 +1725,31 @@ mod tests {
         assert!(key(&mut a, &Key::Character("s".into()), false, true));
         assert!(!track(&a.state, 7).unwrap().enabled, "Alt+S");
         assert!(!key(&mut a, &Key::Character("q".into()), true, false));
+    }
+
+    #[test]
+    fn pattern_mixer_filter_and_visible_tracks() {
+        let mut a = app();
+        assert!(a.state.pattern_mixer_filter.is_none());
+        let all = visible_tracks(&a.state);
+        assert_eq!(all, (1..=inserts(&a.state)).collect::<Vec<_>>());
+
+        a.state.project.channels[0].mixer_track = 2;
+        a.state.project.channels[1].mixer_track = 5;
+
+        let p1 = &mut a.state.project.patterns[0];
+        p1.number = 1;
+        p1.notes = vec![
+            os_model::Note::step(a.state.project.channels[0].index, 0),
+            os_model::Note::step(a.state.project.channels[1].index, 24),
+        ];
+
+        a.state.pattern_mixer_filter = Some(1);
+        let filtered = visible_tracks(&a.state);
+        assert_eq!(filtered, vec![2, 5]);
+
+        assert!(hit(&mut a, MHit::ClearPatternFilter).is_none());
+        assert!(a.state.pattern_mixer_filter.is_none());
+        assert_eq!(visible_tracks(&a.state), all);
     }
 }

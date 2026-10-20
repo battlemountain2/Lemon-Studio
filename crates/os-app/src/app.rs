@@ -867,6 +867,7 @@ pub struct State {
     pub selected_channel: usize,
     pub selected_mixer: u16,
     pub pattern: u16,
+    pub pattern_mixer_filter: Option<u16>,
     pub song_mode: bool,
     pub menu_open: Option<usize>,
     /// The open dropdown's submenu, shown as `playlist.popup`: the flat index of its ▸ entry.
@@ -1219,6 +1220,7 @@ impl App {
                 selected_mixer: 1,
                 mixer: Default::default(),
                 pattern: 1,
+                pattern_mixer_filter: None,
                 song_mode: false,
                 menu_open: None,
                 menu_sub: None,
@@ -4833,6 +4835,32 @@ impl App {
                 return self.invalidate();
             }
         }
+        if let Some(Action::PatternNext) = action {
+            let pat = self.state.pattern.max(1);
+            if self.state.pattern_mixer_filter == Some(pat) {
+                self.state.pattern_mixer_filter = None;
+                self.state.message = Some("Mixer focus cleared (showing all tracks)".into());
+            } else {
+                self.state.pattern_mixer_filter = Some(pat);
+                self.state.raise(Win::Mixer);
+                self.state.message = Some(format!("Mixer focused on Pattern {pat}"));
+            }
+            self.damage_win(Win::Mixer);
+            return self.invalidate();
+        }
+        if let Some(Action::PlPick(os_model::ClipSource::Pattern(p))) = action {
+            let pat = p as u16;
+            if self.state.pattern_mixer_filter == Some(pat) {
+                self.state.pattern_mixer_filter = None;
+                self.state.message = Some("Mixer focus cleared (showing all tracks)".into());
+            } else {
+                self.state.pattern_mixer_filter = Some(pat);
+                self.state.raise(Win::Mixer);
+                self.state.message = Some(format!("Mixer focused on Pattern {pat}"));
+            }
+            self.damage_win(Win::Mixer);
+            return self.invalidate();
+        }
         if let Some(Action::Settings(views::settings::SAct::ThemeKnob(i))) = action {
             return self.theme_knob_reset(usize::from(i));
         }
@@ -5829,6 +5857,10 @@ impl App {
             Key::Named(NamedKey::Escape) if self.state.settings.open && self.state.settings.picker.is_some() => self.picker_close(),
             Key::Named(NamedKey::Escape) if self.state.settings.open => self.state.settings.open = false,
             Key::Named(NamedKey::Escape) => {
+                if self.state.pattern_mixer_filter.take().is_some() {
+                    self.state.message = Some("Mixer focus cleared (showing all tracks)".into());
+                    self.damage_win(Win::Mixer);
+                }
                 self.state.menu_open = None;
                 self.state.menu_sub = None;
                 self.state.playlist.popup = None;
