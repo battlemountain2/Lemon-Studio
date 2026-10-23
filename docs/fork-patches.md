@@ -19,8 +19,8 @@ scratch-session composition milestone, not a network service or a second editing
 | Plugin hosting and UI | Keep upstream VST2, CLAP mono/wakeup work, plugin/editor and interface changes. | Workspace tests plus bundled VST3/CLAP hosting tests. These do not prove arbitrary third-party plugins work. |
 | Safer disk saves | Retain the fork's synced temporary-file/rename approach in `os-app::app`, alongside upstream overwrite backups, autosave and data-folder selection. | App save and upstream backup tests. Unique temporary names, backup failure reporting and crash/durability testing remain open. |
 | Live effect replacement | Keep the fork's effect identity/state check before transferring live DSP in `os-engine::engine`. | Name/state transfer tests and an audio-output delay-to-reverb replacement regression. |
-| Note recording | Retain downstream recording, wait-for-input, count-in and blend/loop controls in `os-app`. Check SONG eligibility before clearing notes; derive count-in from upstream's bar-beat tempo model. Keep upstream step edit separately. | App recording tests, including failed-start note preservation and 3/4 and 6/8 count-in tests. Experimental: callback timestamps, loop-boundary handling, device/channel identity and whole-take undo need further work. Upstream's global history is available but not yet wired to recording takes. |
-| Drums and effects | Retain downstream procedural drum synthesis/template, delay, distortion and reverb in `os-engine`. | Engine/DSP unit tests and template assertions. No claim of FL Studio sonic parity. |
+| Note recording | Adopt upstream's shared recording/capture/MIDI state machine and whole-take history; remove the older downstream recording implementation. | Upstream recording regressions plus fork-template take Undo/Redo, failed-start note preservation and project-meter count-in coverage. Hardware acceptance remains pending. |
+| Drums and effects | Retain downstream procedural drums/template, delay and distortion. Use upstream Reeverb while preserving the original downstream DSP for legacy `LMR1` states. | Engine/DSP unit tests, old-implementation impulse fingerprints, v4 slot restoration and actual wet/dry project renders. No claim of FL Studio sonic parity. |
 | Linux scan environment | Retain downstream additional library lookup for scanner children. | Scanner tests. This is not a guarantee that the runtime loader can instantiate every plugin found by scanning. |
 | Playlist double-click | Keep downstream picker double-click alongside upstream right-click pattern menus. | App/editor tests. |
 | Default pattern names | Keep an explicitly confirmed `Pattern N` name so an empty new pattern appears in the picker without custom typing. Browsing and cancellation must not create patterns. | Checkmark hit-testing, repeated creation, Enter, cancel/Escape, clearing an existing name and FLP save/reopen regressions in `os-app::patterns`. |
@@ -40,6 +40,10 @@ and test files as exceptions to its upstream-specific header requirement. It val
 and continues checking every other source. These exceptions do not change the project license or remove existing notices.
 
 ## Update workflow
+
+The latest local candidate and its release gates are documented in
+[the October 22 integration record](upstream-integration-2026-10-22.md). Bry authorized source publication after
+validation; installation and live hardware/listening acceptance remain separate release gates.
 
 1. Fetch both remotes and review upstream changes in modules listed above.
 2. Start an integration branch from the latest combined main (the initial integration starts from the latest feature

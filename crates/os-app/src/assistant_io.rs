@@ -150,6 +150,7 @@ impl Drop for Bridge {
 }
 
 pub fn headless(root: &Path) -> Result<(), String> {
+    crate::transport::headless();
     let mut bridge = Bridge::open(root, true)?;
     unsafe {
         std::env::set_var("OPENSTUDIO_USER_DIR", bridge.controller.root.join("settings"));

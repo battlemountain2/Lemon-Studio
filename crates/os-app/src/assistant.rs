@@ -167,7 +167,7 @@ impl Controller {
     }
 
     fn idle(&self, app: &App) -> Result<(), String> {
-        if app.loading() || app.transport.playing() || app.state.recording || !app.state.dialogs.is_empty() {
+        if app.loading() || app.transport.playing() || app.state.rec.armed || app.state.rec.waiting || app.state.rec.count.is_some() || app.modal_open() {
             return Err("Stop playback/recording and finish dialogs or rendering before editing.".into());
         }
         if app.state.path.as_ref().is_some_and(|path| !path.starts_with(&self.root)) {
@@ -401,9 +401,10 @@ impl Controller {
                 app.export = None;
                 app.assistant_export = false;
                 app.plugins.set_offline(false);
+                app.midi_after_export();
                 job.running = false;
                 job.status = match result {
-                    Ok(seconds) => match std::fs::hard_link(&job.temporary, &job.destination) {
+                    Ok((seconds, _files)) => match std::fs::hard_link(&job.temporary, &job.destination) {
                         Ok(()) => json!({"job_id":job.id,"state":"done","seconds":seconds,"path":job.destination}),
                         Err(error) => json!({"job_id":job.id,"state":"error","error":error.to_string()}),
                     },
@@ -533,7 +534,7 @@ impl Controller {
                     app.plugins.set_offline(true);
                     app.assistant_export = true;
                     app.export = Some(("Assistant preview".into(), 0.0));
-                    app.transport.export(&project, os_engine::PlayMode::Song, 48000, temporary.clone());
+                    app.transport.export(&project, os_engine::PlayMode::Song, 48000, crate::export::Job::wav(&temporary));
                     let status = json!({"job_id":self.serial,"state":"rendering","progress":0.0});
                     self.job = Some(Job { id: self.serial, temporary, destination, status: status.clone(), running: true });
                     status
@@ -603,6 +604,19 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.controller.root);
         }
+    }
+
+    #[test]
+    fn assistant_rejects_armed_recording_and_waiting_for_input() {
+        let mut fixture = Fixture::new();
+        let before = fixture.app.state.project.clone();
+        fixture.app.state.rec.armed = true;
+        assert!(fixture.call("lemon_apply_edit", json!({"operations":[{"op":"set_tempo","bpm":150.0}]}), "armed").is_err());
+        fixture.app.state.rec.armed = false;
+        fixture.app.state.rec.waiting = true;
+        assert!(fixture.call("lemon_apply_edit", json!({"operations":[{"op":"set_tempo","bpm":150.0}]}), "waiting").is_err());
+        assert_eq!(fixture.app.state.project, before);
+        assert_eq!(fixture.app.state.history.at(), 0);
     }
 
     #[test]

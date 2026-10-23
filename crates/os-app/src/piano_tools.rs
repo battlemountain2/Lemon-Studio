@@ -2,23 +2,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Piano-roll editing commands: quantize, legato, chop, glue, discard lengths, strum, arpeggiate, randomize,
-//! duplicate, ghost channels, time markers and channel cycling, with the Tools menu that lists them.
-// spec: ui/piano-roll.md §3a, §10a, §11
+//! Piano-roll editing commands: quantize, legato, chop, glue, discard lengths, randomize, the Strum and Arpeggiate dialogs,
+//! duplicate, mute, ghost channels, time markers, channel cycling and the selection keys, with the Tools menu that
+//! lists them.
+// spec: ui/piano-roll.md §3a, §10a, §11; ui/piano-keys.md
 
 use os_model::Note;
 
 use crate::app::{App, State};
 use crate::piano::{self, Lane};
 use crate::playlist::{Cmd, Mark, PItem, Popup};
-
-/// Arpeggio order (§11).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Arp {
-    Up,
-    Down,
-    UpDown,
-}
 
 /// What the Randomize presets change (§11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,20 +30,23 @@ pub enum NCmd {
     Legato,
     /// Cut notes at every `1/n` note line inside them.
     Chop(u32),
-    /// Cut notes at every snap unit inside them (Ctrl+U; one-tick pieces without a unit, spec: ui/piano-snap.md §6).
+    /// Cut notes into snap-unit pieces from their own starts (Ctrl+U, spec: ui/piano-keys.md §4 rule 6; one-tick pieces
+    /// without a unit, ui/piano-snap.md §6).
     QuickChop,
+    /// Mute (true) or unmute the notes (Alt+M / Alt+Shift+M).
+    Mute(bool),
     Glue,
     DiscardLengths,
     Duplicate,
-    /// Spread chord notes `1/n` note apart, lowest key first (`up`) or highest first.
-    Strum { up: bool, n: u32 },
-    /// Turn chords into `1/n` note arpeggios.
-    Arpeggiate(Arp, u32),
+    /// Open the Strum dialog (spec: ui/piano-strum.md).
+    Strum,
+    /// Open the Arpeggiate dialog (spec: ui/piano-arpeggiate.md).
+    Arpeggiate,
     /// Randomize by up to `pct` percent of the range.
     Randomize(Rand, u8),
     Ghosts,
     AddMarker,
-    /// Open one of the tool submenus at the mouse (Alt+Q / U / S / A / R).
+    /// Open one of the tool submenus at the mouse (Alt+Q / U / R).
     Menu(Sub),
     /// The magnet button's menus (spec: ui/piano-snap.md): the snap setting, a stock length for new notes.
     Snap(crate::snap::EditorSnap),
@@ -63,8 +59,6 @@ pub enum NCmd {
 pub enum Sub {
     Quantize,
     Chop,
-    Strum,
-    Arpeggiate,
     Randomize,
 }
 
@@ -90,24 +84,6 @@ fn sub_items(sub: Sub) -> Vec<PItem> {
             item("1/8 note", Chop(8)),
             item("1/4 note (beat)", Chop(4)),
             item("1/2 note", Chop(2)),
-        ],
-        Sub::Strum => vec![
-            item("Low to high, tight (1/128)", Strum { up: true, n: 128 }),
-            item("Low to high (1/64)", Strum { up: true, n: 64 }),
-            item("Low to high, slow (1/32)", Strum { up: true, n: 32 }),
-            PItem::sep(),
-            item("High to low, tight (1/128)", Strum { up: false, n: 128 }),
-            item("High to low (1/64)", Strum { up: false, n: 64 }),
-            item("High to low, slow (1/32)", Strum { up: false, n: 32 }),
-        ],
-        Sub::Arpeggiate => vec![
-            item("Up, 1/16", Arpeggiate(Arp::Up, 16)),
-            item("Up, 1/32", Arpeggiate(Arp::Up, 32)),
-            item("Up, 1/8", Arpeggiate(Arp::Up, 8)),
-            item("Down, 1/16", Arpeggiate(Arp::Down, 16)),
-            item("Down, 1/32", Arpeggiate(Arp::Down, 32)),
-            item("Up and down, 1/16", Arpeggiate(Arp::UpDown, 16)),
-            item("Up and down, 1/32", Arpeggiate(Arp::UpDown, 32)),
         ],
         Sub::Randomize => vec![
             item("Velocity, a little (10 %)", Randomize(Rand::Prop(Lane::Velocity), 10)),
@@ -136,8 +112,8 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         item("Quick legato", Legato).key("Ctrl+L"),
         item("Quick chop", QuickChop).key("Ctrl+U"),
         PItem::sub("Chop", sub_items(Sub::Chop)).key("Alt+U"),
-        PItem::sub("Strum", sub_items(Sub::Strum)).key("Alt+S"),
-        PItem::sub("Arpeggiate", sub_items(Sub::Arpeggiate)).key("Alt+A"),
+        item("Strum...", Strum).key("Alt+S"),
+        item("Arpeggiate...", Arpeggiate).key("Alt+A"),
         PItem::sub("Randomize", sub_items(Sub::Randomize)).key("Alt+R"),
         PItem::head("View"),
         item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
@@ -146,8 +122,21 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None }
 }
 
-/// The piano roll's keyboard shortcuts (spec: ui/piano-roll.md §3a, §9, §10a, §11). Returns true when the key
-/// was taken. Called while the piano roll is shown and the playlist is not in front of it.
+/// The keys a held key repeats in the piano roll (spec: ui/piano-keys.md §4 rule 1): Shift / Ctrl / Alt + arrows (not
+/// Ctrl+Shift+Up / Down), PgUp / PgDn, Ctrl+B and Ctrl+V.
+pub fn repeats(key: &winit::keyboard::Key, ctrl: bool, alt: bool, shift: bool) -> bool {
+    use winit::keyboard::{Key, NamedKey};
+    match key {
+        Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) => (shift || ctrl || alt) && !(ctrl && shift),
+        Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) => shift || ctrl || alt,
+        Key::Named(NamedKey::PageUp | NamedKey::PageDown) => true,
+        Key::Character(c) => ctrl && !alt && (c.eq_ignore_ascii_case("b") || c.eq_ignore_ascii_case("v")),
+        _ => false,
+    }
+}
+
+/// The piano roll's keyboard shortcuts (spec: ui/piano-roll.md §3a, §9, §10a, §11; ui/piano-keys.md). Returns true
+/// when the key was taken. Called while the piano roll is shown and the playlist is not in front of it.
 pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
     use winit::keyboard::{Key, NamedKey};
     let shift = app.shift;
@@ -160,10 +149,11 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if ctrl && !alt && is(c, "g") => NCmd::Glue,
         Key::Character(c) if ctrl && !alt && is(c, "b") => NCmd::Duplicate,
         Key::Character(c) if shift && !ctrl && !alt && is(c, "d") => NCmd::DiscardLengths,
+        Key::Character(c) if alt && !ctrl && is(c, "m") => NCmd::Mute(!shift),
         Key::Character(c) if alt && !ctrl && is(c, "q") => NCmd::Menu(Sub::Quantize),
         Key::Character(c) if alt && !ctrl && is(c, "u") => NCmd::Menu(Sub::Chop),
-        Key::Character(c) if alt && !ctrl && is(c, "s") => NCmd::Menu(Sub::Strum),
-        Key::Character(c) if alt && !ctrl && is(c, "a") => NCmd::Menu(Sub::Arpeggiate),
+        Key::Character(c) if alt && !ctrl && is(c, "s") => NCmd::Strum,
+        Key::Character(c) if alt && !ctrl && is(c, "a") => NCmd::Arpeggiate,
         Key::Character(c) if alt && !ctrl && is(c, "r") => NCmd::Menu(Sub::Randomize),
         Key::Character(c) if alt && !ctrl && is(c, "v") => NCmd::Ghosts,
         Key::Character(c) if alt && !ctrl && !shift && is(c, "t") => NCmd::AddMarker,
@@ -185,9 +175,21 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
             app.invalidate();
             return true;
         }
+        // Selection keys (spec: ui/piano-keys.md §4 rules 11, 12, 14).
+        Key::Character(c) if shift && !ctrl && !alt && matches!(c.to_ascii_lowercase().as_str(), "i" | "r" | "m" | "c") => {
+            return pick(app, &c.to_ascii_lowercase());
+        }
+        Key::Named(NamedKey::Enter) if ctrl && !alt && !shift => {
+            span_to_range(&mut app.state);
+            app.invalidate();
+            return true;
+        }
         // Channel cycling (§11): Ctrl+K and (typing keyboard off) G / K = previous / next channel, H / J = previous / next
-        // channel with notes in the pattern.
+        // channel with notes in the pattern; Shift+K / Shift+H = next channel / next with notes, also with the typing
+        // keyboard on (spec: ui/piano-keys.md §4 rule 13).
         Key::Character(c) if ctrl && !alt && !shift && is(c, "k") => return cycle_channel(app, 1, false),
+        Key::Character(c) if shift && !ctrl && !alt && is(c, "k") => return cycle_channel(app, 1, false),
+        Key::Character(c) if shift && !ctrl && !alt && is(c, "h") => return cycle_channel(app, 1, true),
         Key::Character(c) if !ctrl && !alt && !shift && !app.typing_on() && matches!(c.to_ascii_lowercase().as_str(), "g" | "k" | "h" | "j") => {
             let l = c.to_ascii_lowercase();
             let dir = if l == "g" || l == "h" { -1 } else { 1 };
@@ -218,6 +220,45 @@ fn zoom_key(app: &mut App, notches: f32) -> bool {
     piano::zoom_time(&mut app.state, &g, x, notches);
     app.invalidate();
     true
+}
+
+/// Shift+I / R / M / C (spec: ui/piano-keys.md §4 rules 11 and 14): invert the selection among the channel's notes,
+/// select one of them or about half of them at random, or the ones of the current colour (the colour group new notes
+/// get, from the last note touched).
+fn pick(app: &mut App, letter: &str) -> bool {
+    let s = &mut app.state;
+    let Some(ch) = piano::channel(s) else { return true };
+    let sel = s.piano.selection(s.pattern, Some(ch));
+    let all = piano::notes(s);
+    let mine: Vec<usize> = (0..all.len()).filter(|&i| all[i].channel == ch).collect();
+    let mut rng = s.piano.rng;
+    let one = |rng: &mut u64| mine.get((next(rng) % mine.len().max(1) as u64) as usize).copied();
+    let colour = |n: &Note| n.group & 0x0F; // the colour group: byte 19's low nibble
+    let now = s.piano.last_controls.map_or(0, |n| colour(&n));
+    let new: Vec<usize> = match letter {
+        "i" => mine.iter().copied().filter(|i| !sel.contains(i)).collect(),
+        "r" => one(&mut rng).into_iter().collect(),
+        "m" => {
+            let half: Vec<usize> = mine.iter().copied().filter(|_| next(&mut rng) & 1 == 1).collect();
+            if half.is_empty() { one(&mut rng).into_iter().collect() } else { half }
+        }
+        _ => mine.iter().copied().filter(|&i| colour(&all[i]) == now).collect(),
+    };
+    s.piano.rng = rng;
+    s.piano.select(s.pattern, ch, new);
+    app.invalidate();
+    true
+}
+
+/// Ctrl+Enter (spec: ui/piano-keys.md §4 rule 12): the time selection becomes the selected notes' span (first start to
+/// last end) and the play-start marker goes to its start; nothing selected: nothing.
+pub fn span_to_range(s: &mut State) {
+    let sel = s.piano.selection(s.pattern, piano::channel(s));
+    let all = piano::notes(s);
+    let picked: Vec<&Note> = sel.iter().filter_map(|&i| all.get(i)).collect();
+    let (Some(a), Some(b)) = (picked.iter().map(|n| n.position).min(), picked.iter().map(|n| n.position + piano::shown_len(s, n)).max()) else { return };
+    s.piano.range = Some((a, b));
+    s.piano.marker = a;
 }
 
 /// Select the channel `dir` rows away, wrapping; `with_notes` skips channels without notes in the pattern (§11).
@@ -303,17 +344,30 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
             let ch = unit.is_some_and(|u| apply(s, |_, ns| ns.into_iter().map(|n| quantize(n, u, k, starts_only)).collect()));
             done(ch, if starts_only { "quantized start times" } else { "quantized" })
         }
-        NCmd::Legato => done(apply(s, |_, ns| legato(ns)), "legato"),
+        NCmd::Legato => {
+            let end = piano::pattern_end(s);
+            done(apply(s, |_, ns| legato(ns, end)), "legato")
+        }
         NCmd::Chop(n) => done(apply(s, |_, ns| chop(ns, ticks(n))), "chopped"),
-        NCmd::QuickChop => done(apply(s, |_, ns| chop(ns, unit.unwrap_or(1))), "chopped"),
+        NCmd::QuickChop => done(apply(s, |_, ns| chop_from_start(ns, unit.unwrap_or(1))), "chopped"),
+        NCmd::Mute(on) => {
+            let f = |ns: Vec<Note>| ns.into_iter().map(|mut n| { n.set_muted(on); n }).collect();
+            done(apply(s, |_, ns| f(ns)), if on { "muted" } else { "unmuted" })
+        }
         NCmd::Glue => done(apply(s, |_, ns| glue(ns)), "glued"),
         NCmd::DiscardLengths => done(apply(s, |_, ns| ns.into_iter().map(|n| Note { length: unit.unwrap_or(0), ..n }).collect()), "discarded lengths"),
         NCmd::Duplicate => {
             duplicate(s);
             return None;
         }
-        NCmd::Strum { up, n } => done(apply(s, |_, ns| strum(ns, up, ticks(n))), "strummed"),
-        NCmd::Arpeggiate(mode, n) => done(apply(s, |_, ns| arpeggiate(ns, mode, ticks(n), step)), "arpeggiated"),
+        NCmd::Strum => {
+            app.open_strum();
+            return None;
+        }
+        NCmd::Arpeggiate => {
+            app.open_arp();
+            return None;
+        }
         NCmd::Randomize(what, pct) => {
             let mut rng = s.piano.rng;
             let ch = apply(s, |_, ns| randomize(ns, what, pct, step, &mut rng));
@@ -391,6 +445,11 @@ pub fn duplicate(s: &mut State) {
 /// Replace the target notes (the selection, or every note of the channel) with `f(state, targets)`, as one undo
 /// step; a selection then holds the resulting notes. Returns false when nothing changed.
 fn apply(s: &mut State, f: impl FnOnce(&State, Vec<Note>) -> Vec<Note>) -> bool {
+    apply_as(s, f, Some("Piano roll edit"))
+}
+
+/// `apply`, its undo step named `step`; none for a tool's preview (spec: ui/piano-strum.md §1).
+pub(crate) fn apply_as(s: &mut State, f: impl FnOnce(&State, Vec<Note>) -> Vec<Note>, step: Option<&'static str>) -> bool {
     let Some(ch) = piano::channel(s) else { return false };
     let idx = piano::targets(s);
     if idx.is_empty() {
@@ -403,7 +462,9 @@ fn apply(s: &mut State, f: impl FnOnce(&State, Vec<Note>) -> Vec<Note>) -> bool 
     if out == picked {
         return false;
     }
-    piano::snapshot(s);
+    if let Some(name) = step {
+        piano::snapshot_as(s, name);
+    }
     let p = piano::pattern_mut(s);
     let mut notes: Vec<Note> = p.notes.iter().enumerate().filter(|(i, _)| !idx.contains(i)).map(|(_, n)| *n).collect();
     let start = notes.len();
@@ -438,15 +499,17 @@ pub fn quantize(mut n: Note, step: u32, k: f32, starts_only: bool) -> Note {
     n
 }
 
-/// Each note lasts until the next later start among `notes` (the last ones keep their length).
-pub fn legato(notes: Vec<Note>) -> Vec<Note> {
-    let mut starts: Vec<u32> = notes.iter().map(|n| n.position).collect();
+/// Each note lasts until the next later start among `notes`, the last ones until `end` (the pattern's end); slide notes
+/// keep their length and are no next start (spec: ui/piano-keys.md §4 rule 5).
+pub fn legato(notes: Vec<Note>, end: u32) -> Vec<Note> {
+    let mut starts: Vec<u32> = notes.iter().filter(|n| !n.slide()).map(|n| n.position).collect();
     starts.sort_unstable();
     starts.dedup();
     notes
         .into_iter()
         .map(|mut n| {
-            if let Some(&next) = starts.iter().find(|&&t| t > n.position) {
+            let next = starts.iter().copied().find(|&t| t > n.position).unwrap_or(end);
+            if !n.slide() && next > n.position {
                 n.length = next - n.position;
             }
             n
@@ -473,6 +536,23 @@ pub fn chop(notes: Vec<Note>, size: u32) -> Vec<Note> {
     out
 }
 
+/// Cut every note into `size`-tick pieces counted from its own start, the last piece keeping what is left (spec:
+/// ui/piano-keys.md §4 rule 6).
+pub fn chop_from_start(notes: Vec<Note>, size: u32) -> Vec<Note> {
+    let size = size.max(1);
+    let mut out = Vec::new();
+    for n in notes {
+        let end = n.position + n.length;
+        let mut at = n.position;
+        while at + size < end {
+            out.push(Note { position: at, length: size, ..n });
+            at += size;
+        }
+        out.push(Note { position: at, length: end.max(at) - at, ..n });
+    }
+    out
+}
+
 /// Join notes of the same key that touch or overlap into one (the first note's properties).
 pub fn glue(mut notes: Vec<Note>) -> Vec<Note> {
     notes.sort_by_key(|n| (n.key, n.position));
@@ -484,67 +564,6 @@ pub fn glue(mut notes: Vec<Note>) -> Vec<Note> {
             continue;
         }
         out.push(n);
-    }
-    out
-}
-
-/// Notes starting together (two or more): a chord, lowest key first.
-fn chords(notes: Vec<Note>) -> Vec<Vec<Note>> {
-    let mut sorted = notes;
-    sorted.sort_by_key(|n| (n.position, n.key));
-    let mut out: Vec<Vec<Note>> = Vec::new();
-    for n in sorted {
-        match out.last_mut() {
-            Some(c) if c[0].position == n.position => c.push(n),
-            _ => out.push(vec![n]),
-        }
-    }
-    out
-}
-
-/// Spread each chord `spread` ticks per note (the end stays), each later note 6 % softer.
-pub fn strum(notes: Vec<Note>, up: bool, spread: u32) -> Vec<Note> {
-    let mut out = Vec::new();
-    for mut c in chords(notes) {
-        if !up {
-            c.reverse();
-        }
-        for (i, mut n) in c.into_iter().enumerate() {
-            let d = spread * i as u32;
-            n.position += d;
-            if n.length > 0 {
-                n.length = n.length.saturating_sub(d).max(1);
-            }
-            n.velocity = (f32::from(n.velocity) * (1.0 - 0.06 * i as f32)).round().max(1.0) as u8;
-            out.push(n);
-        }
-    }
-    out
-}
-
-/// Replace each chord by its keys played one after another, `rate` ticks each, over the chord's longest length.
-pub fn arpeggiate(notes: Vec<Note>, mode: Arp, rate: u32, step: u32) -> Vec<Note> {
-    let mut out = Vec::new();
-    for c in chords(notes) {
-        if c.len() < 2 {
-            out.extend(c);
-            continue;
-        }
-        let start = c[0].position;
-        let end = start + c.iter().map(|n| len_of(n, step)).max().unwrap_or(step);
-        let order: Vec<&Note> = match mode {
-            Arp::Up => c.iter().collect(),
-            Arp::Down => c.iter().rev().collect(),
-            Arp::UpDown => c.iter().chain(c.iter().rev().skip(1).take(c.len() - 2)).collect(),
-        };
-        let mut at = start;
-        let mut i = 0;
-        while at < end {
-            let src = order[i % order.len()];
-            out.push(Note { position: at, length: rate.min(end - at), ..*src });
-            at += rate;
-            i += 1;
-        }
     }
     out
 }
@@ -610,27 +629,25 @@ mod tests {
 
     #[test]
     fn legato_chop_glue() {
-        let l = legato(vec![note(0, 10, 60), note(0, 10, 64), note(48, 10, 62), note(96, 5, 60)]);
-        assert_eq!(spans(&l), vec![(0, 48, 60), (0, 48, 64), (48, 48, 62), (96, 5, 60)]);
+        let l = legato(vec![note(0, 10, 60), note(0, 10, 64), note(48, 10, 62), note(96, 5, 60)], 384);
+        assert_eq!(spans(&l), vec![(0, 48, 60), (0, 48, 64), (48, 48, 62), (96, 288, 60)], "the last note: to the pattern's end");
         let c = chop(vec![note(12, 60, 60), note(0, 24, 62)], 24);
         assert_eq!(spans(&c), vec![(12, 12, 60), (24, 24, 60), (48, 24, 60), (0, 24, 62)]);
+        // Ctrl+U counts from each note's start (FL 26: F5 581+30 -> 581+24, 605+6; D6 520+72 -> three of 24).
+        let c = chop_from_start(vec![note(581, 30, 65), note(520, 72, 74), note(0, 24, 62), note(48, 0, 60)], 24);
+        assert_eq!(spans(&c), vec![(581, 24, 65), (605, 6, 65), (520, 24, 74), (544, 24, 74), (568, 24, 74), (0, 24, 62), (48, 0, 60)]);
         let g = glue(vec![note(24, 24, 60), note(0, 24, 60), note(60, 10, 60), note(48, 10, 62)]);
         assert_eq!(spans(&g), vec![(0, 48, 60), (60, 10, 60), (48, 10, 62)]);
     }
 
+    /// Ctrl+L as FL 26 does it (spec: ui/piano-keys.md §2 "Editing"): slide notes stay and are no next start; the
+    /// last notes last until the pattern's end.
     #[test]
-    fn strum_and_arpeggiate_chords() {
-        let chord = vec![note(0, 96, 64), note(0, 96, 60), note(0, 96, 67), note(192, 24, 50)];
-        let s = strum(chord.clone(), true, 6);
-        assert_eq!(spans(&s), vec![(0, 96, 60), (6, 90, 64), (12, 84, 67), (192, 24, 50)]);
-        assert!(s[2].velocity < s[0].velocity);
-        let s = strum(chord.clone(), false, 6);
-        assert_eq!(s[0].key, 67);
-        let a = arpeggiate(chord.clone(), Arp::Up, 24, 24);
-        assert_eq!(a.iter().map(|n| n.key).collect::<Vec<_>>(), vec![60, 64, 67, 60, 50]);
-        assert_eq!(a[3].position, 72);
-        let a = arpeggiate(chord, Arp::UpDown, 12, 24);
-        assert_eq!(a.iter().take(6).map(|n| n.key).collect::<Vec<_>>(), vec![60, 64, 67, 64, 60, 64]);
+    fn legato_skips_slides_and_ends_at_the_pattern_end() {
+        let mut slide = note(96, 24, 64);
+        slide.set_slide(true);
+        let l = legato(vec![note(0, 96, 60), slide, note(384, 48, 72), note(800, 48, 60)], 1152);
+        assert_eq!(spans(&l), vec![(0, 384, 60), (96, 24, 64), (384, 416, 72), (800, 352, 60)]);
     }
 
     #[test]

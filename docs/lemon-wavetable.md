@@ -2,7 +2,7 @@
 
 **Target Crate**: `plugins/lemon-wavetable`  
 **Built-in CLAP ID**: `org.lemonstudio.lemon-wavetable`  
-**VST3 Class ID**: `LemonStudioWave01` (16-byte UUID)  
+**VST3 Class ID**: `LemonStudioWave0` (16-byte identifier)
 **Category**: Instrument / Synthesizer  
 **Status**: Specification Phase (Phase 1 Baseline)
 

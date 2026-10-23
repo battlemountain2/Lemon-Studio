@@ -6,6 +6,7 @@
 //! plugin state.
 
 mod biquad;
+mod legacy_reverb;
 pub mod delay;
 pub mod distortion;
 pub mod dynamics;
@@ -38,6 +39,9 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
         }
         "Fruity Limiter" | "Lemon Limiter" => {
             limiter::Limiter::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>)
+        }
+        "Lemon Reverb" | "Reverb" if state.starts_with(b"LMR1") => {
+            legacy_reverb::LegacyReverb::from_state(state, sample_rate).map(|effect| Box::new(effect) as Box<dyn Effect>)
         }
         "Fruity Reeverb 2" | "Lemon Reverb" | "Reverb" => {
             if state.is_empty() {
@@ -75,6 +79,47 @@ mod tests {
         assert!(from_slot("Fruity Fast Dist", &[], 44100).is_none());
         assert!(from_slot("Fruity Blood Overdrive", &[], 44100).is_none());
         assert!(from_slot("Fruity Squeeze", &[], 44100).is_none());
+    }
+
+    #[test]
+    fn legacy_reverb_matches_the_original_impulse_at_both_rates() {
+        for (rate, expected) in [(44100, 0x1589a91a6ca74fc6_u64), (48000, 0xc395ee7689154e1c_u64)] {
+            let mut state = b"LMR1".to_vec();
+            for value in [0.4_f32, 0.58, 0.88, 0.15] {
+                state.extend_from_slice(&value.to_le_bytes());
+            }
+            let mut effect = from_slot("Lemon Reverb", &state, rate).unwrap();
+            let mut audio = vec![0.0; rate as usize * 2];
+            audio[0] = 1.0;
+            audio[1] = 0.5;
+            effect.process(&mut audio);
+            let hash = audio.iter().flat_map(|sample| sample.to_le_bytes()).fold(0xcbf29ce484222325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+            });
+            assert_eq!(hash, expected);
+            let mut invalid = state.clone();
+            invalid[4..8].copy_from_slice(&f32::NAN.to_le_bytes());
+            assert!(from_slot("Lemon Reverb", &invalid, rate).is_none());
+            assert!(from_slot("Lemon Reverb", &state[..8], rate).is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_reverb_states_remain_playable() {
+        let mut state = b"LMR1".to_vec();
+        for value in [0.4_f32, 0.58, 0.88, 0.15] {
+            state.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut effect = from_slot("Lemon Reverb", &state, 48000).expect("legacy reverb");
+        let mut impulse = vec![0.0; 48000 * 2];
+        impulse[0] = 1.0;
+        effect.process(&mut impulse);
+        assert_eq!(impulse[0], 0.85);
+        assert!(impulse[4000..].iter().any(|sample| sample.abs() > 0.00001));
+        effect.reset();
+        impulse.fill(0.0);
+        effect.process(&mut impulse);
+        assert!(impulse.iter().all(|sample| *sample == 0.0));
     }
 
     #[test]

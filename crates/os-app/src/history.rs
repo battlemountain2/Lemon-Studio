@@ -43,6 +43,7 @@ pub enum Snap {
     Playlist(Box<crate::playlist::Snapshot>),
     /// A knob's value: the model's own for the channel knobs, else the knob's 0..1.
     Knob(KnobId, f64),
+    SampleFx { row: usize, flags: u16 },
     /// What a sample load changes on channel `row`: its sample, its name ("Auto name channels"), its root note and its
     /// stretch ("Read sample root note" and "Read sample tempo information", `rack::read_tags`) and its sampler flags
     /// (Keep on disk, "Auto keep long audio on disk").
@@ -121,6 +122,10 @@ impl Snap {
             Snap::Pattern { number, .. } => Snap::pattern(s, *number),
             Snap::Playlist(_) => Snap::Playlist(Box::new(crate::playlist::capture(s))),
             Snap::Knob(id, _) => Snap::Knob(*id, knob_value(s, *id)),
+            Snap::SampleFx { row, flags } => Snap::SampleFx {
+                row: *row,
+                flags: s.project.channels.get(*row).map_or(*flags, |channel| channel.sound.fx.flags),
+            },
             // A channel gone since is left as the step has it (`put` does nothing then).
             Snap::Sample { row, .. } => Snap::sample(s, *row).unwrap_or_else(|| self.clone()),
             Snap::Channel { row, .. } => Snap::Channel { row: *row, ch: s.project.channels.get(*row).cloned().map(Box::new) },
@@ -163,7 +168,7 @@ impl Snap {
             }
             Snap::Several(v) => v.iter_mut().for_each(|x| x.rescale(from, to)),
             // A channel or an initial value holds no ticks.
-            Snap::Knob(..) | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) => {}
+            Snap::Knob(..) | Snap::SampleFx { .. } | Snap::Sample { .. } | Snap::Channel { .. } | Snap::Init(..) | Snap::Rack(_) => {}
         }
     }
 
@@ -179,6 +184,12 @@ impl Snap {
             }
             Snap::Playlist(p) => crate::playlist::restore(s, *p),
             Snap::Knob(id, v) => set_knob_value(s, id, v),
+            Snap::SampleFx { row, flags } => {
+                if let Some(channel) = s.project.channels.get_mut(row) {
+                    channel.sound.fx.flags = flags;
+                    s.sample_loads.push((row, channel.sample_path.clone().unwrap_or_default()));
+                }
+            }
             Snap::Sample { row, path, name, root, stretch, flags } => {
                 if let Some(ch) = s.project.channels.get_mut(row) {
                     (ch.sample_path, ch.name, ch.misc.root, ch.sound.stretch) = (path.clone(), name, root, stretch);
@@ -249,6 +260,8 @@ fn knob_name(id: KnobId) -> &'static str {
         KnobId::Send(..) => "Send level",
         KnobId::Swing => "Main swing",
         KnobId::Eq(..) => "Mixer track equalizer",
+        KnobId::Strum(_) => "Piano roll strum",
+        KnobId::Arp(_) => "Piano roll arpeggiate",
     }
 }
 
@@ -377,7 +390,8 @@ pub fn load_sample(s: &mut State, row: usize) {
 /// Before knob `id` turns: a step unless Undo knob tweaks is off. `wheel`: a mouse-wheel notch, which joins the step
 /// of the notches just before it on the same knob.
 pub fn knob(s: &mut State, id: KnobId, wheel: bool) {
-    if !prefs::check(&prefs::UNDO_KNOB_TWEAKS) {
+    // The Strum and Arpeggiate dialogs' knobs only preview; their Accept is the step (spec: ui/piano-strum.md §1).
+    if !prefs::check(&prefs::UNDO_KNOB_TWEAKS) || matches!(id, KnobId::Strum(_) | KnobId::Arp(_)) {
         return;
     }
     let h = &s.history;

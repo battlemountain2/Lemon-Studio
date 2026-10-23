@@ -133,7 +133,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, _f: &FrameInfo) {
 
     // Target Mixer Track pill at bottom of Card 1
     let route_r = Rect::new(c1_r.x + 8.0, c1_r.bottom() - 26.0, c1_r.w - 16.0, 18.0);
-    let hov_route = ui.hit(route_r, Action::Fader(target_mixer), "Select target mixer track");
+    let hov_route = ui.hit(route_r, Action::Mix(crate::mixer::MHit::Strip(target_mixer)), "Select target mixer track");
     lk::outlined(ui.c, route_r, 3.0, t.s(0x191b1c), if hov_route { t.s(0x2f3336) } else { t.s(0x222527) });
     let route_label = rack::insert_name(target_mixer);
     ui.c.text_center(Font::new(11), route_r, if hov_route { t.tx(0xffffff) } else { t.tx(0x9da4ab) }, &route_label);
@@ -184,18 +184,22 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, _f: &FrameInfo) {
     ui.c.text_clip(Font::new(11).italic(), c2_r.x + 8.0, c2_r.y + 25.0, c2_r.w - 16.0, t.text_dim, &sample_name);
 
     // Macro Knobs (Cutoff & Resonance)
-    let cut_id = KnobId::ChanCutoff(ch_idx);
-    let res_id = KnobId::ChanRes(ch_idx);
+    if ch.kind.is_sampler() {
+        let cut_id = KnobId::ChanCutoff(ch_idx);
+        let res_id = KnobId::ChanRes(ch_idx);
 
-    let k_cut_r = Rect::new(c2_r.x + 18.0, c2_r.y + 44.0, 24.0, 24.0);
-    ui.hit(k_cut_r, Action::Knob(cut_id), s.knob_text(cut_id));
-    ball_knob(ui, k_cut_r.cx(), k_cut_r.cy(), 9.5, s.knob(cut_id));
-    ui.c.text_center(Font::new(10), Rect::new(c2_r.x + 8.0, c2_r.y + 70.0, 44.0, 12.0), t.text_dim, "CUTOFF");
+        let k_cut_r = Rect::new(c2_r.x + 18.0, c2_r.y + 44.0, 24.0, 24.0);
+        ui.hit(k_cut_r, Action::Knob(cut_id), s.knob_text(cut_id));
+        ball_knob(ui, k_cut_r.cx(), k_cut_r.cy(), 9.5, s.knob(cut_id));
+        ui.c.text_center(Font::new(10), Rect::new(c2_r.x + 8.0, c2_r.y + 70.0, 44.0, 12.0), t.text_dim, "CUTOFF");
 
-    let k_res_r = Rect::new(c2_r.x + 70.0, c2_r.y + 44.0, 24.0, 24.0);
-    ui.hit(k_res_r, Action::Knob(res_id), s.knob_text(res_id));
-    ball_knob(ui, k_res_r.cx(), k_res_r.cy(), 9.5, s.knob(res_id));
-    ui.c.text_center(Font::new(10), Rect::new(c2_r.x + 64.0, c2_r.y + 70.0, 36.0, 12.0), t.text_dim, "RES");
+        let k_res_r = Rect::new(c2_r.x + 70.0, c2_r.y + 44.0, 24.0, 24.0);
+        ui.hit(k_res_r, Action::Knob(res_id), s.knob_text(res_id));
+        ball_knob(ui, k_res_r.cx(), k_res_r.cy(), 9.5, s.knob(res_id));
+        ui.c.text_center(Font::new(10), Rect::new(c2_r.x + 64.0, c2_r.y + 70.0, 36.0, 12.0), t.text_dim, "RES");
+    } else {
+        ui.c.text_clip(Font::new(10), c2_r.x + 8.0, c2_r.y + 49.0, 102.0, t.text_dim, "Filter: plugin editor");
+    }
 
     // Pitch & cents badge
     let pitch_r = Rect::new(c2_r.x + 116.0, c2_r.y + 46.0, 78.0, 36.0);

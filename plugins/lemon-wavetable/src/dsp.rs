@@ -223,7 +223,7 @@ impl Default for Settings {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Ended {
     pub id: Option<i32>,
     pub channel: u8,
@@ -234,7 +234,7 @@ pub struct Engine {
     pub sample_rate: f64,
     pub voices: [Voice; MAX_VOICES],
     pub tables: Vec<Wavetable>,
-    pub bend_semitones: f64,
+    pub bend_semitones: [f64; 16],
 }
 
 impl Engine {
@@ -248,7 +248,7 @@ impl Engine {
             sample_rate: sample_rate.max(8000.0),
             voices: std::array::from_fn(|_| Voice::default()),
             tables,
-            bend_semitones: 0.0,
+            bend_semitones: [0.0; 16],
         }
     }
 
@@ -256,14 +256,18 @@ impl Engine {
         for v in &mut self.voices {
             v.stop();
         }
-        self.bend_semitones = 0.0;
+        self.bend_semitones.fill(0.0);
     }
 
-    pub fn set_pitch_bend(&mut self, bend_norm: f32) {
-        self.bend_semitones = (bend_norm as f64).clamp(-1.0, 1.0) * 2.0;
-        let bend_ratio = 2.0f64.powf(self.bend_semitones / 12.0);
+    pub fn set_pitch_bend(&mut self, channel: u8, normalized: f32) {
+        if channel >= 16 || !normalized.is_finite() {
+            return;
+        }
+        let bend = (f64::from(normalized).clamp(0.0, 1.0) * 2.0 - 1.0) * 2.0;
+        self.bend_semitones[usize::from(channel)] = bend;
+        let bend_ratio = 2.0f64.powf(bend / 12.0);
         for v in &mut self.voices {
-            if v.active {
+            if v.active && v.channel == channel {
                 v.base_freq = midi_note_to_freq(v.note) * bend_ratio;
             }
         }
@@ -276,8 +280,12 @@ impl Engine {
         note: u8,
         velocity: f32,
         settings: &Settings,
-    ) {
-        let bend_ratio = 2.0f64.powf(self.bend_semitones / 12.0);
+    ) -> Option<Ended> {
+        if channel >= 16 || note >= 128 || !velocity.is_finite() || velocity <= 0.0 {
+            self.note_off(id, channel, note);
+            return None;
+        }
+        let bend_ratio = 2.0f64.powf(self.bend_semitones[usize::from(channel)] / 12.0);
 
         let slot = self.voices.iter().position(|v| !v.active).unwrap_or_else(|| {
             self.voices
@@ -288,7 +296,10 @@ impl Engine {
                 .unwrap_or(0)
         });
 
+        let voice = &self.voices[slot];
+        let stolen = voice.active.then_some(Ended { id: voice.id, channel: voice.channel, note: voice.note });
         self.voices[slot].note_on(id, channel, note, velocity, bend_ratio, settings);
+        stolen
     }
 
     pub fn note_off(&mut self, id: Option<i32>, channel: u8, note: u8) {
@@ -303,14 +314,31 @@ impl Engine {
         self.voices.iter().filter(|v| v.active).count()
     }
 
+    pub fn all_off(&mut self, channel: u8) {
+        for voice in &mut self.voices {
+            if voice.active && voice.channel == channel {
+                voice.note_off();
+            }
+        }
+    }
+
+    pub fn choke(&mut self, channel: u8, note: Option<u8>, id: Option<i32>, mut ended: impl FnMut(Ended)) {
+        for voice in &mut self.voices {
+            if voice.active && voice.channel == channel && note.is_none_or(|note| voice.note == note) && id.is_none_or(|id| voice.id == Some(id)) {
+                ended(Ended { id: voice.id, channel: voice.channel, note: voice.note });
+                voice.stop();
+            }
+        }
+    }
+
     /// Renders a block of stereo samples with unison, warp, ZDF filtering, and modulation routing.
     pub fn render_block(
         &mut self,
         settings: &Settings,
         left: &mut [f32],
         right: &mut [f32],
-    ) -> Vec<Ended> {
-        let mut terminated = Vec::new();
+        mut ended: impl FnMut(usize, Ended),
+    ) {
         let table_idx = settings.table_idx.min(self.tables.len().saturating_sub(1));
         let table = &self.tables[table_idx];
 
@@ -332,7 +360,7 @@ impl Engine {
 
                 if voice.env1.is_idle() {
                     voice.active = false;
-                    terminated.push(Ended {
+                    ended(sample_idx, Ended {
                         id: voice.id,
                         channel: voice.channel,
                         note: voice.note,
@@ -381,11 +409,10 @@ impl Engine {
             }
 
             // Soft saturation limiter to protect dynamic range and prevent hard clipping
-            left[sample_idx] += sum_l.tanh();
-            right[sample_idx] += sum_r.tanh();
+            left[sample_idx] = sum_l.tanh();
+            right[sample_idx] = sum_r.tanh();
         }
 
-        terminated
     }
 }
 
@@ -420,8 +447,60 @@ mod tests {
 
         let mut left = vec![0.0; 512];
         let mut right = vec![0.0; 512];
-        let ended = engine.render_block(&settings, &mut left, &mut right);
-        assert!(ended.is_empty());
+        engine.render_block(&settings, &mut left, &mut right, |_, _| panic!("voice ended early"));
         assert!(left.iter().any(|&s| s.abs() > 0.001));
+    }
+
+    #[test]
+    fn pitch_bend_is_centered_and_channel_local() {
+        let settings = Settings::default();
+        let mut engine = Engine::new(48000.0);
+        engine.note_on(Some(1), 0, 69, 1.0, &settings);
+        engine.note_on(Some(2), 1, 69, 1.0, &settings);
+        for normalized in [0.0, 0.5, 1.0] {
+            engine.set_pitch_bend(0, normalized);
+            let expected = 440.0 * 2.0_f64.powf((f64::from(normalized) * 4.0 - 2.0) / 12.0);
+            assert!((engine.voices[0].base_freq - expected).abs() < 0.00001);
+            assert!((engine.voices[1].base_freq - 440.0).abs() < 0.00001);
+        }
+        engine.note_on(Some(3), 0, 69, 1.0, &settings);
+        assert!((engine.voices[2].base_freq - engine.voices[0].base_freq).abs() < 0.00001);
+        engine.set_pitch_bend(16, 1.0);
+        engine.set_pitch_bend(0, f32::NAN);
+        engine.reset();
+        engine.note_on(Some(4), 0, 69, 1.0, &settings);
+        assert_eq!(engine.voices[0].base_freq, 440.0);
+    }
+
+    #[test]
+    fn voice_endings_report_the_actual_sample_and_steals_report_identity() {
+        let settings = Settings { attack: 0.001, release: 0.001, unison: 1, ..Settings::default() };
+        let mut engine = Engine::new(48000.0);
+        let mut left = [0.0; 256];
+        let mut right = [0.0; 256];
+        engine.note_on(Some(1), 0, 69, 1.0, &settings);
+        engine.render_block(&settings, &mut left, &mut right, |_, _| panic!("early ending"));
+        let mut reference = engine.voices[0].env1;
+        reference.release();
+        let expected = (0..256).find(|_| { reference.process(48000.0); reference.is_idle() }).unwrap();
+        engine.note_off(Some(1), 0, 69);
+        let mut count = 0;
+        engine.render_block(&settings, &mut left, &mut right, |sample, identity| {
+            count += 1;
+            assert_eq!(sample, expected);
+            assert_eq!(identity, Ended { id: Some(1), channel: 0, note: 69 });
+        });
+        assert_eq!(count, 1);
+        for identity in 0..MAX_VOICES {
+            assert!(engine.note_on(Some(identity as i32), 0, 60, 1.0, &settings).is_none());
+        }
+        assert_eq!(engine.note_on(Some(100), 0, 61, 1.0, &settings), Some(Ended { id: Some(0), channel: 0, note: 60 }));
+        engine.choke(0, None, None, |_| count += 1);
+        assert_eq!(count, MAX_VOICES + 1);
+        assert_eq!(engine.active_voice_count(), 0);
+        left.fill(1.0);
+        right.fill(1.0);
+        engine.render_block(&settings, &mut left, &mut right, |_, _| panic!("duplicate ending"));
+        assert!(left.iter().chain(&right).all(|sample| *sample == 0.0));
     }
 }

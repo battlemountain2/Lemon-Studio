@@ -148,6 +148,10 @@ pub enum Request {
     Volume(usize, f64),
     Pan(usize, f64),
     PitchCents(usize, i32),
+    /// The strip's RANGE box (semitones) and TRACK box (mixer track); a double click on TRACK shows the mixer there.
+    PitchRange(usize, i32),
+    Track(usize, u16),
+    ShowTrack(usize),
     /// A preview note from a Lemon plugin's own keyboard (host link): row, key, velocity, on.
     Note(usize, u8, u8, bool),
     /// "Create automation clip" from a Lemon plugin's own parameter menu (host link): row, parameter index.
@@ -613,8 +617,8 @@ impl Plugins {
     }
 
     /// Row `row`'s Lemon Sampler takes the fx/reverse settings `sound` holds.
-    pub fn set_sampler_fx(&mut self, row: usize, sound: &os_model::ChannelSound) -> bool {
-        let params = sample_params(sound);
+    pub fn set_sampler_fx(&mut self, row: usize, sound: &os_model::ChannelSound, clip: bool) -> bool {
+        let params = sample_params(sound, clip);
         self.set_sampler(row, None, &params)
     }
 
@@ -1007,6 +1011,9 @@ impl Plugins {
                         FrameEvent::Volume(v) => Request::Volume(row, v),
                         FrameEvent::Pan(v) => Request::Pan(row, v),
                         FrameEvent::PitchCents(c) => Request::PitchCents(row, c),
+                        FrameEvent::PitchRange(r) => Request::PitchRange(row, r),
+                        FrameEvent::Track(t) => Request::Track(row, t),
+                        FrameEvent::ShowTrack => Request::ShowTrack(row),
                         FrameEvent::Raise => Request::Raise(row),
                         FrameEvent::Menu(x, y) => Request::Menu(row, x, y),
                         FrameEvent::Presets(x, y) => Request::Presets(row, x, y),
@@ -1187,7 +1194,7 @@ pub fn sampler_state(ch: &os_model::Channel) -> Vec<u8> {
             params.push(format!("\"{id}\":{v}"));
         }
     }
-    for (id, v) in sample_params(&ch.sound) {
+    for (id, v) in sample_params(&ch.sound, ch.kind == os_model::ChannelKind::AudioClip) {
         params.push(format!("\"{id}\":{v}"));
     }
     // Factory placeholders (`%FLStudioFactoryData%`...) become real paths: the plugin opens files directly.
@@ -1498,8 +1505,8 @@ fn stretch_params(sound: &os_model::ChannelSound) -> [(&'static str, serde_json:
 /// Lemon Sampler's parameters for a channel's sample settings: start and length, the precomputed effects and the loop
 /// options (spec: audio/precomputed-effects.md "Settings"), the channel filter (audio/channel-filter.md: knob
 /// positions = stored / 256) and the declick mode (audio/declick.md). "Use loop points" only when the file has the
-/// sampler flags (value 8).
-fn sample_params(sound: &os_model::ChannelSound) -> Vec<(&'static str, serde_json::Value)> {
+/// sampler flags (value 8), or off on an audio clip channel (`clip`) without them: FL's clips never loop.
+fn sample_params(sound: &os_model::ChannelSound, clip: bool) -> Vec<(&'static str, serde_json::Value)> {
     use lemon_sampler::params::{unit, Unit};
     use os_model::SampleFx;
     use serde_json::json;
@@ -1540,8 +1547,10 @@ fn sample_params(sound: &os_model::ChannelSound) -> Vec<(&'static str, serde_jso
         // Lemon Sampler's list holds modes 0 to 5: mode 6 (valid only as stored data) plays as mode 0 (Lemon Studio).
         ("declick", json!({ "i32": if sound.declick <= 5 { i32::from(sound.declick) } else { 0 } })),
     ];
-    if let Some(flags) = sound.sampler_flags {
-        out.push(("loop_use", b(flags & os_model::ChannelSound::USE_LOOP != 0)));
+    match sound.sampler_flags {
+        Some(flags) => out.push(("loop_use", b(flags & os_model::ChannelSound::USE_LOOP != 0))),
+        None if clip => out.push(("loop_use", b(false))),
+        None => {}
     }
     out
 }
@@ -1685,7 +1694,7 @@ mod linux_tests {
         let mut plugins = Plugins { available: builtin(), owner: parent as isize, scale: 1.5, rate: 48000, ..Plugins::default() };
         let index = plugins.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         plugins.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: LEMON_SAMPLER.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { max_track: 16, name: LEMON_SAMPLER.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         plugins.open_window(0, info).unwrap();
         let pump = |plugins: &mut Plugins| {
             let until = std::time::Instant::now() + std::time::Duration::from_millis(100);
@@ -1738,7 +1747,7 @@ mod linux_tests {
         connection.create_window(x11rb::COPY_DEPTH_FROM_PARENT, parent, root, 0, 0, 1920, 1080, 0, WindowClass::INPUT_OUTPUT, x11rb::COPY_FROM_PARENT, &CreateWindowAux::new()).unwrap().check().unwrap();
         let mut plugins = Plugins { available: builtin(), owner: parent as isize, scale: 1.0, rate: 48000, ..Default::default() };
         plugins.create(0, plugins.index_of("Lemon Ray").unwrap()).unwrap();
-        let info = ChannelInfo { name: "Lemon Ray".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { max_track: 16, name: "Lemon Ray".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
         plugins.open_window(0, info).unwrap();
         let pump = |plugins: &mut Plugins| {
             let until = std::time::Instant::now() + std::time::Duration::from_millis(150);
@@ -1859,7 +1868,7 @@ mod tests {
         let mut pl = Plugins { available: builtin(), scale: 1.5, rate: 48000, ..Plugins::default() };
         let index = pl.index_of(LEMON_SAMPLER).expect("built-in Lemon Sampler");
         pl.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: LEMON_SAMPLER.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: LEMON_SAMPLER.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 200);
         let w = pl.hosted[&0].window.as_ref().unwrap();
@@ -1891,7 +1900,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let hwnd = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -1920,7 +1929,7 @@ mod tests {
         let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
         pl.create_effect(1, 0, index, None).unwrap();
         let key = fx_key(1, 0);
-        let info = ChannelInfo { name: LEMON_EQ.into(), target: "Insert 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: LEMON_EQ.into(), target: "Insert 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         pl.open_window(key, info).unwrap();
         pump(&mut pl, 400);
         let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
@@ -1946,7 +1955,7 @@ mod tests {
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
         let index = pl.index_of(crate::osc3::LEMON_TRIO).expect("built-in Lemon Trio");
         pl.create_with(0, index, None).unwrap();
-        let info = ChannelInfo { name: crate::osc3::LEMON_TRIO.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: crate::osc3::LEMON_TRIO.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 400);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -1999,7 +2008,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2090,7 +2099,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2164,7 +2173,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
@@ -2247,7 +2256,7 @@ mod tests {
         let desc = lib.plugins[0].clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         // A bright 2 s saw so a low-pass is audible.
@@ -2333,7 +2342,7 @@ mod tests {
         let name = desc.name.clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: 1.0, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name, target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name, target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -2389,7 +2398,7 @@ mod tests {
         let name = desc.name.clone();
         let mut pl = Plugins { available: vec![Available { lib, desc }], scale: monitor, rate: 48000, ..Plugins::default() };
         pl.create(0, 0).unwrap();
-        let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 500);
         let size = |h: HWND| unsafe {
@@ -2866,7 +2875,7 @@ mod tests {
         use windows_sys::Win32::Foundation::RECT;
         let mut pl = Plugins { available: builtin(), scale: 1.0, rate: 48000, ..Plugins::default() };
         pl.create(0, pl.index_of(LEMON_SAMPLER).unwrap()).unwrap();
-        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: "Lemon Sampler".into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         pl.open_window(0, info).unwrap();
         pump(&mut pl, 300);
         let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -3025,7 +3034,7 @@ mod tests {
                 pl.create(0, 0).unwrap();
                 0
             };
-            let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+            let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
             pl.open_window(key, info).unwrap();
             let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
             unsafe { SetWindowPos(frame as HWND, std::ptr::null_mut(), -20000, -20000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
@@ -3056,7 +3065,7 @@ mod tests {
             let mut pl = Plugins { scale: 1.0, rate: 48000, effects: vec![a], ..Plugins::default() };
             pl.create_effect(1, 0, 0, None).unwrap();
             let key = fx_key(1, 0);
-            let info = ChannelInfo { name: name.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+            let info = ChannelInfo { name: name.into(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
             for round in 0..2 {
                 pl.open_window(key, info.clone()).unwrap();
                 let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
@@ -3122,7 +3131,7 @@ mod tests {
             })
         };
         eprintln!("STEP window");
-        let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         match pl.open_window(key, info) {
             Ok(()) => {
                 let frame = pl.hosted[&key].window.as_ref().unwrap().hwnd();
@@ -3242,11 +3251,11 @@ mod tests {
         let channel = a.state.project.channels[row].index;
         a.state.project.patterns[0].notes = vec![os_model::Note { length: 96, key: 60, ..os_model::Note::step(channel, 0) }];
         let path = std::env::temp_dir().join(format!("openstudio-native-gen-{}.wav", std::process::id()));
-        a.transport.export(&a.state.project, os_engine::PlayMode::Pattern(1), 48000, path.clone());
+        a.transport.export(&a.state.project, os_engine::PlayMode::Pattern(1), 48000, crate::export::Job::wav(&path));
         let t0 = std::time::Instant::now();
         let secs = loop {
             match a.transport.export_status() {
-                crate::transport::Export::Done(r) => break r.expect("export"),
+                crate::transport::Export::Done(r) => break r.expect("export").0,
                 _ if t0.elapsed() > Duration::from_secs(60) => panic!("export did not finish"),
                 _ => std::thread::sleep(Duration::from_millis(10)),
             }
@@ -3316,7 +3325,7 @@ mod tests {
             (held, tail, finite)
         });
         eprintln!("STEP window");
-        let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+        let info = ChannelInfo { name: name.clone(), target: "Insert 1".into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
         match pl.open_window(0, info) {
             Ok(()) => {
                 let frame = pl.hosted[&0].window.as_ref().unwrap().hwnd();
@@ -3550,7 +3559,7 @@ mod tests {
             for i in 0..pl.effects.len() {
                 pl.create_effect(1, i as u8, i, None).unwrap();
                 let name = pl.effects[i].desc.name.clone();
-                let info = ChannelInfo { name, target: "Insert 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, misc: None };
+                let info = ChannelInfo { name, target: "Insert 1".into(), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: 1, max_track: 125, misc: None };
                 pl.open_window(fx_key(1, i as u8), info).unwrap();
                 transport.set_effects(pl.effects());
                 pump(&mut pl, 400);
@@ -3608,7 +3617,7 @@ mod tests {
     fn editor_limit_and_reopen_place() {
         let mut pl = Plugins { effects: builtin_effects(), scale: 1.0, rate: 48000, ..Plugins::default() };
         let index = pl.effect_index(LEMON_EQ).expect("built-in EQ");
-        let info = |t: u16| ChannelInfo { name: LEMON_EQ.into(), target: format!("Insert {t}"), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: t, misc: None };
+        let info = |t: u16| ChannelInfo { name: LEMON_EQ.into(), target: format!("Insert {t}"), enabled: true, volume: 0.8, pan: 0.0, pitch_cents: 0, range: 2, track: t, max_track: 125, misc: None };
         let keys: Vec<usize> = (0..26u16).map(|i| fx_key(1 + i / 8, (i % 8) as u8)).collect();
         for &k in &keys {
             let (t, s) = fx_of(k).unwrap();

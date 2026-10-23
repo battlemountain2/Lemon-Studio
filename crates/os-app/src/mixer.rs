@@ -1441,6 +1441,7 @@ pub fn fx_info(p: &os_model::Project, ui: &MixerUi, key: usize) -> Option<crate:
         pitch_cents: 0,
         range: 2,
         track: t,
+        max_track: t,
     })
 }
 

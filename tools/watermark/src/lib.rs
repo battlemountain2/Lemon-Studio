@@ -64,12 +64,13 @@ mod tests {
         ("crates/os-ui/src/tabler.rs", "GPL-3.0-or-later AND MIT"),
     ];
 
-    const FORK_SOURCES: [&str; 26] = [
+    const FORK_SOURCES: [&str; 28] = [
         "crates/os-app/src/assistant.rs",
         "crates/os-app/src/assistant_io.rs",
         "crates/os-engine/src/drums.rs",
         "crates/os-engine/src/effects/delay.rs",
         "crates/os-engine/src/effects/distortion.rs",
+        "crates/os-engine/src/effects/legacy_reverb.rs",
         "plugins/lemon-ray/src/lib.rs",
         "plugins/lemon-ray/src/dsp.rs",
         "plugins/lemon-ray/src/editor.rs",
@@ -87,6 +88,7 @@ mod tests {
         "plugins/lemon-wavetable/src/table.rs",
         "plugins/lemon-wavetable/src/view.rs",
         "plugins/lemon-wavetable/src/warp.rs",
+        "plugins/lemon-wavetable/tests/realtime.rs",
         "tools/lemon-mcp/server.py",
         "tools/lemon-mcp/sketch.py",
         "tools/lemon-mcp/test_server.py",

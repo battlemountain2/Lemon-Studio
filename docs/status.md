@@ -32,6 +32,8 @@ clicking it does nothing. The full, item-by-item roadmap lives on the
 - Clip groups, markers and several arrangements
 - Enable groups (toolbar, OPTIONS menu, Shift+Alt+G): turned off, grouped clips select and move one by one
 - Track height, zoom and scroll saved with the project
+- Project picker (VIEW, Ctrl+F8 or the toolbar's project button): a menu of the patterns and channels; picking a
+  pattern makes it current, picking a channel opens its window
 - Song position slider in the toolbar: drag, click to step, right-click to jump, wheel; it follows playback
   (through the pattern in PAT mode)
 - Auto scrolling (toolbar, OPTIONS menu): while playing, the playlist follows the playhead (the piano roll in
@@ -113,6 +115,11 @@ the first of each four accented. Apply tempo is remembered between sessions. Not
 in front) and Close all plugin windows (Alt+F12: channel settings and plugin editors); the browser stays.
 Not yet: Align all channel editors, Arrange windows.
 
+**Window positions.** Where the windows were when Lemon Studio closed comes back at the next start: the main
+window (its place and size, and whether it was maximized; brought back onto a screen if its screen is gone) and the
+Playlist, Mixer, Piano roll (floating, maximized or collapsed), Channel rack, Plugin performance monitor, Tempo tapper
+and Touch controller. Kept with the program's settings, not the project. Which windows are open is not kept.
+
 ## 🚧 Automation
 
 - Automation clips for channel, mixer and plugin parameters
@@ -147,16 +154,44 @@ Not yet: Align all channel editors, Arrange windows.
 - A file of 30 s or more loaded into a sampler channel turns its Keep on disk on (General settings ▸
   Advanced ▸ Auto keep long audio on disk)
 
-## 🚧 Exporting audio
+## ✅ Exporting audio
 
-- Song or pattern to a WAV file (32-bit float)
-- Not yet: MP3 or FLAC
+- FILE ▸ Export audio (Ctrl+R) and Export MP3 (Shift+Ctrl+R) open the Export form: a name and folder, then the song
+  or the current pattern, the whole of it or the time selection, and the tail cut, rung out or wrapped to the start
+- Several formats at once: WAV (16 or 24-bit, 32-bit float), FLAC (16 or 24-bit, levels 0-8), MP3 and OGG Vorbis
+  (64-320 kbps)
+- Sample rate (the device's, or 44.1-192 kHz by resampling the mix), stereo or mono (merged, left, right),
+  interpolation from 2-point linear to 512-point sinc, triangular dither on integer formats, plugins' HQ mode
+- Split mixer tracks into a stems folder (WAV and FLAC), with or without the master; insert and master effects can be
+  left out
+- WAV files can carry markers, loop points, note markers and the tempo (`cue `, `smpl`, `acid` chunks)
+- The choices are remembered; the folder can open when the export is done
+- Not on purpose: FL's online and sharing exports
 
 ## 🚧 Note input
 
 - Mouse, computer keyboard and MIDI controllers; notes play the selected channel
-- Experimental in this fork: pattern note recording, wait-for-input, meter-aware count-in, blend/overdub and loop controls
-- Not yet: timestamp-accurate recording, robust loop-boundary/source-identity handling or recording undo; audio recording remains unavailable
+- Touch controller (VIEW, Alt+F7 or the toolbar's touch button): 4 x 4 pads or a two-octave keyboard, played
+  with the mouse, with octave steps
+- Note recording (the toolbar's Record button): armed and playing, notes from the typing keyboard, MIDI or the Touch
+  controller go into the current pattern, quantized to the main snap; a take replaces the notes that start inside it
+  and is one undo step; in SONG mode a clip of the pattern is placed where none plays, and made longer when the
+  take runs past it. A click or R (typing keyboard off) asks what to record (notes and automation, notes, automation,
+  or audio into the playlist); armed, the whole button fills red. Right-click for the options
+- Time selection loop: a piano roll (PAT) or playlist (SONG) time selection loops playback; armed with Loop record
+  off it punches in and out (plays it once and stops back at its start)
+- Score logger (TOOLS): every note played is kept for 30 minutes; Dump score log writes the last 2 to 30 minutes into
+  the pattern at their real timing (Merge / Replace when it has notes); Clear log
+- Automation recording: channel volume and pan knob moves while recording become the pattern's control points
+- Record options (toolbar, OPTIONS, Ctrl+I / Ctrl+P / Ctrl+B): Start on input (Play waits for the first note, which
+  is recorded at the start), Recording precount (1 or 2 bars of metronome count-in, "REC IN n" on the clock; also
+  set from the metronome's right-click menu) and Blend (a take keeps the notes it overlaps)
+- Loop record (toolbar, OPTIONS): off, recording runs on past the pattern's or song's end and the pattern grows;
+  on, playback loops and each pass is a take (one undo step) that replaces what the pass before recorded
+- One-click audio recording (the toolbar's microphone, TOOLS): pick an input (an ASIO driver's inputs, else the
+  system's input devices), the song plays with Record armed and precount, and on stop the take becomes a 32-bit WAV
+  in the data folder's `Recorded` folder plus a new audio clip channel and clip where playback started
+- Not yet: audio recording into mixer tracks, input monitoring, the audio editor
 
 ## 🚧 Undo
 
@@ -185,7 +220,8 @@ Not yet: Align all channel editors, Arrange windows.
   until Lemon Studio is back in front
 - A device that fails (unplugged, or a driver asking to be reset) is opened again; an ASIO driver that does not
   open gives way to the default device
-- Not yet: ASIO inputs and output pairs, JACK
+- An ASIO driver's first 8 inputs open with its outputs (full duplex) for audio recording
+- Not yet: ASIO output pairs, JACK
 
 <img alt="ASIO Compatible logo" src="../crates/os-app/asiosdk/logo/ASIO-compatible-logo-Steinberg-TM-BW.png" width="96">
 
@@ -223,7 +259,6 @@ ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 ## ❌ Not available yet
 
-- Audio recording
 - MIDI file import / export
 - Audio editing
 - Plugin delay compensation

@@ -105,54 +105,42 @@ impl Plugin for LemonWavetable {
     ) -> ProcessStatus {
         let settings = self.params.settings();
         let num_samples = buffer.samples();
-        let mut block_start = 0;
-
-        let mut next_event = context.next_event();
-
-        while block_start < num_samples {
-            let block_end = match next_event {
-                Some(event) if (event.timing() as usize) < num_samples => {
-                    (event.timing() as usize).max(block_start)
-                }
-                _ => num_samples,
-            };
-
-            // Render audio slice up to next MIDI event
-            if block_end > block_start {
-                let slice_len = block_end - block_start;
-                let channel_slices = buffer.as_slice();
-                let (left_chan, right_chan) = channel_slices.split_at_mut(1);
-                let left_slice = &mut left_chan[0][block_start..block_end];
-                let right_slice = &mut right_chan[0][block_start..block_end];
-
-                let ended = self.engine.render_block(&settings, left_slice, right_slice);
-                for (idx, e) in ended.into_iter().enumerate() {
-                    context.send_event(terminated(block_start + (idx % slice_len), e));
-                }
-                block_start = block_end;
-            }
-
-            // Process MIDI event at current sample point
-            while let Some(event) = next_event {
-                if event.timing() as usize > block_start {
-                    break;
-                }
-                match event {
-                    NoteEvent::NoteOn { voice_id, channel, note, velocity, .. } => {
-                        self.engine.note_on(voice_id, channel, note, velocity, &settings);
+        let output = buffer.as_slice();
+        for channel in output.iter_mut() {
+            channel.fill(0.0);
+        }
+        if output.len() < 2 {
+            return ProcessStatus::Normal;
+        }
+        let (left, right) = output.split_at_mut(1);
+        let mut position = 0;
+        while let Some(event) = context.next_event() {
+            let timing = (event.timing() as usize).clamp(position, num_samples);
+            self.engine.render_block(&settings, &mut left[0][position..timing], &mut right[0][position..timing], |sample, identity| {
+                context.send_event(terminated(position + sample, identity));
+            });
+            position = timing;
+            match event {
+                NoteEvent::NoteOn { voice_id, channel, note, velocity, .. } => {
+                    if let Some(identity) = self.engine.note_on(voice_id, channel, note, velocity, &settings) {
+                        context.send_event(terminated(timing, identity));
                     }
-                    NoteEvent::NoteOff { voice_id, channel, note, .. } => {
-                        self.engine.note_off(voice_id, channel, note);
-                    }
-                    NoteEvent::MidiPitchBend { value, .. } => {
-                        // value is normalized -1.0 to +1.0
-                        self.engine.set_pitch_bend(value);
-                    }
-                    _ => {}
                 }
-                next_event = context.next_event();
+                NoteEvent::NoteOff { voice_id, channel, note, .. } => self.engine.note_off(voice_id, channel, note),
+                NoteEvent::Choke { voice_id, channel, note, .. } => {
+                    self.engine.choke(channel, Some(note), voice_id, |identity| context.send_event(terminated(timing, identity)));
+                }
+                NoteEvent::MidiPitchBend { channel, value, .. } => self.engine.set_pitch_bend(channel, value),
+                NoteEvent::MidiCC { channel, cc: 123, .. } => self.engine.all_off(channel),
+                NoteEvent::MidiCC { channel, cc: 120, .. } => {
+                    self.engine.choke(channel, None, None, |identity| context.send_event(terminated(timing, identity)));
+                }
+                _ => {}
             }
         }
+        self.engine.render_block(&settings, &mut left[0][position..num_samples], &mut right[0][position..num_samples], |sample, identity| {
+            context.send_event(terminated(position + sample, identity));
+        });
 
         self.shared
             .voices
