@@ -85,6 +85,10 @@ pub struct Shared {
     song: AtomicBool,
     /// The song's loop points, start << 32 | end in ticks (0 = the whole song): the playlist's time selection.
     loop_range: AtomicU64,
+    /// Paused by a Marker pause: its tick + 1 (0 = not); after Resume, the same for the app to take as the playback's
+    /// start (spec: audio/transport.md "Time markers in SONG mode").
+    marker_hold: AtomicU64,
+    marker_resumed: AtomicU64,
     /// Playback position in frames of the output stream.
     position: AtomicU64,
     /// Playback position in ticks (f64 bits): what every playhead and the time display show. A pattern wraps.
@@ -99,15 +103,15 @@ pub struct Shared {
     /// Peak of the last block, f32 bits, per side.
     peak_l: AtomicU32,
     peak_r: AtomicU32,
-    meter_l: AtomicU32,
-    meter_r: AtomicU32,
     error: Mutex<Option<String>>,
     /// Notes playing now, as (channel index, key); written by the audio callback.
     sounding: Mutex<Vec<(u16, u16)>>,
-    /// The last samples that left the playback / live stream (mono), for the toolbar monitor.
+    /// The last samples that left the playback / live stream, for the toolbar monitor and meter.
     tap: Mutex<Tap>,
-    /// Peak per mixer track (L, R) since the mixer meters last read them.
-    tracks: Mutex<Vec<[f32; 2]>>,
+    /// The playback's last block: how the position moves through it while the device plays it (`Transport::tick`).
+    pace: Mutex<Option<Pace>>,
+    /// Peaks per mixer track (L, R) since the mixer meters last read them (`TrackPeaks`).
+    tracks: Mutex<TrackPeaks>,
     /// Device blocks the queue could not fill since the program started.
     underruns: AtomicU64,
     /// How far the playback and live streams render ahead of the device.
@@ -173,25 +177,153 @@ impl AheadStats {
     }
 }
 
-/// Ring of the newest output samples.
+/// Ring of the newest output frames (L, R), and when the device took the last block of them.
+///
+/// A device takes its blocks at once and plays them over their length: a sound server's are often a tenth of a second
+/// or more. What is heard is not the end of the newest block but `heard` frames in, the time since it was taken at
+/// the rate (spec: Linux shared mode, issue #160): the monitor shows and the meter reads up to there, so they move
+/// as the sound does rather than in steps of a block.
 struct Tap {
-    buf: Vec<f32>,
-    pos: usize,
-    /// Samples written since the start; unchanged = no audio arrived.
+    l: Vec<f32>,
+    r: Vec<f32>,
+    /// Frames written since the start.
     total: u64,
+    /// The last block: the device block it was for (`device::blocks`), its first frame, its length, when the device
+    /// took it and the rate it plays at.
+    block: u64,
+    start: u64,
+    frames: u64,
+    at: Option<Instant>,
+    rate: u32,
+    /// The frame the meter has read to (`Transport::take_peaks`).
+    metered: u64,
 }
+
+/// Frames the tap holds: the largest analyzer FFT behind the newest block (two of the longest buffer length).
+const TAP_FRAMES: usize = crate::monitor::MAX_FFT + 2 * 8192;
 
 impl Default for Tap {
     fn default() -> Self {
-        Tap { buf: vec![0.0; crate::monitor::MAX_FFT], pos: 0, total: 0 }
+        Tap { l: vec![0.0; TAP_FRAMES], r: vec![0.0; TAP_FRAMES], total: 0, block: 0, start: 0, frames: 0, at: None, rate: 0, metered: 0 }
     }
 }
 
 impl Tap {
-    fn push(&mut self, v: f32) {
-        self.buf[self.pos] = v;
-        self.pos = (self.pos + 1) % self.buf.len();
-        self.total += 1;
+    /// One stream's block (interleaved stereo) for device block `block`, taken `at`. The streams of one device block
+    /// (playback and live notes) are summed, as the device hears them; a new device block comes after the last.
+    fn push(&mut self, stereo: &[f32], block: u64, at: Instant, rate: u32) {
+        let n = (stereo.len() / 2) as u64;
+        let same = block != 0 && block == self.block && n == self.frames;
+        if !same {
+            (self.block, self.start, self.frames, self.at, self.rate) = (block, self.total, n, Some(at), rate);
+            self.total += n;
+        }
+        for (i, f) in stereo.chunks_exact(2).enumerate() {
+            let k = (self.start as usize + i) % TAP_FRAMES;
+            if same {
+                self.l[k] += f[0];
+                self.r[k] += f[1];
+            } else {
+                (self.l[k], self.r[k]) = (f[0], f[1]);
+            }
+        }
+    }
+
+    /// The frames heard by `now`: into the last block as far as the time since the device took it (all of it once
+    /// that is past).
+    fn heard(&self, now: Instant) -> u64 {
+        let Some(at) = self.at.filter(|_| self.rate > 0) else { return self.total };
+        let into = (now.saturating_duration_since(at).as_secs_f64() * f64::from(self.rate)) as u64;
+        self.start + into.min(self.frames)
+    }
+}
+
+/// The mixer meters' feed. The playback renders ahead of the device a block at a time: its peaks are kept per tick
+/// with the frame of the stream's output the tick starts at (counted from the stream's start: a looping pattern's
+/// engine frames start again) and read once the device has played to there (`Pace::played`), so the meters move as the
+/// sound is heard rather than a block at a time (issue #160). Other streams' peaks (live notes) are read at once.
+#[derive(Default)]
+struct TrackPeaks {
+    now: Vec<[f32; 2]>,
+    ticks: std::collections::VecDeque<(u64, Vec<[f32; 2]>)>,
+    /// Emptied vectors to use again, so rendering does not allocate once it runs.
+    spare: Vec<Vec<[f32; 2]>>,
+}
+
+/// Ticks of peaks `TrackPeaks` keeps waiting (some seconds of the fastest ticks); older ones are read at once.
+const PEAK_TICKS: usize = 4096;
+
+impl TrackPeaks {
+    /// The peaks the playback's tick at output frame `frame` left in `e`.
+    fn tick(&mut self, frame: u64, e: &mut Engine) {
+        let mut v = self.spare.pop().unwrap_or_default();
+        v.clear();
+        e.take_track_peaks(&mut v);
+        self.ticks.push_back((frame, v));
+        while self.ticks.len() > PEAK_TICKS {
+            self.release();
+        }
+    }
+
+    /// Moves the oldest waiting tick's peaks to `now`.
+    fn release(&mut self) {
+        let Some((_, v)) = self.ticks.pop_front() else { return };
+        merge(&mut self.now, &v);
+        self.spare.push(v);
+    }
+
+    /// The peaks heard up to output frame `heard` (`None`: all of them, nothing is playing) since the last call.
+    fn take(&mut self, heard: Option<u64>) -> Vec<[f32; 2]> {
+        while self.ticks.front().is_some_and(|(f, _)| heard.is_none_or(|h| *f <= h)) {
+            self.release();
+        }
+        let out = self.now.clone();
+        self.now.iter_mut().for_each(|p| *p = [0.0; 2]);
+        out
+    }
+}
+
+/// `into` takes the larger of its peaks and those of `from`, growing to as many tracks.
+fn merge(into: &mut Vec<[f32; 2]>, from: &[[f32; 2]]) {
+    if into.len() < from.len() {
+        into.resize(from.len(), [0.0; 2]);
+    }
+    for (o, p) in into.iter_mut().zip(from) {
+        (o[0], o[1]) = (o[0].max(p[0]), o[1].max(p[1]));
+    }
+}
+
+/// The playback's last block (the device's): its position at the start and at the end (engine frame, tick), the
+/// stream's output frames played before and after it, its length, when the device took it and the rate it plays at.
+#[derive(Clone, Copy, Debug)]
+struct Pace {
+    from: (u64, f64),
+    to: (u64, f64),
+    read: (u64, u64),
+    frames: u64,
+    at: Instant,
+    rate: u32,
+}
+
+impl Pace {
+    /// How far through the block the device is by `now`, 0..1.
+    fn share(&self, now: Instant) -> f64 {
+        let length = self.frames as f64 / f64::from(self.rate);
+        if self.rate == 0 || length <= 0.0 { 1.0 } else { (now.saturating_duration_since(self.at).as_secs_f64() / length).min(1.0) }
+    }
+
+    /// The position heard by `now`, moving from the block's start to its end. A pattern that wrapped in the block is
+    /// at the end at once (the wrap lies somewhere inside).
+    fn at(&self, now: Instant) -> (u64, f64) {
+        let s = self.share(now);
+        let frame = self.from.0 + ((self.to.0.saturating_sub(self.from.0)) as f64 * s) as u64;
+        let tick = if self.to.1 >= self.from.1 { self.from.1 + (self.to.1 - self.from.1) * s } else { self.to.1 };
+        (frame, tick)
+    }
+
+    /// The stream's output frames played by `now`.
+    fn played(&self, now: Instant) -> u64 {
+        self.read.0 + (self.read.1.saturating_sub(self.read.0) as f64 * self.share(now)) as u64
     }
 }
 
@@ -203,6 +335,9 @@ impl Shared {
         self.tempo.store(0, Ordering::Relaxed);
         self.peak_l.store(0, Ordering::Relaxed);
         self.peak_r.store(0, Ordering::Relaxed);
+        if let Ok(mut p) = self.pace.lock() {
+            *p = None;
+        }
         if let Ok(mut v) = self.sounding.lock() {
             v.clear();
         }
@@ -259,8 +394,8 @@ enum Cmd {
     NoteOff(usize, u16),
     /// A controller message for a channel (rack position): message, pitch bend range in cents (`Engine::midi`).
     Midi(usize, [u8; 3], f64),
-    /// A tap on the Tempo tapper: a click, accented or not, like a live note.
-    TapClick(bool),
+    /// A tap on the Tempo tapper: a click, accented or not, at the metronome's volume (dB), like a live note.
+    TapClick(bool, i8),
     /// An instrument's editor opened or the last one closed (`Transport::listen`).
     Listen(bool),
     Stop,
@@ -274,6 +409,8 @@ enum Cmd {
     Open,
     /// Opens the ASIO driver's own settings window (`Transport::asio_panel`).
     AsioPanel,
+    /// The FL Studio factory content folder changed (`Transport::set_factory`).
+    Factory(Option<PathBuf>),
     /// Tests: the open device fails as if it went away.
     #[cfg(test)]
     FailDevice,
@@ -356,10 +493,7 @@ impl Transport {
                 let inst = instruments.clone();
                 move || {
                     crate::device::init_thread();
-                    // The channels' Lemon Sampler instances stretch for themselves (spec: audio/time-stretch.md).
-                    let mut library = SampleLibrary::new(factory);
-                    library.resample_stretches = true;
-                    audio_thread(rx, s, latest, inst, library)
+                    audio_thread(rx, s, latest, inst, host_library(factory))
                 }
             })
             .expect("spawn audio thread");
@@ -382,13 +516,10 @@ impl Transport {
         let _ = self.tx.send(Cmd::Instruments);
     }
 
-    /// Peak per mixer track (L, R) since the last call (the mixer meters' feed); resets them.
+    /// Peak per mixer track (L, R) heard since the last call (the mixer meters' feed); resets them.
     pub fn take_track_peaks(&self) -> Vec<[f32; 2]> {
-        self.shared.tracks.lock().map(|mut v| {
-            let out = v.clone();
-            v.iter_mut().for_each(|p| *p = [0.0; 2]);
-            out
-        }).unwrap_or_default()
+        let heard = self.paced().map(|p| p.played(Instant::now()));
+        self.shared.tracks.lock().map(|mut t| t.take(heard)).unwrap_or_default()
     }
 
     /// The sample rate streams open at (the audio settings' device and rate; what hosted plugins are activated at):
@@ -420,6 +551,12 @@ impl Transport {
     /// it is closed: on the audio thread, which drives the driver. What went wrong comes back as an error.
     pub fn asio_panel(&self) {
         let _ = self.tx.send(Cmd::AsioPanel);
+    }
+
+    /// The FL Studio install folder that sample paths' placeholders point into is now `dir` (`crate::factory_folder`):
+    /// the playing engines take their factory samples from there.
+    pub fn set_factory(&self, dir: Option<PathBuf>) {
+        let _ = self.tx.send(Cmd::Factory(dir));
     }
 
     /// Renders `project` offline at `rate`, with the hosted instruments and effects, and writes the files of `job`, on
@@ -457,6 +594,7 @@ impl Transport {
             *slot = None;
         }
         let generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.shared.marker_hold.store(0, Ordering::Relaxed);
         self.shared.song.store(matches!(mode, PlayMode::Song), Ordering::Relaxed);
         self.shared.rewind(start_tick);
         self.shared.state.store(PLAYING, Ordering::Release);
@@ -515,9 +653,9 @@ impl Transport {
     }
 
     /// A tap on the Tempo tapper (spec: ui/tempo-tapper.md §8): the metronome's Tick, accented or not, where a live
-    /// note would play (into playback while playing, else on the live stream).
+    /// note would play (into playback while playing, else on the live stream), at the metronome's volume.
     pub fn tap_click(&self, accent: bool) {
-        let _ = self.tx.send(Cmd::TapClick(accent));
+        let _ = self.tx.send(Cmd::TapClick(accent, crate::metronome::volume()));
     }
 
     /// An instrument's editor is open (or the last one closed). Its own keyboard plays notes the host never sees, which
@@ -541,14 +679,28 @@ impl Transport {
 
     pub fn resume(&self) {
         if self.shared.state.compare_exchange(PAUSED, PLAYING, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            // Resumed from a Marker pause: the playback now counts as started there.
+            let held = self.shared.marker_hold.swap(0, Ordering::AcqRel);
+            if held != 0 {
+                self.shared.marker_resumed.store(held, Ordering::Release);
+            }
             let _ = self.tx.send(Cmd::Resume);
         }
+    }
+
+    /// The Marker pause playback was resumed from since the last call, once (spec: audio/transport.md "Time markers in
+    /// SONG mode"): Stop then returns there.
+    pub fn take_marker_resumed(&self) -> Option<u32> {
+        let t = self.shared.marker_resumed.swap(0, Ordering::AcqRel);
+        (t != 0).then(|| (t - 1).min(u64::from(u32::MAX)) as u32)
     }
 
     /// Stop everything: playback rewinds, hosted instruments fall silent, live notes and previews end. Also works
     /// when already stopped (it silences notes still ringing from the typing keyboard or a preview).
     pub fn stop(&self) {
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
+        self.shared.marker_hold.store(0, Ordering::Relaxed);
+        self.shared.marker_resumed.store(0, Ordering::Relaxed);
         self.shared.state.store(STOPPED, Ordering::Release);
         self.shared.rewind(0.0);
         let _ = self.tx.send(Cmd::Stop);
@@ -581,28 +733,40 @@ impl Transport {
         self.shared.song.load(Ordering::Relaxed)
     }
 
-    /// Playback position in ticks of the running mode (a looping pattern wraps at its end).
+    /// Playback position in ticks of the running mode (a looping pattern wraps at its end): while playing, as far
+    /// into the device's last block as it has played by now (`Pace`).
     pub fn tick(&self) -> f64 {
-        f64::from_bits(self.shared.tick.load(Ordering::Relaxed))
+        self.paced().map_or_else(|| f64::from_bits(self.shared.tick.load(Ordering::Relaxed)), |p| p.at(Instant::now()).1)
     }
 
     pub fn seconds(&self) -> f64 {
         let rate = self.shared.sample_rate.load(Ordering::Relaxed).max(1);
-        self.shared.position.load(Ordering::Relaxed) as f64 / f64::from(rate)
+        let frame = self.paced().map_or_else(|| self.shared.position.load(Ordering::Relaxed), |p| p.at(Instant::now()).0);
+        frame as f64 / f64::from(rate)
     }
 
-    /// Fills `out` with the newest output samples (oldest first, at most 8192) and returns the running sample
-    /// count; an unchanged count means nothing was played since the last call.
+    /// The playback's last block, while it plays.
+    fn paced(&self) -> Option<Pace> {
+        if self.shared.state.load(Ordering::Acquire) != PLAYING {
+            return None;
+        }
+        *self.shared.pace.lock().ok()?
+    }
+
+    /// Fills `out` with the output heard last (mono, oldest first, at most `monitor::MAX_FFT`) and returns the count
+    /// of frames heard; an unchanged count means nothing was played since the last call (`Tap::heard`).
     pub fn tap(&self, out: &mut [f32]) -> u64 {
         let Ok(t) = self.shared.tap.lock() else { return 0 };
-        let n = out.len().min(t.buf.len());
+        let heard = t.heard(Instant::now());
+        let n = out.len().min(crate::monitor::MAX_FFT).min(heard as usize);
         let skip = out.len() - n;
         out[..skip].fill(0.0);
-        let len = t.buf.len();
+        let first = heard as usize - n;
         for (i, o) in out[skip..].iter_mut().enumerate() {
-            *o = t.buf[(t.pos + len - n + i) % len];
+            let k = (first + i) % TAP_FRAMES;
+            *o = (t.l[k] + t.r[k]) * 0.5;
         }
-        t.total
+        heard
     }
 
     /// The output stream's sample rate (0 until the first stream opened).
@@ -610,12 +774,16 @@ impl Transport {
         self.shared.sample_rate.load(Ordering::Relaxed)
     }
 
-    /// Output peaks (L, R) since the last call, then resets them (the toolbar meter's feed).
+    /// Output peaks (L, R) of what was heard since the last call (the toolbar meter's feed).
     pub fn take_peaks(&self) -> (f32, f32) {
-        (
-            f32::from_bits(self.shared.meter_l.swap(0, Ordering::Relaxed)),
-            f32::from_bits(self.shared.meter_r.swap(0, Ordering::Relaxed)),
-        )
+        let Ok(mut t) = self.shared.tap.lock() else { return (0.0, 0.0) };
+        let heard = t.heard(Instant::now());
+        let from = t.metered.max(heard.saturating_sub(TAP_FRAMES as u64));
+        t.metered = heard;
+        (from..heard).fold((0.0f32, 0.0f32), |(l, r), f| {
+            let k = f as usize % TAP_FRAMES;
+            (l.max(t.l[k].abs()), r.max(t.r[k].abs()))
+        })
     }
 
     /// Peaks of the last playback block (L, R).
@@ -692,6 +860,9 @@ impl Transport {
     /// Shows as playing at `tick` of the pattern (`song` false) or the playlist, without starting anything.
     #[cfg(test)]
     pub(crate) fn pretend_at(&self, tick: f64, song: bool) {
+        if let Ok(mut p) = self.shared.pace.lock() {
+            *p = None;
+        }
         self.shared.state.store(PLAYING, Ordering::Release);
         self.shared.song.store(song, Ordering::Relaxed);
         self.shared.tick.store(tick.to_bits(), Ordering::Relaxed);
@@ -714,7 +885,7 @@ struct Queue {
     read: AtomicU64,
     /// Per tick: first sample, length in samples, tick (f64 bits), engine frame, and 1 for a held tick (paused: the
     /// position does not move through it).
-    ticks: Box<[[AtomicU64; 5]]>,
+    ticks: Box<[[AtomicU64; 6]]>,
     ticks_written: AtomicU64,
     /// The tick record the reader is in.
     ticks_read: AtomicU64,
@@ -750,7 +921,7 @@ impl Queue {
     }
 
     /// Feeder: appends one tick (call `has_room` first).
-    fn push(&self, s: &[f32], tick: u64, frame: u64, held: bool) {
+    fn push(&self, s: &[f32], tick: f64, frame: u64, held: bool, tick_frames: u64) {
         let w = self.written.load(Ordering::Relaxed);
         for (i, &v) in s.iter().enumerate() {
             self.samples[(w as usize + i) % QUEUE_SAMPLES].store(v.to_bits(), Ordering::Relaxed);
@@ -759,9 +930,10 @@ impl Queue {
         let rec = &self.ticks[tw as usize % QUEUE_TICKS];
         rec[0].store(w, Ordering::Relaxed);
         rec[1].store(s.len() as u64, Ordering::Relaxed);
-        rec[2].store((tick as f64).to_bits(), Ordering::Relaxed);
+        rec[2].store(tick.to_bits(), Ordering::Relaxed);
         rec[3].store(frame, Ordering::Relaxed);
         rec[4].store(u64::from(held), Ordering::Relaxed);
+        rec[5].store(tick_frames, Ordering::Relaxed);
         self.ticks_written.store(tw + 1, Ordering::Release);
         self.written.store(w + s.len() as u64, Ordering::Release);
     }
@@ -791,7 +963,8 @@ impl Queue {
             return None;
         }
         let rec = &self.ticks[at as usize % QUEUE_TICKS];
-        let (start, len) = (rec[0].load(Ordering::Relaxed), rec[1].load(Ordering::Relaxed).max(1));
+        // The samples a whole tick lasts: a block delay compensation cut short still moves at the song's pace.
+        let (start, len) = (rec[0].load(Ordering::Relaxed), 2 * rec[5].load(Ordering::Relaxed).max(1));
         // A held tick is heard at its start all through (the paused position stays put).
         let into = if rec[4].load(Ordering::Relaxed) != 0 { 0 } else { r.saturating_sub(start) };
         Some((rec[3].load(Ordering::Relaxed) + into / 2, f64::from_bits(rec[2].load(Ordering::Relaxed)) + into as f64 / len as f64))
@@ -846,10 +1019,28 @@ impl Feeder {
                     self.queue.ended.store(true, Ordering::Release);
                     break;
                 }
-                Some((s, tick, frame, held)) => {
+                Some((s, tick, frame, held, tick_frames)) => {
                     frames += s.len() as u64 / 2;
-                    self.queue.push(s, tick, frame, held);
+                    let at = self.queue.written.load(Ordering::Relaxed) / 2;
+                    self.queue.push(s, tick, frame, held, tick_frames);
+                    // The playback's meters wait for the device to play this tick.
+                    if self.meters && self.ctl.report.load(Ordering::Relaxed) {
+                        if let Ok(mut t) = self.shared.tracks.lock() {
+                            t.tick(at, &mut e);
+                        }
+                    }
                     self.queue.ended.store(e.finished(), Ordering::Release);
+                }
+            }
+            // The song came to a Marker pause: the transport is paused there, as by the Play button (spec:
+            // audio/transport.md "Time markers in SONG mode").
+            if let Some(t) = e.take_marker_pause() {
+                if self.ctl.report.load(Ordering::Relaxed) && self.shared.state.compare_exchange(PLAYING, PAUSED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                    self.ctl.held.store(true, Ordering::Relaxed);
+                    self.shared.marker_hold.store(t + 1, Ordering::Release);
+                    if let Ok(mut v) = self.shared.sounding.lock() {
+                        v.clear();
+                    }
                 }
             }
         }
@@ -867,8 +1058,8 @@ impl Feeder {
                 self.shared.load.store((load as f32).to_bits(), Ordering::Relaxed);
                 (self.busy, self.rendered) = (Duration::ZERO, 0);
             }
-            if let Ok(mut v) = self.shared.tracks.lock() {
-                e.take_track_peaks(&mut v);
+            if let Ok(mut t) = self.shared.tracks.lock() {
+                e.take_track_peaks(&mut t.now);
             }
         }
         // So does the tempo shown.
@@ -969,18 +1160,28 @@ fn raise_priority() {
 #[cfg(not(any(windows, target_os = "macos")))]
 fn raise_priority() {}
 
-fn attach(e: &mut Engine, inst: &Instruments) {
-    if let Ok(list) = inst.lock() {
-        if std::env::var_os("OS_DEBUG").is_some() {
-            eprintln!("[transport] attach {} instrument(s), {} effect(s)", list.inst.len(), list.fx.len());
-        }
-        for (row, i) in list.inst.iter() {
-            e.set_instrument(*row, i.clone());
-        }
-        for (track, slot, fx) in list.fx.iter() {
-            e.set_effect(*track, *slot, fx.clone());
-        }
+/// The sample library for engines whose sampler channels Lemon Sampler instances play. They stretch for themselves
+/// (spec: audio/time-stretch.md), and of a sample one of them plays the engine keeps only the length and rate Lemon
+/// Sampler reads from the file's headers, for the files it can play from disk (spec: plugins/lemon-sampler.md "Keep on
+/// disk (Lemon Studio)"); other files are decoded, a copy shared with the instance playing it.
+pub fn host_library(factory: Option<PathBuf>) -> SampleLibrary {
+    let mut library = SampleLibrary::new(factory);
+    library.resample_stretches = true;
+    library.length_reader = Some(lemon_sampler::stream::length);
+    library
+}
+
+/// An engine for `project` with the hosted plugins attached (`plugins`; a preview plays its channels itself), all from
+/// one look at the list. The instruments come with the engine (`Engine::with_instruments`), so it keeps no decoded copy
+/// of the samples they play from their files.
+fn engine(project: &Project, library: &mut SampleLibrary, rate: u32, mode: PlayMode, inst: &Instruments, plugins: bool) -> Engine {
+    let (list, fx) = inst.lock().ok().filter(|_| plugins).map(|l| (l.inst.clone(), l.fx.clone())).unwrap_or_default();
+    if plugins && std::env::var_os("OS_DEBUG").is_some() {
+        eprintln!("[transport] attach {} instrument(s), {} effect(s)", list.len(), fx.len());
     }
+    let mut e = Engine::with_instruments(project, library, rate, mode, &list);
+    crate::project_plugins::attach_effects(&mut e, project, fx);
+    e
 }
 
 /// Renders a whole song (or one pass of a pattern, or a span of either) with the hosted plugins and writes the files of
@@ -988,12 +1189,14 @@ fn attach(e: &mut Engine, inst: &Instruments) {
 // spec: audio/export.md
 fn export(project: &Project, mode: PlayMode, rate: u32, job: &crate::export::Job, library: &mut SampleLibrary, inst: &Instruments, shared: &Shared) -> Result<(f64, Vec<PathBuf>), String> {
     let o = &job.options;
-    let mut e = Engine::new(project, library, rate, mode);
-    attach(&mut e, inst);
+    let mut e = engine(project, library, rate, mode, inst, true);
     e.set_interpolation(o.points);
     e.set_effects(o.insert_fx, o.master_fx);
-    if let Some((a, b)) = job.span {
-        e.set_span(a, b);
+    match job.span {
+        Some((a, b)) => e.set_span(a, b),
+        // A whole song follows its start and skip markers (spec: audio/song-structure.md "Time markers").
+        None if mode == PlayMode::Song => e.follow_markers(),
+        None => {}
     }
     e.set_track_capture(o.split);
     let len = e.frames_left().max(1);
@@ -1081,11 +1284,10 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
     let mut logged = Instant::now();
     let swap = |s: &mut Session, library: &mut SampleLibrary| {
         // Build outside the lock, then swap at the playing position.
-        let mut e = Engine::new(&s.project, library, s.rate, s.mode);
+        let mut e = engine(&s.project, library, s.rate, s.mode, &inst, true);
         if s.kind == Kind::Live {
             e.clear_schedule();
         }
-        attach(&mut e, &inst);
         let old = s.engine.lock().map(|mut slot| {
             e.continue_from(&mut slot);
             std::mem::replace(&mut *slot, e)
@@ -1126,7 +1328,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
         match rx.recv_timeout(Duration::from_millis(10)) {
             // The output is closed by Auto close: previews and live notes find no stream and open none.
             // So is a device that failed, until it opens again.
-            Ok(Cmd::Preview(_) | Cmd::PreviewFor(..) | Cmd::PreviewSong(_) | Cmd::NoteOn(..) | Cmd::Midi(..) | Cmd::TapClick(_)) if closed || lost.is_some() => {}
+            Ok(Cmd::Preview(_) | Cmd::PreviewFor(..) | Cmd::PreviewSong(_) | Cmd::NoteOn(..) | Cmd::Midi(..) | Cmd::TapClick(..)) if closed || lost.is_some() => {}
             Ok(Cmd::Update) => {
                 if let Some(project) = latest.lock().ok().and_then(|mut l| l.take()) {
                     for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
@@ -1154,10 +1356,10 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                     s.feed.wake();
                 }
             }
-            Ok(cmd @ (Cmd::NoteOn(..) | Cmd::Midi(..) | Cmd::TapClick(_))) => {
+            Ok(cmd @ (Cmd::NoteOn(..) | Cmd::Midi(..) | Cmd::TapClick(..))) => {
                 // A click needs no channel: it also opens the live stream before any project was sent.
                 let empty = Project::default();
-                let project = live_project.as_ref().or(matches!(cmd, Cmd::TapClick(_)).then_some(&empty));
+                let project = live_project.as_ref().or(matches!(cmd, Cmd::TapClick(..)).then_some(&empty));
                 let target = match session.as_ref() {
                     Some(s) if !s.paused() => Some(s),
                     _ => {
@@ -1178,7 +1380,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                         match cmd {
                             Cmd::NoteOn(ch, key, vel) => e.note_on(ch, key, vel),
                             Cmd::Midi(ch, bytes, bend) => e.midi(ch, bytes, bend),
-                            Cmd::TapClick(accent) => e.tap_click(accent),
+                            Cmd::TapClick(accent, db) => e.tap_click(accent, db),
                             _ => {}
                         }
                     }
@@ -1352,6 +1554,12 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 reset_pending = true;
                 reset_fx_pending = true;
                 listen_retry = true;
+            }
+            Ok(Cmd::Factory(dir)) => {
+                library.set_factory_dir(dir);
+                for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
+                    swap(s, &mut library);
+                }
             }
             Ok(Cmd::AsioPanel) if closed => report(&shared, "the output is let go of (Auto close)".into()),
             Ok(Cmd::AsioPanel) => {
@@ -1697,14 +1905,11 @@ impl Session {
         let song = kind == Kind::Song;
         let out = device.open()?;
         let (rate, fixed, info) = (out.info.rate, out.info.fixed, out.info.clone());
-        let mut e = Engine::new(project, library, rate, mode);
+        let mut e = engine(project, library, rate, mode, inst, kind != Kind::Preview);
         // Playback loops: a pattern on its bar line, the song at its end (back to the start).
         e.set_looping(song);
         if kind == Kind::Live {
             e.clear_schedule();
-        }
-        if kind != Kind::Preview {
-            attach(&mut e, inst);
         }
         // Playback clicks with the metronome switch; live notes and previews never do (spec: ui/metronome.md §4).
         if song {
@@ -1724,6 +1929,7 @@ impl Session {
         }
         if song {
             e.set_run_on(crate::record::run_on_flag());
+            e.set_nudge(crate::tapper::nudge_flag());
         }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));
@@ -1792,9 +1998,7 @@ impl Renderer {
         self.render_block(stereo);
         if self.tap && !held {
             if let Ok(mut t) = self.shared.tap.try_lock() {
-                for f in stereo.chunks_exact(2) {
-                    t.push((f[0] + f[1]) * 0.5);
-                }
+                t.push(stereo, crate::device::blocks(), Instant::now(), self.shared.sample_rate.load(Ordering::Relaxed));
             }
         }
     }
@@ -1819,6 +2023,9 @@ impl Renderer {
             self.shared.ahead.record(self.queue.queued() / 2, self.asked.map(|t| now - t));
             self.asked = Some(now);
         }
+        // Where the block starts (the playback's position moves from here to its end while the device plays it).
+        let from = self.queue.heard();
+        let read = self.queue.read.load(Ordering::Relaxed) / 2;
         let got = self.queue.pop(stereo);
         let ended = self.queue.ended.load(Ordering::Acquire);
         if got < stereo.len() {
@@ -1843,6 +2050,10 @@ impl Renderer {
             if let Some((frame, tick)) = heard {
                 self.shared.position.store(frame, Ordering::Relaxed);
                 self.shared.tick.store(tick.to_bits(), Ordering::Relaxed);
+                if let Ok(mut p) = self.shared.pace.try_lock() {
+                    let rate = self.shared.sample_rate.load(Ordering::Relaxed);
+                    *p = Some(Pace { from: from.unwrap_or((frame, tick)), to: (frame, tick), read: (read, read + (got / 2) as u64), frames: (got / 2) as u64, at: Instant::now(), rate });
+                }
             }
         }
         if self.gain != 1.0 || target != 1.0 {
@@ -1868,12 +2079,6 @@ impl Source for Renderer {
         if self.ctl.report.load(Ordering::Relaxed) {
             self.shared.peak_l.store(pl.to_bits(), Ordering::Relaxed);
             self.shared.peak_r.store(pr.to_bits(), Ordering::Relaxed);
-        }
-        // Toolbar meter: the largest peak since the monitor last read it (non-negative f32 bits order like u32s), from
-        // every stream the monitor taps (playback and live notes).
-        if self.tap {
-            self.shared.meter_l.fetch_max(pl.to_bits(), Ordering::Relaxed);
-            self.shared.meter_r.fetch_max(pr.to_bits(), Ordering::Relaxed);
         }
     }
 
@@ -2265,6 +2470,91 @@ mod tests {
         t.stop();
         std::thread::sleep(Duration::from_millis(150));
         assert!(!t.playing() && t.seconds() == 0.0 && t.tick() == 0.0 && t.peaks() == (0.0, 0.0), "stopped = rewound");
+    }
+
+    /// The tap sums the streams of one device block and appends the next; what is heard moves through the last block
+    /// with the time since the device took it.
+    #[test]
+    fn the_tap_is_heard_through_the_block() {
+        let mut t = Tap::default();
+        let t0 = Instant::now();
+        t.push(&[0.5; 2 * 4800], 1, t0, 48000);
+        assert_eq!((t.total, t.heard(t0)), (4800, 0), "taken, not heard yet");
+        assert_eq!(t.heard(t0 + Duration::from_millis(50)), 2400, "half way through 100 ms");
+        assert_eq!(t.heard(t0 + Duration::from_secs(1)), 4800, "not past its end");
+        // Live notes in the same device block: summed, not after it.
+        t.push(&[0.25; 2 * 4800], 1, t0, 48000);
+        assert_eq!((t.total, t.l[10], t.r[4799]), (4800, 0.75, 0.75));
+        t.push(&[0.0; 2 * 4800], 2, t0 + Duration::from_millis(100), 48000);
+        assert_eq!((t.total, t.start, t.heard(t0 + Duration::from_millis(125))), (9600, 4800, 6000));
+        // Without a rate (no stream opened yet), everything written is heard.
+        let mut u = Tap::default();
+        u.push(&[0.0; 8], 0, t0, 0);
+        assert_eq!(u.heard(t0), 4);
+    }
+
+    /// The playback's position moves through the device's block over its length; a pattern that wrapped is at the end.
+    #[test]
+    fn the_position_moves_through_the_block() {
+        let t0 = Instant::now();
+        let p = Pace { from: (1000, 10.0), to: (5800, 14.0), read: (0, 4800), frames: 4800, at: t0, rate: 48000 };
+        assert_eq!(p.at(t0), (1000, 10.0));
+        assert_eq!(p.at(t0 + Duration::from_millis(25)), (2200, 11.0));
+        assert_eq!(p.played(t0 + Duration::from_millis(25)), 1200);
+        assert_eq!(p.at(t0 + Duration::from_millis(500)), (5800, 14.0), "held at the end until the next block");
+        let wrapped = Pace { to: (5800, 1.0), ..p };
+        assert_eq!(wrapped.at(t0 + Duration::from_millis(10)).1, 1.0);
+    }
+
+    /// The playback's track peaks are read once the position gets to their tick; with nothing playing, all at once.
+    #[test]
+    fn track_peaks_wait_to_be_heard() {
+        let mut t = TrackPeaks::default();
+        t.ticks.push_back((0, vec![[0.5, 0.25]]));
+        t.ticks.push_back((1000, vec![[0.75, 0.0], [0.1, 0.1]]));
+        assert_eq!(t.take(Some(500)), vec![[0.5, 0.25]], "only the tick heard");
+        assert_eq!(t.take(Some(900)), vec![[0.0, 0.0]], "nothing new heard");
+        assert_eq!(t.take(Some(1000)), vec![[0.75, 0.0], [0.1, 0.1]]);
+        t.ticks.push_back((2000, vec![[0.3, 0.3]]));
+        merge(&mut t.now, &[[0.0, 0.9]]);
+        assert_eq!(t.take(None), vec![[0.3, 0.9], [0.0, 0.0]], "stopped: everything, live notes' too");
+        assert_eq!(t.spare.len(), 3, "their vectors are used again");
+    }
+
+    /// Linux shared mode on a sound server that takes long blocks (a tenth of a second and more at a 4096-frame
+    /// buffer): the position and the meter move every UI frame, not once a block (issue #160). Needs a sound server.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn long_blocks_play_smoothly() {
+        let _restore = DefaultAudio;
+        crate::audio_cfg::AudioCfg { buffer: Some(4096), ..Default::default() }.apply();
+        let mut project = crate::app::test_project();
+        let ch = project.channels[0].index;
+        project.patterns = vec![os_model::Pattern { number: 1, notes: (0..16).map(|i| os_model::Note { length: 12, key: 60, ..os_model::Note::step(ch, i * 24) }).collect(), ..Default::default() }];
+        let t = Transport::new(None);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        wait_for(|| t.seconds() > 0.3);
+        let o = t.opened().expect("opened");
+        println!("{} at {} Hz, blocks of {}", o.host, o.rate, t.block());
+        // Two seconds of 60 Hz UI frames.
+        let (mut ticks, mut meters, mut master) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..120 {
+            std::thread::sleep(Duration::from_millis(16));
+            ticks.push(t.tick());
+            meters.push(t.take_peaks().0);
+            master.push(t.take_track_peaks().first().map_or(0.0, |p| p[0]));
+        }
+        t.stop();
+        let steps: Vec<f64> = ticks.windows(2).map(|w| w[1] - w[0]).filter(|d| *d > -100.0).collect();
+        let still = steps.iter().filter(|d| **d == 0.0).count();
+        let silent = meters.iter().filter(|m| **m == 0.0).count();
+        let master_silent = master.iter().filter(|m| **m == 0.0).count();
+        println!("frames the position stood still: {still} of {}; meter readings at 0: {silent} of {}; master track's: {master_silent}", steps.len(), meters.len());
+        assert!(t.block() > 2048, "the server took long blocks: {}", t.block());
+        assert!(still <= steps.len() / 10, "the position moves every frame: {ticks:?}");
+        assert!(silent <= meters.len() / 10, "the meter reads every frame: {meters:?}");
+        assert!(master_silent <= master.len() / 10, "the mixer's meters read every frame: {master:?}");
     }
 
     /// A device that fails while in use (unplugged, an ASIO driver asking to be reset) opens again: the playback goes on

@@ -79,18 +79,29 @@ pub enum MCmd {
     CablePhysics,
     /// General settings ▸ Animations: simulate the cables (true) or hang them still; kept for the next start.
     Animations(bool),
+    /// Open audio editor: Tesla on this track (Tesla's own, as FL's Edison).
+    AudioEditor(u16),
+    /// Open audio editor and record: a Tesla on this track set up as an audio logger.
+    AudioEditorRecord(u16),
+    /// Remove all (audio editor) instances: asks first, then `RemoveTeslasNow` removes every Tesla.
+    RemoveTeslas,
+    RemoveTeslasNow,
     /// Effect slots of the current track.
     AddEffect(u8, usize),
     SlotDelete(u8),
     SlotMove(u8, i8),
     SlotRename(u8),
     SlotView(u8),
+    /// Sidechain input ▸ (Lemon Studio's own): the input of the current track a hosted plugin's sidechain bus hears,
+    /// counted from 1, 0 for none (spec: audio/sidechain.md "Hosted plugins' input buses").
+    SlotSidechain(u8, usize),
 }
 
 /// What the plugin host does next tick for a mixer slot (`App::mixer_tick`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum FxReq {
-    Create { track: u16, slot: u8, index: usize },
+    /// `state`: the instance starts from it (a Tesla set up for recording), else from its defaults.
+    Create { track: u16, slot: u8, index: usize, state: Option<Vec<u8>> },
     Toggle { track: u16, slot: u8 },
     Show { track: u16, slot: u8 },
     Delete { track: u16, slot: u8 },
@@ -119,12 +130,14 @@ pub struct MixerUi {
     /// The last solo: the tracks it kept on and the states (track, enabled) from before the first solo, put back by
     /// unsolo when "Restore previous state after solo" is on.
     pub solo: Option<(Vec<u16>, Vec<(u16, bool)>)>,
+    /// The track and effect slot the wheel last moved, and where the mouse was then (`slot_wheel`).
+    pub wheel_grab: Option<(u16, u8, (f32, f32))>,
 }
 
 impl Default for MixerUi {
     fn default() -> Self {
         MixerUi { sel: Vec::new(), layout: WIDE, slot_names: HashMap::new(), pending: Vec::new(), meters: Vec::new(),
-            meter_cfg: Default::default(), meter_at: None, solo: None }
+            meter_cfg: Default::default(), meter_at: None, solo: None, wheel_grab: None }
     }
 }
 
@@ -206,6 +219,44 @@ pub fn receives(s: &State, n: u16) -> bool {
 pub fn slot_name(s: &State, t: u16, slot: u8) -> Option<String> {
     let p = track(s, t)?.slots.get(usize::from(slot))?.as_ref()?;
     Some(s.mixer.slot_names.get(&(t, slot)).cloned().unwrap_or_else(|| crate::project_plugins::slot_title(p)))
+}
+
+/// Tesla's "For" index of 5 minutes (Edison's menu: Forever, 1, 3, 5 minutes, ...), the audio logger's length.
+const AUDIO_LOG_5_MINUTES: u8 = 3;
+
+/// Whether slot `k` of track `t` holds Tesla (a project's Edison slots too; a name typed for the slot doesn't count).
+fn is_tesla(s: &State, t: u16, k: u8) -> bool {
+    track(s, t).and_then(|m| m.slots.get(usize::from(k))?.as_ref()).is_some_and(|p| crate::project_plugins::slot_title(p) == crate::plugins::TESLA)
+}
+
+/// Track `t`'s first Tesla slot.
+fn first_tesla(s: &State, t: u16) -> Option<u8> {
+    let n = track(s, t)?.slots.len() as u8;
+    (0..n).find(|&k| is_tesla(s, t, k))
+}
+
+/// Every Tesla in the mixer, as (track, slot).
+pub(crate) fn teslas(s: &State) -> Vec<(u16, u8)> {
+    s.project.mixer.iter().flat_map(|m| (0..m.slots.len() as u8).map(move |k| (m.index, k))).filter(|&(t, k)| is_tesla(s, t, k)).collect()
+}
+
+/// The question before Remove all (audio editor) instances.
+fn remove_question(n: usize) -> String {
+    match n {
+        1 => "Remove 1 audio editor? Its audio is lost.".into(),
+        n => format!("Remove {n} audio editors? Their audio is lost."),
+    }
+}
+
+/// Empties slot `k` of track `t` and drops its instance (the slot menu's Delete).
+fn clear_slot(s: &mut State, t: u16, k: u8) {
+    if let Some(m) = track_mut(s, t) {
+        m.slots[usize::from(k)] = None;
+        m.slot_on[usize::from(k)] = true;
+        m.slot_mix[usize::from(k)] = 1.0;
+    }
+    s.mixer.slot_names.remove(&(t, k));
+    s.mixer.pending.push(FxReq::Delete { track: t, slot: k });
 }
 
 /// "Volume: 100%  0.0dB  1.00" (§4); `label` = "Volume" or "To Insert 3".
@@ -412,7 +463,7 @@ pub fn right(app: &mut App, h: MHit) -> bool {
                 PItem::new("Sidechain to this track", Cmd::Mixer(MCmd::Route { dst, only: false, side: true })),
                 PItem::new("Sidechain to this track only", Cmd::Mixer(MCmd::Route { dst, only: true, side: true })),
             ];
-            s.playlist.popup = Some(Popup { x: at.0, y: at.1, items, sub: None });
+            s.playlist.popup = Some(Popup { x: at.0, y: at.1, items, sub: None, scroll: [0; 2] });
         }
         // The slot's plugin menu, like a left click (spec: ui/plugin-menu.md §1).
         MHit::SlotArrow(i) => {
@@ -455,6 +506,28 @@ pub fn middle(app: &mut App, h: MHit) -> bool {
         }
     }
     false
+}
+
+/// The wheel over effect slot `slot` of the current track (§7): what the slot holds, an effect or nothing, trades places
+/// with its neighbour, one slot per notch, up for `notches` > 0. While the mouse stays still, more notches move the
+/// same slot, which has left the cursor.
+pub fn slot_wheel(app: &mut App, slot: u8, notches: i32) {
+    let at = app.mouse;
+    let t = app.state.selected_mixer;
+    let mut slot = match app.state.mixer.wheel_grab {
+        Some((gt, g, m)) if gt == t && m == at => g,
+        _ => slot,
+    };
+    let d: i8 = if notches > 0 { -1 } else { 1 };
+    for _ in 0..notches.unsigned_abs() {
+        let to = i32::from(slot) + i32::from(d);
+        if !(0..10).contains(&to) {
+            break;
+        }
+        run(app, MCmd::SlotMove(slot, d));
+        slot = to as u8;
+    }
+    app.state.mixer.wheel_grab = Some((t, slot, at));
 }
 
 fn start_rename(s: &mut State, n: u16, at: (f32, f32)) {
@@ -862,8 +935,8 @@ fn delete_track(s: &mut State, n: u16) -> Option<String> {
 /// Back to a fresh track (name, colour, levels, slots kept out), routed to the master (§6.1 Reset).
 fn reset_track(s: &mut State, n: u16) {
     if let Some(m) = track_mut(s, n) {
-        let slots = m.slots.clone();
-        *m = MixerTrack { slots, ..MixerTrack::new(n) };
+        let (slots, origin) = (m.slots.clone(), m.origin);
+        *m = MixerTrack { slots, origin, ..MixerTrack::new(n) };
     }
     changed(s);
 }
@@ -884,9 +957,9 @@ const COLORS: [(&str, u32); 8] = [
 
 /// Track menu (right click on a strip), §6.1.
 pub fn track_menu(s: &State, n: u16, x: f32, y: f32) -> Popup {
-    let mut items = vec![PItem::head(Box::leak(format!("Mixer track ({})", name(s, n)).into_boxed_str()))];
+    let mut items = vec![PItem::head(format!("Mixer track ({})", name(s, n)))];
     items.extend(track_items(n));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 fn track_items(n: u16) -> Vec<PItem> {
@@ -903,8 +976,8 @@ fn track_items(n: u16) -> Vec<PItem> {
         PItem::not_yet("Unassign from Audio track(s)"),
         PItem::sep(),
         PItem::sub("File", vec![PItem::not_yet("Render to wave file...")]),
-        PItem::not_yet("Open audio editor").key("Ctrl+E"),
-        PItem::not_yet("Open audio editor and record").key("Shift+E"),
+        PItem::new("Open audio editor", mx(MCmd::AudioEditor(n))).key("Ctrl+E"),
+        PItem::new("Open audio editor and record", mx(MCmd::AudioEditorRecord(n))).key("Shift+E"),
         PItem::sep(),
         PItem::new("Reset selected track(s) to default", mx(MCmd::Reset(n))),
         PItem::head("Routing"),
@@ -981,13 +1054,13 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::sep(),
         PItem::sub("Trim unused tracks", trim_items(s)),
         PItem::not_yet("Switch smart disable for all plugins"),
-        PItem::not_yet("Remove all (audio editor) instances"),
+        PItem::new("Remove all (audio editor) instances", Cmd::Mixer(MCmd::RemoveTeslas)),
         // The cable physics debug panel, hidden from users; uncomment to tune the cables again.
         // PItem::new("Cable physics (debug)...", Cmd::Mixer(MCmd::CablePhysics)).mark(Mark::Check(s.cables.borrow().debug)),
-        PItem::head(Box::leak(format!("Mixer track ({})", name(s, s.selected_mixer)).into_boxed_str())),
+        PItem::head(format!("Mixer track ({})", name(s, s.selected_mixer))),
     ];
     items.extend(track_items(s.selected_mixer));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Layout combo menu (§6.4): only Wide is drawn, the other layouts are greyed out.
@@ -1000,14 +1073,14 @@ pub fn layout_menu(s: &State, x: f32, y: f32) -> Popup {
         let on = Mark::Radio(s.mixer.layout == i as u8);
         items.push(if i as u8 == WIDE { PItem::new(l, Cmd::Mixer(MCmd::Layout(i as u8))) } else { PItem::not_yet(l) }.mark(on));
     }
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Empty slot: the effect list (§7.1), the plugin menu for this slot (spec: ui/plugin-menu.md).
 pub fn effect_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
     let mut items = vec![PItem::not_yet("Plugin database").key(crate::shortcuts::menu_key("Plugin database", "Shift+F8")), PItem::sep()];
     items.extend(crate::plugin_menu::items(s, crate::plugin_menu::Target::Fx(Some(slot)), false));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Filled slot ▸ (§7.2).
@@ -1032,6 +1105,7 @@ pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
         PItem::head("Parameters"),
         PItem::not_yet("Link all parameters..."),
         PItem::new("Browse parameters", Cmd::Param(crate::params::PCmd::Browse(crate::plugins::fx_key(s.selected_mixer, slot)))),
+        PItem::sub("Sidechain input", sidechain_items(s, slot)),
         PItem::head("CPU"),
         PItem::not_yet("Allow threaded processing").mark(Mark::Check(true)),
         PItem::not_yet("Smart disable"),
@@ -1048,7 +1122,27 @@ pub fn slot_menu(s: &State, slot: u8, x: f32, y: f32) -> Popup {
         PItem::sub("Scaling", vec![PItem::not_yet("100%")]),
         PItem::not_yet("Help"),
     ];
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// The tracks routed into track `n`, in track order: its inputs, numbered from 1 (spec: audio/sidechain.md "Settings").
+pub fn inputs(s: &State, n: u16) -> Vec<u16> {
+    let mut ins: Vec<u16> = s.project.mixer.iter().filter(|m| m.index != 0 && m.index != n && m.routes.contains(&n)).map(|m| m.index).collect();
+    ins.sort_unstable();
+    ins
+}
+
+/// Sidechain input ▸: "None" and the current track's inputs by name, the slot's choice marked.
+fn sidechain_items(s: &State, slot: u8) -> Vec<PItem> {
+    let t = s.selected_mixer;
+    let now = track(s, t).and_then(|m| m.slots.get(usize::from(slot))?.as_ref()).filter(|p| p.name == os_flp::wrapper::WRAPPER).map_or(0, |p| {
+        os_flp::wrapper::input_ports(&p.state).get(1).map_or(0, |&p| p.max(0) as usize)
+    });
+    let mut items = vec![PItem::new("None", Cmd::Mixer(MCmd::SlotSidechain(slot, 0))).mark(Mark::Radio(now == 0))];
+    for (i, n) in inputs(s, t).into_iter().enumerate() {
+        items.push(PItem::new(format!("{}. {}", i + 1, name(s, n)), Cmd::Mixer(MCmd::SlotSidechain(slot, i + 1))).mark(Mark::Radio(now == i + 1)));
+    }
+    items
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1078,6 +1172,26 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
                 }
             }
             None
+        }
+        MCmd::AudioEditor(n) => {
+            app.audio_editor(n, false);
+            return None;
+        }
+        MCmd::AudioEditorRecord(n) => {
+            app.audio_logger(n);
+            return None;
+        }
+        MCmd::RemoveTeslas => return app.ask_remove_teslas(),
+        MCmd::RemoveTeslasNow => {
+            let gone = teslas(s);
+            for &(t, k) in &gone {
+                clear_slot(s, t, k);
+            }
+            changed(s);
+            Some(match gone.len() {
+                1 => "Removed 1 audio editor".into(),
+                n => format!("Removed {n} audio editors"),
+            })
         }
         MCmd::Reset(n) => {
             for t in targets(s, n) {
@@ -1160,19 +1274,12 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
                 m.slot_mix[usize::from(slot)] = 1.0;
             }
             s.mixer.slot_names.remove(&(t, slot));
-            s.mixer.pending.push(FxReq::Create { track: t, slot, index });
+            s.mixer.pending.push(FxReq::Create { track: t, slot, index, state: None });
             changed(s);
             None
         }
         MCmd::SlotDelete(slot) => {
-            let t = s.selected_mixer;
-            if let Some(m) = track_mut(s, t) {
-                m.slots[usize::from(slot)] = None;
-                m.slot_on[usize::from(slot)] = true;
-                m.slot_mix[usize::from(slot)] = 1.0;
-            }
-            s.mixer.slot_names.remove(&(t, slot));
-            s.mixer.pending.push(FxReq::Delete { track: t, slot });
+            clear_slot(s, s.selected_mixer, slot);
             changed(s);
             None
         }
@@ -1208,6 +1315,15 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
             let t = s.selected_mixer;
             s.mixer.pending.push(FxReq::Toggle { track: t, slot });
             None
+        }
+        MCmd::SlotSidechain(slot, port) => {
+            let t = s.selected_mixer;
+            if crate::project_plugins::set_slot_sidechain(&mut s.project, &app.plugins, t, slot, port) {
+                changed(s);
+                None
+            } else {
+                Some("This effect has no sidechain input".into())
+            }
         }
     };
     app.invalidate();
@@ -1327,7 +1443,7 @@ impl App {
             }
             done = true;
             match r {
-                FxReq::Create { track, slot, index } => match self.plugins.create_effect(track, slot, index, None) {
+                FxReq::Create { track, slot, index, state } => match self.plugins.create_effect(track, slot, index, state.as_deref()) {
                     Ok(_) => {
                         self.plugins.added(crate::plugins::fx_key(track, slot));
                         relink = true;
@@ -1369,6 +1485,108 @@ impl App {
         if done {
             self.invalidate();
         }
+    }
+
+    /// Tesla on track `t`: the toolbar's audio editor button puts it on the master, as FL opens Edison there (spec:
+    /// plugins/tesla/requests.md #5); the track menu's "Open audio editor" on that track. It shows the track's first
+    /// Tesla, adding one when it has none; `new` (the button's right click) always adds one, in the first free slot.
+    pub(crate) fn audio_editor(&mut self, t: u16, new: bool) {
+        if !new {
+            if let Some(k) = first_tesla(&self.state, t) {
+                self.state.mixer.pending.push(FxReq::Show { track: t, slot: k });
+                return self.invalidate();
+            }
+        }
+        self.add_tesla(t, None);
+    }
+
+    /// Open audio editor and record: a Tesla on track `t` set up as an audio logger, as FL's quick load sets Edison
+    /// (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"): records on the host's play, for 5
+    /// minutes, appended, slaved to the transport, armed.
+    pub(crate) fn audio_logger(&mut self, t: u16) {
+        self.tesla_for_recording(t, |s| {
+            s.rec.when = tesla::state::WHEN_ON_PLAY;
+            s.rec.max = AUDIO_LOG_5_MINUTES;
+            s.rec.append = true;
+            s.rec.slave = true;
+            s.rec.armed = true;
+        });
+    }
+
+    /// A Tesla on track `t` to record into (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"):
+    /// the track's first Tesla when it holds no sample, else a new one in the first free slot, so no audio or undo
+    /// history is touched. `set` changes its state (the empty one is reloaded with it, a new one starts from it) and
+    /// its window is shown. False when there is no Tesla to use (the message says why).
+    pub(crate) fn tesla_for_recording(&mut self, t: u16, set: impl FnOnce(&mut tesla::state::Saved)) -> bool {
+        use tesla::state::{from_plugin_state, plugin_state, Saved};
+        let empty = first_tesla(&self.state, t).and_then(|k| {
+            let key = crate::plugins::fx_key(t, k);
+            let saved = self.plugins.state(key).and_then(|b| from_plugin_state(&b)).filter(|s| s.sample.is_empty())?;
+            Some((k, key, saved))
+        });
+        let saved = match empty {
+            Some((k, key, mut saved)) => {
+                set(&mut saved);
+                if self.plugins.set_state(key, &plugin_state(&saved)) {
+                    self.plugins.mark_edited(key);
+                    self.state.mixer.pending.push(FxReq::Show { track: t, slot: k });
+                    changed(&mut self.state);
+                    self.invalidate();
+                    return true;
+                }
+                saved
+            }
+            None => {
+                let mut saved = Saved::default();
+                set(&mut saved);
+                saved
+            }
+        };
+        self.add_tesla(t, Some(plugin_state(&saved)))
+    }
+
+    /// A new Tesla in track `t`'s first free slot, starting from `state` when given; false (with a message) when
+    /// Tesla is missing or the track is full.
+    fn add_tesla(&mut self, t: u16, state: Option<Vec<u8>>) -> bool {
+        use crate::plugins::TESLA;
+        let s = &mut self.state;
+        let Some(index) = self.plugins.effect_index(TESLA) else {
+            s.message = Some(format!("{TESLA} is not available"));
+            self.invalidate();
+            return false;
+        };
+        let Some(k) = track(s, t).and_then(|m| m.slots.iter().position(Option::is_none)) else {
+            s.message = Some("No free effect slot on this track".into());
+            self.invalidate();
+            return false;
+        };
+        let m = track_mut(s, t).expect("the track");
+        m.slots[k] = Some(crate::plugins::new_slot(TESLA));
+        m.slot_on[k] = true;
+        m.slot_mix[k] = 1.0;
+        s.mixer.slot_names.remove(&(t, k as u8));
+        s.mixer.pending.push(FxReq::Create { track: t, slot: k as u8, index, state });
+        changed(s);
+        self.invalidate();
+        true
+    }
+
+    /// Remove all (audio editor) instances (spec: plugins/tesla/README.md "Recording into Tesla from Lemon Studio"):
+    /// asks first, since removed slots can't be brought back yet; with none, says so.
+    pub(crate) fn ask_remove_teslas(&mut self) -> Option<String> {
+        let n = teslas(&self.state).len();
+        if n == 0 {
+            return Some("No audio editors in the mixer".into());
+        }
+        let (x, y) = self.mouse;
+        let items = vec![
+            PItem::head(remove_question(n)),
+            PItem::new("Remove", Cmd::Mixer(MCmd::RemoveTeslasNow)),
+            PItem::new("Cancel", Cmd::Nothing),
+        ];
+        self.state.playlist.popup = Some(Popup { x, y, items, sub: None, scroll: [0; 2] });
+        self.invalidate();
+        None
     }
 
     pub(crate) fn open_fx(&mut self, track: u16, slot: u8) {
@@ -1587,7 +1805,33 @@ mod tests {
         assert!(!track(&a.state, 2).unwrap().slot_on[1]);
         run(&mut a, MCmd::SlotDelete(1));
         assert_eq!(slot_name(&a.state, 2, 1), None);
-        assert!(a.state.mixer.pending.iter().any(|r| matches!(r, FxReq::Create { track: 2, slot: 0, index: 0 })));
+        assert!(a.state.mixer.pending.iter().any(|r| matches!(r, FxReq::Create { track: 2, slot: 0, index: 0, .. })));
+    }
+
+    /// spec: audio/sidechain.md "Hosted plugins' input buses": Sidechain input ▸ lists None and the tracks routed into
+    /// the track, in track order, and writes the pick into the slot's wrapper state as FL does; an effect that is not
+    /// a wrapped plugin says so.
+    #[test]
+    fn sidechain_input_submenu() {
+        use os_flp::wrapper;
+        let mut a = app();
+        select(&mut a.state, 1, false);
+        track_mut(&mut a.state, 3).unwrap().routes = vec![1];
+        track_mut(&mut a.state, 2).unwrap().routes = vec![1, 0];
+        track_mut(&mut a.state, 2).unwrap().name = Some("Kick".into());
+        assert_eq!(inputs(&a.state, 1), [2, 3]);
+        let plugin = os_model::PluginRef { format: "clap".into(), name: "Comp".into(), path: "C:/Comp.clap".into(), ..Default::default() };
+        track_mut(&mut a.state, 1).unwrap().slots[0] = Some(os_model::SlotPlugin { name: wrapper::WRAPPER.into(), state: wrapper::encode(None, &plugin) });
+        let labels = |a: &App| sidechain_items(&a.state, 0).iter().map(|i| (i.label.to_string(), i.mark == Mark::Radio(true))).collect::<Vec<_>>();
+        assert_eq!(labels(&a), [("None".into(), true), ("1. Kick".into(), false), ("2. Insert 3".into(), false)]);
+        assert_eq!(run(&mut a, MCmd::SlotSidechain(0, 2)), None);
+        let state = |a: &App| track(&a.state, 1).unwrap().slots[0].as_ref().unwrap().state.clone();
+        assert_eq!(wrapper::input_ports(&state(&a)), [0, 2]);
+        assert_eq!(wrapper::decode(&state(&a)), Some(plugin));
+        assert_eq!(labels(&a)[2].1, true);
+        assert_eq!(crate::project_plugins::slot_ports(&a.state.project, 1, 0), (0, 2));
+        track_mut(&mut a.state, 1).unwrap().slots[1] = Some(os_model::SlotPlugin { name: "Fruity Limiter".into(), state: vec![] });
+        assert!(run(&mut a, MCmd::SlotSidechain(1, 1)).is_some());
     }
 
     // spec: ui/mixer-track-commands.md §1
@@ -1752,5 +1996,126 @@ mod tests {
         assert!(hit(&mut a, MHit::ClearPatternFilter).is_none());
         assert!(a.state.pattern_mixer_filter.is_none());
         assert_eq!(visible_tracks(&a.state), all);
+    }
+    /// Moved and deleted tracks take their effects to their new numbers through saves (spec: flp/events/mixer.md
+    /// "Removing tracks"): each slot's window record (event 212), marked here in the saved file with the track it was
+    /// saved on, follows its track, and the slots read back where the tracks went.
+    #[test]
+    fn moved_tracks_keep_their_effects_in_the_file() {
+        use os_flp::{ChunkBody, FlpFile, Value};
+        use os_model::SlotPlugin;
+        let mut a = app();
+        (a.state.file, a.state.path) = (None, None);
+        let fx = |name: &str, s: u8| Some(SlotPlugin { name: name.into(), state: vec![s; 4] });
+        track_mut(&mut a.state, 2).unwrap().slots[0] = fx("Test FX", 2);
+        track_mut(&mut a.state, 3).unwrap().slots[0] = fx("Test FX", 3);
+        track_mut(&mut a.state, 4).unwrap().slots[1] = fx("Other FX", 4);
+        let path = std::env::temp_dir().join(format!("lemon-mixer-moves-{}.flp", std::process::id()));
+        let saved = |a: &mut App| {
+            a.save_to(path.clone());
+            assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved")), "{:?}", a.state.message);
+        };
+        // The mixer's slot records (after the first track record, event 236): track, slot and mark (byte 40, which
+        // Lemon Studio does not read).
+        let records = || {
+            let file = FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
+            let ev = file.chunks.into_iter().find_map(|c| match c.body {
+                ChunkBody::Events(e) => Some(e),
+                _ => None,
+            });
+            let ev = ev.unwrap();
+            let first = ev.iter().position(|e| e.id == 236).unwrap();
+            let le = |d: &[u8], at: usize| u32::from_le_bytes(d[at..at + 4].try_into().unwrap());
+            ev[first..].iter().filter(|e| e.id == 212).filter_map(|e| e.data()).map(|d| (le(d, 0), le(d, 4), d[40])).collect::<Vec<_>>()
+        };
+        saved(&mut a);
+        let mut file = FlpFile::parse(&std::fs::read(&path).unwrap()).unwrap();
+        for c in &mut file.chunks {
+            if let ChunkBody::Events(ev) = &mut c.body {
+                for e in ev.iter_mut().filter(|e| e.id == 212) {
+                    if let Value::Var { data, .. } = &mut e.value {
+                        data[40] = data[0];
+                    }
+                }
+            }
+        }
+        std::fs::write(&path, file.to_bytes().unwrap()).unwrap();
+        assert_eq!(records(), vec![(2, 0, 2), (3, 0, 3), (4, 1, 4)]);
+        let mut a = App::new(None);
+        a.open(path.clone());
+        run(&mut a, MCmd::MoveRight(2));
+        saved(&mut a);
+        assert_eq!(records(), vec![(2, 0, 3), (3, 0, 2), (4, 1, 4)], "2 and 3 swap places with their effects");
+        // Saved over again (the file holds the tracks in their new order now): deleting 2 moves the later ones left.
+        run(&mut a, MCmd::Delete(2));
+        saved(&mut a);
+        assert_eq!(records(), vec![(2, 0, 2), (3, 1, 4)]);
+        let mut opened = App::new(None);
+        opened.open(path.clone());
+        let _ = std::fs::remove_file(&path);
+        let slots = |t: u16| track(&opened.state, t).unwrap().slots.clone();
+        assert_eq!((slots(2)[0].clone(), slots(3)[1].clone()), (fx("Test FX", 2), fx("Other FX", 4)));
+        assert!(slots(4).iter().all(Option::is_none));
+    }
+
+    /// Open audio editor and record: a Tesla set up as an audio logger (On play, 5 minutes, Append, slaved, armed). An
+    /// empty Tesla on the track is used; one holding a sample is left alone for a new one (spec:
+    /// plugins/tesla/README.md "Recording into Tesla from Lemon Studio").
+    #[test]
+    fn open_audio_editor_and_record_sets_up_a_logger() {
+        use tesla::state::{from_plugin_state, plugin_state, Saved, WHEN_ON_PLAY};
+        let mut a = app();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let logger = |b: &[u8]| from_plugin_state(b).map(|s| (s.rec.when, s.rec.max, s.rec.append, s.rec.slave, s.rec.armed));
+        let want = Some((WHEN_ON_PLAY, 3, true, true, true));
+        assert!(track_items(2).iter().any(|i| i.label == "Open audio editor and record" && i.enabled));
+        run(&mut a, MCmd::AudioEditorRecord(2));
+        let Some(FxReq::Create { track: 2, slot: 0, index, state: Some(st) }) = a.state.mixer.pending.first().cloned() else {
+            panic!("{:?}", a.state.mixer.pending)
+        };
+        assert_eq!(logger(&st), want);
+        // An empty Tesla already there (hosted with its defaults) is set up in place and shown.
+        a.state.mixer.pending.clear();
+        a.plugins.create_effect(2, 0, index, None).unwrap();
+        let key = crate::plugins::fx_key(2, 0);
+        assert_eq!(logger(&a.plugins.state(key).unwrap()).map(|r| r.4), Some(false));
+        run(&mut a, MCmd::AudioEditorRecord(2));
+        assert_eq!(a.state.mixer.pending, vec![FxReq::Show { track: 2, slot: 0 }]);
+        assert_eq!(logger(&a.plugins.state(key).unwrap()), want);
+        // One holding a sample: a new Tesla in the next free slot.
+        a.state.mixer.pending.clear();
+        let sample = tesla::sample::Sample::from_channels(44100, vec![vec![0.5; 100]], tesla::sample::Format::Int16);
+        assert!(a.plugins.set_state(key, &plugin_state(&Saved { sample, ..Saved::default() })));
+        run(&mut a, MCmd::AudioEditorRecord(2));
+        assert!(matches!(a.state.mixer.pending.as_slice(), [FxReq::Create { track: 2, slot: 1, state: Some(_), .. }]));
+        assert_eq!(from_plugin_state(&a.plugins.state(key).unwrap()).map(|s| s.sample.frames()), Some(100), "left alone");
+    }
+
+    /// Remove all (audio editor) instances, in Mixer options and TOOLS > Macros: every Tesla (a project's Edison slots
+    /// too) goes after a question; with none, a message (spec: plugins/tesla/README.md "Recording into Tesla from
+    /// Lemon Studio").
+    #[test]
+    fn remove_all_audio_editors_asks_first() {
+        let mut a = app();
+        a.plugins.effects = crate::plugins::builtin_effects();
+        let label = "Remove all (audio editor) instances";
+        assert!(options_menu(&a.state, 0.0, 0.0).items.iter().any(|i| i.label == label && i.enabled));
+        assert_eq!(run(&mut a, MCmd::RemoveTeslas).as_deref(), Some("No audio editors in the mixer"));
+        a.audio_editor(0, false);
+        a.audio_editor(3, false);
+        track_mut(&mut a.state, 4).unwrap().slots[2] = Some(os_model::SlotPlugin { name: crate::plugins::EDISON_FILE_NAME.into(), state: Vec::new() });
+        a.state.mixer.pending.clear();
+        assert_eq!(run(&mut a, MCmd::RemoveTeslas), None);
+        let Some(Popup { items, .. }) = a.state.playlist.popup.clone() else { panic!("no question") };
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_ref()).collect();
+        assert_eq!(labels, ["Remove 3 audio editors? Their audio is lost.", "Remove", "Cancel"]);
+        assert_eq!(teslas(&a.state).len(), 3, "nothing goes before the answer");
+        assert_eq!(run(&mut a, MCmd::RemoveTeslasNow).as_deref(), Some("Removed 3 audio editors"));
+        assert!(teslas(&a.state).is_empty());
+        assert_eq!(a.state.mixer.pending.iter().filter(|r| matches!(r, FxReq::Delete { .. })).count(), 3);
+        use crate::views::menus::{item_at, REMOVE_TESLAS_LABEL, TOOLS_MENU};
+        let i = (0..200).find(|&i| item_at(TOOLS_MENU, i).is_some_and(|it| it.label == REMOVE_TESLAS_LABEL)).expect("in TOOLS");
+        a.menu_item(TOOLS_MENU, i);
+        assert_eq!(a.state.message.as_deref(), Some("No audio editors in the mixer"));
     }
 }

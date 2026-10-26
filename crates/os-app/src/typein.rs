@@ -73,7 +73,7 @@ fn unit(t: Target) -> Unit {
         Target::Knob(KnobId::Swing | KnobId::SlotMix(..) | KnobId::ChanCutoff(_) | KnobId::ChanRes(_)) => Unit::Percent,
         Target::Knob(KnobId::MasterPitch) => Unit::Hz,
         // The equaliser's settings take the plain 0..1 position for now.
-        Target::Param(..) | Target::Knob(KnobId::Eq(..) | KnobId::Strum(_) | KnobId::Arp(_)) => Unit::Plain,
+        Target::Param(..) | Target::Knob(KnobId::Eq(..) | KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_)) => Unit::Plain,
     }
 }
 
@@ -162,13 +162,17 @@ fn set(s: &mut State, t: Target, v: f64) {
             s.set_knob(k, v as f32);
         }
         Target::Fader(m) => {
+            crate::history::fader(s, m);
             if let Some(t) = crate::mixer::track_mut(s, m) {
                 t.volume = Some(v.clamp(0.0, 1.0));
                 s.piano.dirty = true;
             }
         }
         Target::Param(key, index) => {
-            if !crate::params::set_param_value(s, key, index, v) {
+            let before = crate::params::param_value(s, key, index);
+            if crate::params::set_param_value(s, key, index, v) {
+                crate::history::param(s, key, index, before, v);
+            } else {
                 s.message = Some("The plugin did not take the value".into());
             }
         }

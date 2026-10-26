@@ -30,7 +30,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSBackingStoreType, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSPanel, NSResponder, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSBackingStoreType, NSCursor, NSCursorFrameResizeDirections, NSCursorFrameResizePosition, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSPanel, NSResponder, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
     NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CFRetained, CGFloat, CGPoint, CGRect, CGSize};
@@ -169,6 +169,15 @@ define_class!(
         #[unsafe(method(acceptsFirstMouse:))]
         fn accepts_first_mouse(&self, _e: Option<&NSEvent>) -> bool {
             true
+        }
+
+        /// A resizable editor's frame edges show resize cursors.
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            let Some(f) = self.ivars().upgrade() else { return };
+            for (r, right, bottom) in super::edge_rects(&f.state.borrow()) {
+                self.addCursorRect_cursor(rect(f64::from(r.x), f64::from(r.y), f64::from(r.w), f64::from(r.h)), &resize_cursor(right, bottom));
+            }
         }
 
         #[unsafe(method(wantsUpdateLayer))]
@@ -482,7 +491,11 @@ impl FrameWindow {
         if self.detached() {
             return;
         }
+        let changed = self.f.state.borrow().clip.as_ref().is_none_or(|c| c.0 != work);
         self.f.state.borrow_mut().clip = Some((work, covers.to_vec()));
+        if changed {
+            self.f.refit();
+        }
         self.f.apply_clip();
     }
 
@@ -525,6 +538,19 @@ impl FrameWindow {
         }
     }
 
+    /// The plugin's smallest editor size when the frame's edges may resize it (`None`: a fixed size).
+    pub fn set_resizable(&self, min: Option<(f32, f32)>) {
+        let mut st = self.f.state.borrow_mut();
+        if st.resize_min != min {
+            st.resize_min = min;
+            if min.is_none() {
+                st.sizing = None;
+            }
+            drop(st);
+            self.f.edges_changed();
+        }
+    }
+
     /// The plugin changed its page itself.
     pub fn set_page(&self, page: usize) {
         let mut st = self.f.state.borrow_mut();
@@ -555,6 +581,13 @@ impl FrameWindow {
     /// The backing scale the frame is drawn at (2 on Retina screens).
     pub fn scale(&self) -> f32 {
         self.f.scale.get()
+    }
+
+    /// A point of the editor (logical px from its top-left) on the screen (screen px): where a menu the plugin asked
+    /// for opens (spec: plugins/vst3-hosting.md §9).
+    pub fn editor_to_screen(&self, x: f32, y: f32) -> (i32, i32) {
+        let ay = self.f.state.borrow().area_y();
+        self.f.to_screen(BORDER + x, ay + y)
     }
 
     /// Redraws the frame at another backing scale (same size in points). The editor inside is the caller's: it reopens
@@ -714,7 +747,15 @@ impl Frame {
         self.canvas.borrow_mut().resize(px(fw), px(fh), k);
         self.state.borrow_mut().clip_key = None;
         self.apply_clip();
+        self.edges_changed();
         self.view.setNeedsDisplay(true);
+    }
+
+    /// The resize cursors' places moved (a new size), or there are none now.
+    fn edges_changed(&self) {
+        if let Some(w) = self.view.window() {
+            w.invalidateCursorRectsForView(&self.view);
+        }
     }
 
     /// Keeps the editor's views at the area's top-left, as on Windows and X11. The area is not flipped, so a view in it
@@ -880,6 +921,7 @@ impl Frame {
                 self.state.borrow_mut().moving = Some((cx, cy, wx, wy));
                 self.view.setNeedsDisplay(true);
             }
+            Reply::Maximize => self.toggle_max(),
             Reply::Minimize => {
                 // A docked window hides (its channel's name button shows it again); a borderless panel cannot go to
                 // the Dock, so a detached one hides too.
@@ -891,12 +933,73 @@ impl Frame {
         }
     }
 
+    /// Maximizes the frame to its workspace, or restores it.
+    fn toggle_max(&self) {
+        let target = self.max_target();
+        let at = self.state.borrow_mut().maximize(self.top_left(), target);
+        if let Some(at) = at {
+            self.place(at);
+            self.apply_clip();
+            self.front();
+        }
+    }
+
+    /// What a maximized frame fills: docked, the app's workspace; detached, its screen less the menu bar and the Dock.
+    /// Its top-left (screen px) and size (points).
+    fn max_target(&self) -> Option<((i32, i32), (f32, f32))> {
+        let k = self.main_scale();
+        if let Some(panel) = self.panel.borrow().as_ref() {
+            let v = panel.screen()?.visibleFrame();
+            let at = to_px(self.mtm, NSPoint::new(v.origin.x, v.origin.y + v.size.height), k);
+            return Some((at, (v.size.width as f32, v.size.height as f32)));
+        }
+        let owner = self.owner.as_deref()?;
+        let work = self.state.borrow().clip.as_ref()?.0;
+        let p = owner_to_screen(owner, NSPoint::new(f64::from(work[0]) / k, f64::from(work[1]) / k));
+        let size = (((work[2] - work[0]) as f64 / k) as f32, ((work[3] - work[1]) as f64 / k) as f32);
+        Some((to_px(self.mtm, p, k), size))
+    }
+
+    /// A maximized docked frame keeps filling the workspace when it changes (the browser shown or hidden, the main
+    /// window resized).
+    fn refit(&self) {
+        if self.panel.borrow().is_some() || self.state.borrow().maxed.is_none() {
+            return;
+        }
+        let Some((at, size)) = self.max_target() else { return };
+        let fill = {
+            let mut st = self.state.borrow_mut();
+            let fill = st.fill(size);
+            if let Some((w, h)) = fill.filter(|&(w, h)| (w as f32, h as f32) != st.editor) {
+                st.events.push(FrameEvent::Resize(w, h));
+                os_clap::wake();
+            }
+            fill
+        };
+        if fill.is_some() && at != self.top_left() {
+            self.place(at);
+        }
+    }
+
     /// A press inside the frame (its editor included): it goes to the front of the app's windows.
     fn clicked(&self) {
         self.front();
         self.state.borrow_mut().events.push(FrameEvent::Raise);
         os_clap::wake();
     }
+}
+
+/// The cursor over a frame edge: the system's frame-resize cursors (macOS 15 and later), else the plain ones.
+fn resize_cursor(right: bool, bottom: bool) -> Retained<NSCursor> {
+    let position = match (right, bottom) {
+        (true, true) => NSCursorFrameResizePosition::BottomRight,
+        (true, false) => NSCursorFrameResizePosition::Right,
+        _ => NSCursorFrameResizePosition::Bottom,
+    };
+    if <NSCursor as objc2::ClassType>::class().responds_to(objc2::sel!(frameResizeCursorFromPosition:inDirections:)) {
+        return NSCursor::frameResizeCursorFromPosition_inDirections(position, NSCursorFrameResizeDirections::All);
+    }
+    if bottom && !right { NSCursor::resizeUpDownCursor() } else { NSCursor::resizeLeftRightCursor() }
 }
 
 /// A view as the owner of its tracking area (it gets the mouse moves).

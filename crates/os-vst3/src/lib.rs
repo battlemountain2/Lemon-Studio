@@ -10,6 +10,7 @@
 //! methods, under the instance's mutex.
 // spec: plugins/vst3-hosting.md
 
+mod context_menu;
 mod host;
 pub mod preset;
 
@@ -26,8 +27,8 @@ use vst3_sys::base::{kResultOk, kResultTrue, IPluginBase, IPluginFactory, IPlugi
 use vst3_sys::gui::{IPlugView, IPlugViewContentScaleSupport, ViewRect};
 use vst3_sys::utils::SharedVstPtr;
 use vst3_sys::vst::{
-    AudioBusBuffers, BusInfo, Event, EventData, IAudioProcessor, IComponent, IConnectionPoint, IEditController, IMidiMapping, IUnitInfo,
-    NoteExpressionValueEvent, NoteOffEvent, NoteOnEvent, ParameterInfo, ProcessContext, ProcessData, ProcessSetup, UnitInfo,
+    AudioBusBuffers, BusInfo, Event, EventData, IAudioProcessor, IComponent, IConnectionPoint, IEditController, IMidiMapping, INoteExpressionController,
+    IUnitInfo, NoteExpressionTypeInfo, NoteExpressionValueEvent, NoteOffEvent, NoteOnEvent, ParameterInfo, ProcessContext, ProcessData, ProcessSetup, UnitInfo,
 };
 use vst3_sys::{c_void, ComInterface, VstPtr, IID};
 
@@ -509,6 +510,10 @@ pub struct Plugin {
     /// The parameter the controller maps each MIDI controller to (IMidiMapping, MIDI channel 1): controllers 0..127,
     /// then channel pressure (128) and pitch bend (129); `u32::MAX` = none (spec: ui/midi-settings.md §4).
     midi_map: Vec<u32>,
+    /// Glides as pitch bend (through `midi_map`) for a plug-in whose controller lists no tuning note expression (spec:
+    /// audio/channel-voices.md); `None`: glides are tuning expressions. `bend_range` survives a new reading.
+    bend: Option<os_engine::TuningBend>,
+    bend_range: u32,
     /// Automation values (frame offset, id, normalized) for the next process call.
     auto: Vec<(u32, u32, f64)>,
     /// Unit id -> group path (IUnitInfo).
@@ -595,6 +600,8 @@ impl Plugin {
                 pending_since: None,
                 param_ids: Vec::new(),
                 midi_map: Vec::new(),
+                bend: None,
+                bend_range: os_engine::instrument::DEFAULT_BEND_RANGE,
                 auto: Vec::with_capacity(MAX_AUTO),
                 units: Vec::new(),
                 latency: 0,
@@ -641,7 +648,8 @@ impl Plugin {
         &self.desc
     }
 
-    /// Bus arrangements and activation (spec §4.5): stereo main buses, the first event input.
+    /// Bus arrangements and activation (spec §4.5): stereo main buses, the first auxiliary audio input (a sidechain,
+    /// spec: audio/sidechain.md "Hosted plugins' input buses"), the first event input.
     fn setup_buses(&mut self) {
         unsafe {
             let c = &self.component;
@@ -661,8 +669,8 @@ impl Plugin {
             if debug() && r != kResultOk {
                 eprintln!("[os-vst3] {} keeps its own bus arrangement", self.desc.name);
             }
-            if n_in > 0 {
-                c.activate_bus(AUDIO, INPUT, 0, 1);
+            for b in 0..n_in.min(2) {
+                c.activate_bus(AUDIO, INPUT, b as i32, 1);
             }
             if n_out > 0 {
                 c.activate_bus(AUDIO, OUTPUT, 0, 1);
@@ -730,12 +738,20 @@ impl Plugin {
     fn refresh_param_ids(&mut self) {
         self.param_ids.clear();
         let Some(c) = &self.controller else { return };
+        // The parameters whose context menus get "Create automation clip" (spec §9).
+        let mut automatable = Vec::new();
         unsafe {
             for i in 0..c.get_parameter_count() {
                 let mut info: ParameterInfo = std::mem::zeroed();
                 let ok = c.get_parameter_info(i, &mut info) == kResultOk;
                 self.param_ids.push(if ok { (info.id, info.step_count.max(0)) } else { (u32::MAX, 0) });
+                if ok && info.flags & CAN_AUTOMATE != 0 {
+                    automatable.push(info.id);
+                }
             }
+        }
+        if let Ok(mut a) = self.shared.automatable.lock() {
+            *a = automatable;
         }
         self.midi_map.clear();
         if let Some(m) = c.cast::<dyn IMidiMapping>() {
@@ -745,6 +761,19 @@ impl Plugin {
                 self.midi_map.push(if ok { id } else { u32::MAX });
             }
         }
+        // A plug-in that lists the tuning expression takes glides as one; another glides by pitch bend when it maps
+        // pitch bend to a parameter, else not at all.
+        let tuning = c.cast::<dyn INoteExpressionController>().is_some_and(|x| unsafe {
+            (0..x.get_note_expression_count(0, 0)).any(|i| {
+                let mut info: NoteExpressionTypeInfo = std::mem::zeroed();
+                x.get_note_expression_info(0, 0, i, &mut info) == kResultOk && info.type_id == TUNING_TYPE_ID
+            })
+        });
+        self.bend = (!tuning && self.midi_map.get(129).is_some_and(|&id| id != u32::MAX)).then(|| {
+            let mut b = os_engine::TuningBend::default();
+            b.set_range(self.bend_range);
+            b
+        });
     }
 
     /// Activates at `rate` (UI thread; spec §4.5); reactivates when the rate changes.
@@ -1012,6 +1041,8 @@ impl Plugin {
     }
 
     pub fn close_editor(&mut self) {
+        // A menu the editor asked the host to pop up goes first: its targets are the editor's (spec §9).
+        context_menu::drop_popup(&self.shared);
         if let Some(v) = self.view.take() {
             unsafe {
                 v.removed();
@@ -1101,8 +1132,9 @@ impl Plugin {
         }
     }
 
-    /// Processes up to `max_frames` frames: queued notes inside them, waiting parameter changes, the given audio.
-    fn process_chunk(&mut self, left: &mut [f32], right: &mut [f32], input: Option<(&mut [f32], &mut [f32])>) {
+    /// Processes up to `max_frames` frames: queued notes inside them, waiting parameter changes, the given audio, and
+    /// `key` in the first auxiliary input bus.
+    fn process_chunk(&mut self, left: &mut [f32], right: &mut [f32], input: Option<(&mut [f32], &mut [f32])>, key: Option<(&[f32], &[f32])>) {
         let n = left.len();
         let max = self.max_frames as usize;
         // Notes of this chunk; later ones move on.
@@ -1149,6 +1181,17 @@ impl Plugin {
                     // SAFETY: scratch holds max_frames frames for every channel.
                     let s = unsafe { base.add(k * max) };
                     unsafe { std::ptr::write_bytes(s, 0, n) };
+                    // The sidechain: the key's two sides, a mono bus their average.
+                    if let Some((kl, kr)) = key.filter(|_| b == 1) {
+                        // SAFETY: as above, `n` frames.
+                        let d = unsafe { std::slice::from_raw_parts_mut(s, n) };
+                        match (ch, c) {
+                            (1, _) => d.iter_mut().zip(kl.iter().zip(kr)).for_each(|(m, (a, b))| *m = (a + b) * 0.5),
+                            (_, 0) => d.copy_from_slice(&kl[..n]),
+                            (_, 1) => d.copy_from_slice(&kr[..n]),
+                            _ => {}
+                        }
+                    }
                     s
                 });
                 k += 1;
@@ -1349,6 +1392,20 @@ impl os_host::Plugin for Plugin {
         self.shared.events.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
     }
 
+    /// "Create automation clip" picked in a context menu, from the plug-in's own menu or the host's popup (spec §9).
+    fn take_automation_requests(&mut self) -> Vec<u32> {
+        self.shared.automate.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+    }
+
+    /// The menu the plug-in asked the host to pop up (spec §9), at its view point in pixels.
+    fn take_menu(&mut self) -> Option<os_host::Menu> {
+        context_menu::take(&self.shared, self.editor_scale)
+    }
+
+    fn menu_done(&mut self, id: u64, pick: Option<usize>) {
+        context_menu::done(&self.shared, id, pick);
+    }
+
     fn attention(&self) -> Option<Arc<os_host::Attention>> {
         Some(self.shared.attention.clone())
     }
@@ -1382,6 +1439,9 @@ impl os_engine::Instrument for Plugin {
             }
         }
         self.ledger.clear();
+        if let Some(m) = self.bend.as_mut().and_then(|b| b.reset()) {
+            os_engine::Instrument::midi(self, 0, m);
+        }
         // Automation still waiting is a value the parameter should have: it is kept for the next block / flush.
         if self.processing {
             unsafe { self.processor.set_processing(0) };
@@ -1390,6 +1450,9 @@ impl os_engine::Instrument for Plugin {
     }
 
     fn note_on(&mut self, offset: u32, key: u8, velocity: f32) {
+        if let Some(m) = self.bend.as_mut().and_then(|b| b.note_on(key)) {
+            os_engine::Instrument::midi(self, offset, m);
+        }
         self.queue.push(Note { time: offset, kind: NoteKind::On, key, velocity: velocity.clamp(0.0, 1.0) });
     }
 
@@ -1416,9 +1479,24 @@ impl os_engine::Instrument for Plugin {
         self.shared.attention.raise();
     }
 
-    /// Portamento glides (spec: audio/channel-voices.md): the tuning note expression of the key's sounding note.
+    /// Portamento glides (spec: audio/channel-voices.md): the tuning note expression of the key's sounding note, or
+    /// pitch bend for a plug-in without one.
     fn tune(&mut self, offset: u32, key: u8, semitones: f32) {
-        self.queue.push(Note { time: offset, kind: NoteKind::Tune, key, velocity: semitones });
+        match &mut self.bend {
+            Some(b) => {
+                if let Some(m) = b.tune(key, semitones) {
+                    os_engine::Instrument::midi(self, offset, m);
+                }
+            }
+            None => self.queue.push(Note { time: offset, kind: NoteKind::Tune, key, velocity: semitones }),
+        }
+    }
+
+    fn set_bend_range(&mut self, semitones: u32) {
+        self.bend_range = semitones;
+        if let Some(b) = &mut self.bend {
+            b.set_range(semitones);
+        }
     }
 
     fn param(&mut self, offset: u32, index: u32, value: f64) {
@@ -1448,7 +1526,7 @@ impl os_engine::Instrument for Plugin {
         while at < left.len() {
             let n = (left.len() - at).min(max);
             self.set_context(song.map(|s| s.advanced(at as u64, rate)));
-            self.process_chunk(&mut left[at..at + n], &mut right[at..at + n], None);
+            self.process_chunk(&mut left[at..at + n], &mut right[at..at + n], None, None);
             at += n;
         }
         self.debug_level(rate, left, right);
@@ -1459,6 +1537,29 @@ impl os_engine::Instrument for Plugin {
 // passes through unchanged.
 impl os_engine::HostedEffect for Plugin {
     fn process_fx(&mut self, rate: u32, left: &mut [f32], right: &mut [f32]) {
+        self.effect(rate, left, right, None);
+    }
+
+    fn process_fx_keyed(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], key: (&[f32], &[f32])) {
+        self.effect(rate, left, right, Some(key));
+    }
+
+    fn reset_fx(&mut self) {
+        os_engine::Instrument::reset(self);
+    }
+
+    fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
+        self.automate(offset, index, value);
+    }
+
+    fn transport_fx(&mut self, info: &os_engine::TransportInfo) {
+        self.song = Some(*info);
+    }
+}
+
+impl Plugin {
+    /// An effect's block: `left` / `right` processed in place, `key` for its first auxiliary input bus.
+    fn effect(&mut self, rate: u32, left: &mut [f32], right: &mut [f32], key: Option<(&[f32], &[f32])>) {
         if self.rate != rate {
             self.wanted_rate.store(rate, Ordering::Release);
             self.shared.attention.raise();
@@ -1477,27 +1578,17 @@ impl os_engine::HostedEffect for Plugin {
             ir.clear();
             il.extend_from_slice(&left[at..at + n]);
             ir.extend_from_slice(&right[at..at + n]);
-            self.process_chunk(&mut left[at..at + n], &mut right[at..at + n], Some((&mut il[..], &mut ir[..])));
+            let key = key.map(|(a, b)| (&a[at..at + n], &b[at..at + n]));
+            self.process_chunk(&mut left[at..at + n], &mut right[at..at + n], Some((&mut il[..], &mut ir[..])), key);
             at += n;
         }
         self.fx_in = (il, ir);
     }
-
-    fn reset_fx(&mut self) {
-        os_engine::Instrument::reset(self);
-    }
-
-    fn param_fx(&mut self, offset: u32, index: u32, value: f64) {
-        self.automate(offset, index, value);
-    }
-
-    fn transport_fx(&mut self, info: &os_engine::TransportInfo) {
-        self.song = Some(*info);
-    }
 }
 
 impl Drop for Plugin {
-    /// Teardown in the documented order (spec §4.7).
+    /// Teardown in the documented order (spec §4.7). Closing the editor first also drops the host's references to a
+    /// popup menu's targets (spec §9).
     fn drop(&mut self) {
         self.close_editor();
         self.deactivate();

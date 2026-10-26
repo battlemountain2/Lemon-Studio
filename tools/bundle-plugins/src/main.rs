@@ -25,6 +25,16 @@ const PLUGINS: &[(&str, &str, &str)] = &[
     ("lemon-wavetable", "lemon_wavetable", "Lemon Wavetable"),
     ("lemon-limiter", "lemon_limiter", "Lemon Limiter"),
     ("lemon-reverb", "lemon_reverb", "Lemon Reverb"),
+    ("lemon-delay", "lemon_delay", "Lemon Delay"),
+    ("lemon-soft-clipper", "lemon_soft_clipper", "Lemon Soft Clipper"),
+    ("lemon-fast-distortion", "lemon_fast_distortion", "Lemon Fast Distortion"),
+    ("lemon-balance", "lemon_balance", "Lemon Balance"),
+    ("lemon-stereo-enhancer", "lemon_stereo_enhancer", "Lemon Stereo Enhancer"),
+    ("lemon-transient-processor", "lemon_transient_processor", "Lemon Transient Processor"),
+    ("lemon-chorus", "lemon_chorus", "Lemon Chorus"),
+    ("lemon-stereo-shaper", "lemon_stereo_shaper", "Lemon Stereo Shaper"),
+    ("citrus", "citrus", "Citrus"),
+    ("tesla", "tesla", "Tesla"),
 ];
 /// The plugins' earlier display names: an install removes bundles left under them (same plugin ids, so a DAW would
 /// list each plugin twice).

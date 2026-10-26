@@ -46,7 +46,7 @@ impl App {
             Action::BrowserMenu => {
                 let (x, y) = view::menu_at(s);
                 let open = s.playlist.popup.as_ref().is_some_and(|p| p.x == x && p.y == y);
-                s.playlist.popup = if open { None } else { Some(Popup { x, y, items: options_menu(s), sub: None }) };
+                s.playlist.popup = if open { None } else { Some(Popup { x, y, items: options_menu(s), sub: None, scroll: [0; 2] }) };
             }
             Action::BrowserSearch => s.browser_search_focus = true,
             Action::BrowserRow(i) => {
@@ -317,6 +317,11 @@ impl App {
         if !started {
             return;
         }
+        // A preset goes into the plugin under the mouse, or a new instance of its plugin (spec: plugins/presets.md).
+        if let Item::Preset(path) = &item {
+            self.state.message = crate::presets::dropped(self, std::path::Path::new(path));
+            return;
+        }
         // Plugin windows float above the main window: a sample released over one goes into that plugin.
         #[cfg(any(windows, target_os = "macos"))]
         if let Item::Sample(path) = &item {
@@ -402,7 +407,7 @@ impl App {
                     self.state.message = msg;
                 }
             }
-            Item::None | Item::File(_) | Item::History(_) => {}
+            Item::None | Item::File(_) | Item::History(_) | Item::Preset(_) => {}
         }
     }
 
@@ -428,7 +433,20 @@ impl App {
         let s = &mut self.state;
         let Some(row) = view::rows(s).into_iter().nth(i) else { return false };
         select(s, &row.key);
-        s.playlist.popup = Some(Popup { x, y, items: row_menu(s, &row), sub: None });
+        s.playlist.popup = Some(Popup { x, y, items: row_menu(s, &row), sub: None, scroll: [0; 2] });
+        self.invalidate();
+        true
+    }
+
+    /// Middle click on row `i` (spec §7): selects it, and a sample goes into the selected channel as the row menu's
+    /// "Send to selected channel" sends it (§8). Returns whether there was a row.
+    pub(crate) fn browser_row_middle(&mut self, i: usize) -> bool {
+        let s = &mut self.state;
+        let Some(row) = view::rows(s).into_iter().nth(i) else { return false };
+        select(s, &row.key);
+        if let Item::Sample(path) = &row.item {
+            s.message = send_sample(s, path, &row.label);
+        }
         self.invalidate();
         true
     }
@@ -707,6 +725,12 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
         Item::Generator(index) => items.push(PItem::new("Add to channel rack", Cmd::Plugin(crate::plugin_menu::PlugCmd::Generator { index, after: None }))),
         Item::Effect(index) => items.push(PItem::new("Add to selected mixer track", Cmd::Plugin(crate::plugin_menu::PlugCmd::Effect { index, slot: None }))),
         Item::History(_) => items.push(r("Go to this step", RowCmd::Activate)),
+        // Into the selected channel's plugin (spec: plugins/presets.md "Browser").
+        Item::Preset(ref p) => {
+            let key = s.selected_channel;
+            let it = PItem::new("Load into selected channel", Cmd::Preset(crate::presets::PCmd::Load(key, p.into())));
+            items.push(if s.hosted_rows.contains(&key) { it } else { it.off() });
+        }
         Item::None | Item::File(_) | Item::Param(..) => {}
     }
     if let Some(path) = &row.path {
@@ -776,7 +800,7 @@ fn reread(s: &mut crate::app::State) {
 }
 
 /// Select a row and record it in the navigation history (spec §4).
-fn select(s: &mut crate::app::State, key: &str) {
+pub(crate) fn select(s: &mut crate::app::State, key: &str) {
     s.browser_sel = Some(key.to_string());
     if s.browser_hist.get(s.browser_hist_pos).map(String::as_str) != Some(key) {
         let keep = if s.browser_hist.is_empty() { 0 } else { s.browser_hist_pos + 1 };

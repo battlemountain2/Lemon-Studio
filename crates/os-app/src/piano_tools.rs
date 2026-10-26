@@ -2,25 +2,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Piano-roll editing commands: quantize, legato, chop, glue, discard lengths, randomize, the Strum and Arpeggiate dialogs,
-//! duplicate, mute, ghost channels, time markers, channel cycling and the selection keys, with the Tools menu that
-//! lists them.
+//! Piano-roll editing commands: quantize, legato, chop, glue, discard lengths, the Strum, Arpeggiate, Flam, Claw
+//! machine, Limit, Flip, Scale levels, LFO, Quantize, Chop and Randomize dialogs, duplicate, mute, ghost channels, time markers, channel cycling and the
+//! selection keys, with the Tools menu that lists them.
 // spec: ui/piano-roll.md §3a, §10a, §11; ui/piano-keys.md
 
 use os_model::Note;
 
 use crate::app::{App, State};
-use crate::piano::{self, Lane};
+use crate::piano;
 use crate::playlist::{Cmd, Mark, PItem, Popup};
-
-/// What the Randomize presets change (§11).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Rand {
-    /// A note property, by the event panel lane that edits it.
-    Prop(Lane),
-    /// Start times, up to the percentage of one step either way.
-    Start,
-}
 
 /// A piano-roll command (keyboard shortcut or Tools menu entry). Note values are `1/n` notes.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -28,8 +19,6 @@ pub enum NCmd {
     /// Move starts (and lengths unless `starts_only`) `strength` percent of the way to the snap grid.
     Quantize { strength: u8, starts_only: bool },
     Legato,
-    /// Cut notes at every `1/n` note line inside them.
-    Chop(u32),
     /// Cut notes into snap-unit pieces from their own starts (Ctrl+U, spec: ui/piano-keys.md §4 rule 6; one-tick pieces
     /// without a unit, ui/piano-snap.md §6).
     QuickChop,
@@ -42,12 +31,12 @@ pub enum NCmd {
     Strum,
     /// Open the Arpeggiate dialog (spec: ui/piano-arpeggiate.md).
     Arpeggiate,
-    /// Randomize by up to `pct` percent of the range.
-    Randomize(Rand, u8),
+    /// Open one of the tool window's dialogs (spec: ui/piano-flam.md, ui/piano-flip.md, ui/piano-level-scaling.md,
+    /// ui/piano-limit.md, ui/piano-claw.md, ui/piano-lfo.md, ui/piano-quantize.md, ui/piano-chop.md,
+    /// ui/piano-randomize.md).
+    Dialog(crate::piano_dlg::Tool),
     Ghosts,
     AddMarker,
-    /// Open one of the tool submenus at the mouse (Alt+Q / U / R).
-    Menu(Sub),
     /// The magnet button's menus (spec: ui/piano-snap.md): the snap setting, a stock length for new notes.
     Snap(crate::snap::EditorSnap),
     StockLength(crate::playlist::Snap),
@@ -55,52 +44,18 @@ pub enum NCmd {
     Target(usize),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sub {
-    Quantize,
-    Chop,
-    Randomize,
-}
-
 fn item(label: &'static str, c: NCmd) -> PItem {
     PItem::new(label, Cmd::Piano(c))
 }
 
-fn sub_items(sub: Sub) -> Vec<PItem> {
-    use NCmd::*;
-    match sub {
-        Sub::Quantize => vec![
-            item("Start times, 100 %", Quantize { strength: 100, starts_only: true }),
-            item("Start times, 75 %", Quantize { strength: 75, starts_only: true }),
-            item("Start times, 50 %", Quantize { strength: 50, starts_only: true }),
-            item("Start times, 25 %", Quantize { strength: 25, starts_only: true }),
-            PItem::sep(),
-            item("Start times and lengths, 100 %", Quantize { strength: 100, starts_only: false }),
-            item("Start times and lengths, 50 %", Quantize { strength: 50, starts_only: false }),
-        ],
-        Sub::Chop => vec![
-            item("1/32 note", Chop(32)),
-            item("1/16 note (step)", Chop(16)),
-            item("1/8 note", Chop(8)),
-            item("1/4 note (beat)", Chop(4)),
-            item("1/2 note", Chop(2)),
-        ],
-        Sub::Randomize => vec![
-            item("Velocity, a little (10 %)", Randomize(Rand::Prop(Lane::Velocity), 10)),
-            item("Velocity, a lot (30 %)", Randomize(Rand::Prop(Lane::Velocity), 30)),
-            item("Panning (25 %)", Randomize(Rand::Prop(Lane::Pan), 25)),
-            item("Filter cutoff (25 %)", Randomize(Rand::Prop(Lane::Cutoff), 25)),
-            item("Filter resonance (25 %)", Randomize(Rand::Prop(Lane::Resonance), 25)),
-            item("Fine pitch (10 %)", Randomize(Rand::Prop(Lane::FinePitch), 10)),
-            item("Start times (25 % of a step)", Randomize(Rand::Start, 25)),
-        ],
-    }
-}
-
 /// The toolbar's Tools menu (§11).
 pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
+    use crate::piano_dlg::Tool;
     use NCmd::*;
     let items = vec![
+        PItem::head("File"),
+        PItem::new("Import MIDI file...", Cmd::MidiImport(true)),
+        PItem::new("Export as MIDI file...", Cmd::MidiExport(true)),
         PItem::head("Edit"),
         item("Duplicate", Duplicate).key("Ctrl+B"),
         item("Glue", Glue).key("Ctrl+G"),
@@ -108,18 +63,24 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::head("Tools"),
         item("Quick quantize", Quantize { strength: 100, starts_only: false }).key("Ctrl+Q"),
         item("Quick quantize start times", Quantize { strength: 100, starts_only: true }).key("Shift+Q"),
-        PItem::sub("Quantize", sub_items(Sub::Quantize)).key("Alt+Q"),
+        item("Quantize...", Dialog(Tool::Quantize)).key("Alt+Q"),
         item("Quick legato", Legato).key("Ctrl+L"),
         item("Quick chop", QuickChop).key("Ctrl+U"),
-        PItem::sub("Chop", sub_items(Sub::Chop)).key("Alt+U"),
+        item("Chop...", Dialog(Tool::Chop)).key("Alt+U"),
         item("Strum...", Strum).key("Alt+S"),
         item("Arpeggiate...", Arpeggiate).key("Alt+A"),
-        PItem::sub("Randomize", sub_items(Sub::Randomize)).key("Alt+R"),
+        item("Flam...", Dialog(Tool::Flam)).key("Alt+F"),
+        item("Claw machine...", Dialog(Tool::Claw)).key("Alt+W"),
+        item("Limit...", Dialog(Tool::Limit)).key("Alt+K"),
+        item("Flip...", Dialog(Tool::Flip)).key("Alt+Y"),
+        item("Randomize...", Dialog(Tool::Randomize)).key("Alt+R"),
+        item("Scale levels...", Dialog(Tool::Levels)).key("Alt+X"),
+        item("LFO...", Dialog(Tool::Lfo)).key("Alt+O"),
         PItem::head("View"),
         item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
         item("Add time marker", AddMarker).key("Alt+T"),
     ];
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// The keys a held key repeats in the piano roll (spec: ui/piano-keys.md §4 rule 1): Shift / Ctrl / Alt + arrows (not
@@ -150,11 +111,17 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if ctrl && !alt && is(c, "b") => NCmd::Duplicate,
         Key::Character(c) if shift && !ctrl && !alt && is(c, "d") => NCmd::DiscardLengths,
         Key::Character(c) if alt && !ctrl && is(c, "m") => NCmd::Mute(!shift),
-        Key::Character(c) if alt && !ctrl && is(c, "q") => NCmd::Menu(Sub::Quantize),
-        Key::Character(c) if alt && !ctrl && is(c, "u") => NCmd::Menu(Sub::Chop),
+        Key::Character(c) if alt && !ctrl && is(c, "q") => NCmd::Dialog(crate::piano_dlg::Tool::Quantize),
+        Key::Character(c) if alt && !ctrl && is(c, "u") => NCmd::Dialog(crate::piano_dlg::Tool::Chop),
         Key::Character(c) if alt && !ctrl && is(c, "s") => NCmd::Strum,
         Key::Character(c) if alt && !ctrl && is(c, "a") => NCmd::Arpeggiate,
-        Key::Character(c) if alt && !ctrl && is(c, "r") => NCmd::Menu(Sub::Randomize),
+        Key::Character(c) if alt && !ctrl && is(c, "f") => NCmd::Dialog(crate::piano_dlg::Tool::Flam),
+        Key::Character(c) if alt && !ctrl && is(c, "w") => NCmd::Dialog(crate::piano_dlg::Tool::Claw),
+        Key::Character(c) if alt && !ctrl && is(c, "k") => NCmd::Dialog(crate::piano_dlg::Tool::Limit),
+        Key::Character(c) if alt && !ctrl && is(c, "y") => NCmd::Dialog(crate::piano_dlg::Tool::Flip),
+        Key::Character(c) if alt && !ctrl && is(c, "x") => NCmd::Dialog(crate::piano_dlg::Tool::Levels),
+        Key::Character(c) if alt && !ctrl && is(c, "o") => NCmd::Dialog(crate::piano_dlg::Tool::Lfo),
+        Key::Character(c) if alt && !ctrl && is(c, "r") => NCmd::Dialog(crate::piano_dlg::Tool::Randomize),
         Key::Character(c) if alt && !ctrl && is(c, "v") => NCmd::Ghosts,
         Key::Character(c) if alt && !ctrl && !shift && is(c, "t") => NCmd::AddMarker,
         Key::Character(c) if ctrl && !alt && is(c, "d") => {
@@ -323,16 +290,13 @@ pub fn target_menu(s: &State, x: f32, y: f32) -> Popup {
     }
     items.push(PItem::sep());
     items.push(PItem::not_yet("Auto locate"));
-    Popup { x, y, items, sub: None }
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
 /// Run a command; returns a status message.
 pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
     app.state.playlist.popup = None;
     let s = &mut app.state;
-    let ppq = u32::from(s.project.ppq.max(4));
-    let step = ppq / 4;
-    let ticks = |n: u32| (ppq * 4 / n.max(1)).max(1);
     // Quick quantize, Discard lengths and Quick chop use the piano roll's snap (spec: ui/piano-snap.md §6,
     // ui/global-snap.md §3).
     let unit = crate::piano_snap::unit(s);
@@ -348,7 +312,6 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
             let end = piano::pattern_end(s);
             done(apply(s, |_, ns| legato(ns, end)), "legato")
         }
-        NCmd::Chop(n) => done(apply(s, |_, ns| chop(ns, ticks(n))), "chopped"),
         NCmd::QuickChop => done(apply(s, |_, ns| chop_from_start(ns, unit.unwrap_or(1))), "chopped"),
         NCmd::Mute(on) => {
             let f = |ns: Vec<Note>| ns.into_iter().map(|mut n| { n.set_muted(on); n }).collect();
@@ -368,11 +331,9 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
             app.open_arp();
             return None;
         }
-        NCmd::Randomize(what, pct) => {
-            let mut rng = s.piano.rng;
-            let ch = apply(s, |_, ns| randomize(ns, what, pct, step, &mut rng));
-            s.piano.rng = rng;
-            done(ch, "randomized")
+        NCmd::Dialog(tool) => {
+            app.open_piano_tool(tool);
+            return None;
         }
         NCmd::Ghosts => {
             s.piano.ghosts = !s.piano.ghosts;
@@ -381,11 +342,6 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
         NCmd::AddMarker => {
             let tick = if app.transport.playing() && !app.transport.song() { app.transport.tick() as u32 } else { app.state.piano.marker };
             return Some(add_marker(&mut app.state, tick));
-        }
-        NCmd::Menu(sub) => {
-            let (x, y) = app.mouse;
-            app.state.playlist.popup = Some(Popup { x, y, items: sub_items(sub), sub: None });
-            return None;
         }
         NCmd::Snap(p) => return Some(crate::piano_snap::set(s, p)),
         NCmd::StockLength(sn) => return Some(crate::piano_snap::set_length(s, sn)),
@@ -517,25 +473,6 @@ pub fn legato(notes: Vec<Note>, end: u32) -> Vec<Note> {
         .collect()
 }
 
-/// Cut every note at each multiple of `size` ticks strictly inside it.
-pub fn chop(notes: Vec<Note>, size: u32) -> Vec<Note> {
-    let mut out = Vec::new();
-    for n in notes {
-        if n.length <= size {
-            out.push(n);
-            continue;
-        }
-        let end = n.position + n.length;
-        let mut at = n.position;
-        while at < end {
-            let next = ((at / size + 1) * size).min(end);
-            out.push(Note { position: at, length: next - at, ..n });
-            at = next;
-        }
-    }
-    out
-}
-
 /// Cut every note into `size`-tick pieces counted from its own start, the last piece keeping what is left (spec:
 /// ui/piano-keys.md §4 rule 6).
 pub fn chop_from_start(notes: Vec<Note>, size: u32) -> Vec<Note> {
@@ -569,40 +506,12 @@ pub fn glue(mut notes: Vec<Note>) -> Vec<Note> {
 }
 
 /// splitmix64: a small, good-enough generator for humanizing.
-fn next(rng: &mut u64) -> u64 {
+pub(crate) fn next(rng: &mut u64) -> u64 {
     *rng = rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = *rng;
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
-}
-
-/// Uniform in -1..1.
-fn bipolar(rng: &mut u64) -> f32 {
-    (next(rng) >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0
-}
-
-/// Move a property (or the start) of every note by a random amount of up to `pct` percent of its range (the start:
-/// of one step).
-pub fn randomize(notes: Vec<Note>, what: Rand, pct: u8, step: u32, rng: &mut u64) -> Vec<Note> {
-    let k = f32::from(pct) / 100.0;
-    notes
-        .into_iter()
-        .map(|mut n| {
-            match what {
-                Rand::Prop(lane) => {
-                    let max = lane.max();
-                    let v = (f32::from(lane.get(&n)) + bipolar(rng) * k * max).round().clamp(0.0, max);
-                    lane.set(&mut n, v as u8);
-                }
-                Rand::Start => {
-                    let d = (bipolar(rng) * k * step as f32).round();
-                    n.position = (n.position as f32 + d).max(0.0) as u32;
-                }
-            }
-            n
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -631,8 +540,6 @@ mod tests {
     fn legato_chop_glue() {
         let l = legato(vec![note(0, 10, 60), note(0, 10, 64), note(48, 10, 62), note(96, 5, 60)], 384);
         assert_eq!(spans(&l), vec![(0, 48, 60), (0, 48, 64), (48, 48, 62), (96, 288, 60)], "the last note: to the pattern's end");
-        let c = chop(vec![note(12, 60, 60), note(0, 24, 62)], 24);
-        assert_eq!(spans(&c), vec![(12, 12, 60), (24, 24, 60), (48, 24, 60), (0, 24, 62)]);
         // Ctrl+U counts from each note's start (FL 26: F5 581+30 -> 581+24, 605+6; D6 520+72 -> three of 24).
         let c = chop_from_start(vec![note(581, 30, 65), note(520, 72, 74), note(0, 24, 62), note(48, 0, 60)], 24);
         assert_eq!(spans(&c), vec![(581, 24, 65), (605, 6, 65), (520, 24, 74), (544, 24, 74), (568, 24, 74), (0, 24, 62), (48, 0, 60)]);
@@ -648,17 +555,5 @@ mod tests {
         slide.set_slide(true);
         let l = legato(vec![note(0, 96, 60), slide, note(384, 48, 72), note(800, 48, 60)], 1152);
         assert_eq!(spans(&l), vec![(0, 384, 60), (96, 24, 64), (384, 416, 72), (800, 352, 60)]);
-    }
-
-    #[test]
-    fn randomize_stays_in_range() {
-        let mut rng = 7;
-        let ns = vec![note(0, 24, 60); 50];
-        let r = randomize(ns.clone(), Rand::Prop(Lane::Velocity), 30, 24, &mut rng);
-        assert!(r.iter().all(|n| n.velocity <= 128));
-        assert!(r.iter().any(|n| n.velocity != 100), "something moved");
-        assert!(r.iter().all(|n| (i32::from(n.velocity) - 100).abs() <= 39));
-        let r = randomize(ns, Rand::Start, 25, 24, &mut rng);
-        assert!(r.iter().all(|n| n.position <= 6));
     }
 }

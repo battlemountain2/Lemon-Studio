@@ -32,6 +32,7 @@ mod filedlg;
 mod enable_groups;
 mod export;
 mod export_form;
+mod factory_folder;
 mod high_visibility;
 mod history;
 mod hold;
@@ -50,11 +51,13 @@ mod messages;
 mod meters;
 mod metronome;
 mod midi_cfg;
+mod midi_file;
 mod midi_in;
 mod midi_out;
 mod midi_play;
 mod mixer;
 mod osc3;
+mod citrus;
 mod monitor;
 mod params;
 mod piano;
@@ -64,12 +67,14 @@ mod piano_tools;
 mod rack;
 mod remote;
 mod render;
+mod pattern_render;
 mod patterns;
 mod perf;
 mod playlist;
 mod plugin_db;
 mod plugin_manager;
 mod plugin_menu;
+mod plugin_popup;
 mod plugin_rebuild;
 mod plugin_scan;
 #[cfg(plugin_windows)]
@@ -78,6 +83,7 @@ mod plugins;
 mod ppi;
 mod prefs;
 mod preview_track;
+mod project_files;
 mod project_forms;
 mod project_info;
 mod project_picker;
@@ -94,14 +100,27 @@ mod shortcuts;
 mod smooth;
 mod snap;
 mod song_pos;
+mod toolbar;
 mod splash;
 mod stall;
 mod step_edit;
 mod strum;
+mod flam;
+mod flip;
+mod levels;
+mod chords;
+mod claw;
+mod limit;
+mod lfo;
+mod quantize;
+mod randomize;
+mod chop;
+mod piano_dlg;
 mod arpeggiate;
 mod tapper;
 mod touch;
 mod record;
+mod recent;
 mod theme_adjust;
 mod theme_library;
 mod templates;
@@ -109,6 +128,7 @@ mod timesig;
 mod transport;
 mod typein;
 mod views;
+mod wallpaper;
 mod waves;
 mod win_clamp;
 #[cfg(windows)]
@@ -163,8 +183,10 @@ struct Shell {
     /// Shortest time from one frame's start to the next, from the refresh rate of `frame_monitor` (see `frame_interval`).
     frame: Duration,
     frame_monitor: Option<winit::monitor::MonitorHandle>,
-    /// The startup splash until the main window shows its first frame (`splash`).
+    /// The startup splash, until startup is done and it has faded away (`splash`).
     splash: Option<splash::Splash>,
+    /// The main window has shown its first frame.
+    shown: bool,
     /// `OS_FRAMES=<file>`: one line per frame (see `FrameLog`).
     frames: Option<FrameLog>,
     /// Wakes the app while a modal loop holds up winit's (see `stall`).
@@ -577,6 +599,18 @@ impl Shell {
         #[cfg(unix)]
         if let Some(assistant) = self.assistant.as_mut() { assistant.poll(&mut self.app); }
         self.pending |= self.app.tick();
+        // The startup splash: the opened project's loading moves its gauge on; once the main window has shown and
+        // nothing is loading, it finishes. It is dropped when it has faded away.
+        if let Some(s) = &self.splash {
+            match self.app.project_loading() {
+                Some((p, what)) => s.step(splash::LOADING + (splash::LOADED - splash::LOADING) * p, &what),
+                None if self.shown => s.finish(),
+                None => {}
+            }
+            if s.gone() {
+                self.splash = None;
+            }
+        }
         // Linux: a docked plugin window uncovered part of the main window, which needs presenting again.
         #[cfg(target_os = "linux")]
         {
@@ -614,6 +648,7 @@ impl ApplicationHandler for Shell {
         if self.window.is_some() {
             return;
         }
+        splash::step(&self.splash, splash::WINDOW, "Opening the main window");
         let attrs = Window::default_attributes()
             .with_title("Lemon Studio")
             .with_decorations(false)
@@ -711,7 +746,9 @@ impl ApplicationHandler for Shell {
         menu_bar::install();
         self.app.plugins.scale = ui_scale(&window) as f32;
         // Built-in and cached plugins at once, then a background scan (spec: ui/plugin-manager.md §4).
+        splash::step(&self.splash, splash::PLUGINS, "Loading plugins");
         self.app.start_plugins();
+        splash::step(&self.splash, splash::LOADING, "Loading project");
         self.window = Some(window);
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(16)));
     }
@@ -1171,8 +1208,8 @@ impl ApplicationHandler for Shell {
                     }
                 }
                 self.painted = Instant::now();
-                // The main window shows its first frame: the splash goes.
-                self.splash = None;
+                // The main window shows its first frame: the splash finishes once the project has loaded (`step`).
+                self.shown = true;
                 if let Some(log) = &mut self.frames {
                     let what = match &damage {
                         None => "none".to_string(),
@@ -1252,6 +1289,7 @@ fn screenshot(args: &[String]) {
     let mut browser_folder: Option<String> = None;
     let mut menu: Option<usize> = None;
     let mut plugin_menu: Option<plugin_menu::Target> = None;
+    let mut import_midi: Option<(String, bool)> = None;
     let mut settings: Option<usize> = None;
     let mut info_edit: Option<usize> = None;
     let mut clicks: Vec<(f32, f32, bool)> = Vec::new();
@@ -1305,6 +1343,9 @@ fn screenshot(args: &[String]) {
                     _ => plugin_menu::Target::All,
                 })
             }
+            // A MIDI file through FILE ▸ Import ▸ MIDI file (`--import-midi-piano`: the piano roll's import): the Import
+            // MIDI data form, shown every time (spec: ui/midi-files.md §2).
+            a @ ("--import-midi" | "--import-midi-piano") => import_midi = it.next().map(|p| (p.clone(), a == "--import-midi-piano")),
             // Hover at x,y before the frame is captured.
             "--mouse" => {
                 let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
@@ -1485,6 +1526,12 @@ fn screenshot(args: &[String]) {
     if let Some(target) = plugin_menu {
         let (w, h) = app.state.screen;
         app.open_plugin_menu(target, ((w / 2.0).round(), (h / 3.0).round()));
+    }
+    if let Some((p, piano)) = import_midi {
+        // Alt: the MIDI import window's "Show every time" row as it comes.
+        app.alt = true;
+        app.midi_file_chosen(p.into(), piano);
+        app.alt = false;
     }
     if let Some(w) = rack_w {
         app.state.rack_size.0 = w;
@@ -1702,6 +1749,11 @@ fn main() {
     if args.first().map(String::as_str) == Some(os_native::check::CHECK_ARG) {
         os_host::guard::exit(os_native::check::run(&args[1..]));
     }
+    // macOS: the startup splash, in a process of its own (`splash`).
+    #[cfg(target_os = "macos")]
+    if args.first().map(String::as_str) == Some(splash::ARG) {
+        splash::child_main();
+    }
     // Plugin editors in real plugin windows, checked from the main thread (`plugins::window_check`).
     #[cfg(target_os = "macos")]
     if args.first().map(String::as_str) == Some("--plugin-window-check") {
@@ -1726,9 +1778,9 @@ fn main() {
         builder.with_x11();
     }
     let event_loop = builder.build().expect("event loop");
-    // The startup splash, from here until the main window shows (spec: ui/settings-choices.md "Miscellaneous: naming,
-    // detached plugins and startup"). After the event loop: on Windows building it makes the process per-monitor DPI
-    // aware, which the splash's size follows.
+    // The startup splash, from here until startup is done (spec: ui/settings-choices.md "Miscellaneous: naming,
+    // detached plugins and startup"); each step below moves its gauge on. After the event loop: on Windows building it
+    // makes the process per-monitor DPI aware, which the splash's size follows.
     let splash = splash::open();
     // Before the launch: the files the app is launched to open come ahead of `resumed`.
     #[cfg(target_os = "macos")]
@@ -1740,11 +1792,17 @@ fn main() {
     // Lemon plugins' editors run on threads of their own off Windows and wake the app when they send something.
     #[cfg(not(windows))]
     os_hostlink::set_host_waker(wake_ui);
+    // Linux: the cards the sound server gave up on while a run before this one had them through ALSA (one that
+    // crashed, or ended with a plugin) are given back (`device::heal_sound_server`).
+    #[cfg(target_os = "linux")]
+    std::thread::spawn(device::heal_sound_server);
     let start = path.is_none();
+    splash::step(&splash, splash::SETTINGS, if start { "Reading settings" } else { "Opening project" });
     let mut app = App::new(path);
     // Without a project file: the Startup project (spec: ui/settings-choices.md "Miscellaneous: seven more checks,
     // Default template and Startup project").
     if start {
+        splash::step(&splash, splash::PROJECT, "Opening project");
         app.startup_project();
         // Ask for data folder "On startup": the New project form over it (spec: ui/data-folder.md §7).
         app.startup_form();
@@ -1752,6 +1810,7 @@ fn main() {
     // The windows where the last run left them.
     layout::restore(&mut app.state);
     // MIDI devices (spec: ui/midi-settings.md §2): the enabled inputs play the selected channel; master sync goes out.
+    splash::step(&splash, splash::MIDI, "Opening MIDI devices");
     app.midi = midi_in::MidiIn::open(wake_ui);
     app.midi_out = midi_out::MidiOut::start(app.transport.watch());
     let message = app.state.message.clone();
@@ -1791,6 +1850,7 @@ fn main() {
         frame: FRAME,
         frame_monitor: None,
         splash,
+        shown: false,
         frames: FrameLog::open(),
         watchdog,
         ctrl_click: false,

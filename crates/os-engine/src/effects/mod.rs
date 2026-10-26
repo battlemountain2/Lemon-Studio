@@ -5,16 +5,21 @@
 //! Mixer-slot effects: Lemon Studio's own recreations, configured from a project's saved
 //! plugin state.
 
-mod biquad;
-mod legacy_reverb;
+pub mod balance;
+pub mod chorus;
 pub mod delay;
 pub mod distortion;
 pub mod dynamics;
 pub mod eq;
+pub mod fast_dist;
+mod legacy_reverb;
 pub mod limiter;
 pub mod reverb;
+pub mod soft_clipper;
+pub mod stereo_enhancer;
+pub mod stereo_shaper;
+pub mod transient_processor;
 
-pub use biquad::Biquad;
 pub use delay::Delay;
 pub use distortion::{DistMode, Distortion};
 pub use limiter::Limiter;
@@ -28,6 +33,27 @@ pub trait Effect: Send {
     fn reset(&mut self) {}
     /// The song's tempo in BPM (effects with tempo-based times).
     fn set_tempo(&mut self, _bpm: f64) {}
+    /// The delay the effect puts its output out late by, in samples (a look-ahead; spec: audio/delay-compensation.md).
+    /// The engine reads it after every `process` and delays the other paths to match. Default: none.
+    fn latency(&self) -> usize {
+        0
+    }
+    /// An extra output (Fruity Stereo Shaper's difference output): the number of the track's output it goes to,
+    /// counted from 1, and what the block processed last put out on it, interleaved like the block (spec:
+    /// audio/sidechain.md "Extra output").
+    fn extra(&self) -> Option<(usize, &[f32])> {
+        None
+    }
+    /// A sidechain input (Fruity Limiter's): the number of the track's input it listens to, counted from 1, 0 = none
+    /// (spec: audio/sidechain.md "Sidechain input").
+    fn key_input(&self) -> usize {
+        0
+    }
+    /// Processes one block with its sidechain input `key`, interleaved like the block. Called instead of `process`
+    /// when `key_input` names an input and the track has one.
+    fn process_keyed(&mut self, buf: &mut [f32], _key: &[f32]) {
+        self.process(buf);
+    }
 }
 
 /// Creates a Lemon Studio effect for a slot plugin, if one exists for that plugin.
@@ -50,8 +76,17 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
                 reverb::Reverb::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>)
             }
         }
-        "Lemon Delay" | "Delay" => {
-            Some(Box::new(delay::Delay::from_state(state, sample_rate)))
+        "Fruity Delay 3" | "Lemon Delay" | "Delay" => {
+            delay::Delay::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>)
+        }
+        "Fruity Soft Clipper" => soft_clipper::SoftClipper::from_state(state).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Fast Dist" => fast_dist::FastDist::from_state(state).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Balance" => balance::Balance::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Stereo Enhancer" => stereo_enhancer::StereoEnhancer::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Chorus" => chorus::Chorus::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Stereo Shaper" => stereo_shaper::StereoShaper::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Transient Processor" => {
+            transient_processor::TransientProcessor::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>)
         }
         "Lemon Distortion" | "Lemon Bitcrusher" | "Lemon Overdrive" | "Distortion" | "Bitcrusher"
         | "Overdrive" | "Waveshaper" => {
@@ -66,6 +101,20 @@ pub(crate) fn field(state: &[u8], k: usize) -> Option<i32> {
     state.get(4 * k..4 * k + 4).map(|b| i32::from_le_bytes(b.try_into().unwrap()))
 }
 
+/// `N` little-endian int32 fields of a saved state from field `first` on; `None` when the state is shorter.
+pub(crate) fn ints<const N: usize>(state: &[u8], first: usize) -> Option<[i32; N]> {
+    let mut v = [0; N];
+    for (k, x) in v.iter_mut().enumerate() {
+        *x = field(state, first + k)?;
+    }
+    Some(v)
+}
+
+/// Values as a saved state of little-endian int32 fields.
+pub(crate) fn state_of(v: &[i32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,9 +123,7 @@ mod tests {
     fn unknown_fl_effects_return_none_without_fake_substitution() {
         assert!(from_slot("Fruity Delay", &[], 44100).is_none());
         assert!(from_slot("Fruity Delay 2", &[], 44100).is_none());
-        assert!(from_slot("Fruity Delay 3", &[], 44100).is_none());
         assert!(from_slot("Fruity Reeverb", &[], 44100).is_none());
-        assert!(from_slot("Fruity Fast Dist", &[], 44100).is_none());
         assert!(from_slot("Fruity Blood Overdrive", &[], 44100).is_none());
         assert!(from_slot("Fruity Squeeze", &[], 44100).is_none());
     }
@@ -127,13 +174,6 @@ mod tests {
         assert!(from_slot("Lemon Delay", &[], 44100).is_some());
         assert!(from_slot("Lemon Reverb", &[], 44100).is_some());
         assert!(from_slot("Lemon Distortion", &[], 44100).is_some());
-
-        let delay = delay::Delay::new(44100, 250.0, 0.6, 0.2, true, 0.5);
-        let state = delay.to_state();
-        let loaded = delay::Delay::from_state(&state, 44100);
-        assert_eq!(loaded.delay_ms, 250.0);
-        assert_eq!(loaded.feedback, 0.6);
-        assert_eq!(loaded.mix, 0.5);
 
         let dist = distortion::Distortion::new(DistMode::Bitcrush, 2.5, 6.0, 8, 0.8, 0.9);
         let dist_state = dist.to_state();

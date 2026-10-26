@@ -52,7 +52,7 @@ pub const CHECK_HINTS: [&str; 12] = [
     "Write each note's start as a marker into WAV files (Pattern)",
     "Write the tempo into WAV files",
     "Show the file in the file manager when the export is done",
-    "An Info frame first, so players that read it skip the encoder's delay (DAWs such as FL still play it as silence)",
+    "An Info frame first, so players that read it skip the encoder's delay (some DAWs still play it as silence)",
 ];
 pub const TILE_HINTS: [&str; 4] =
     ["WAV: uncompressed audio", "FLAC: lossless compressed audio", "MP3: lossy compressed audio", "OGG: Ogg Vorbis lossy compressed audio"];
@@ -93,6 +93,9 @@ pub struct ExportForm {
     pub device_rate: u32,
     /// The combo whose list is open.
     pub list: Option<u8>,
+    /// PATTERNS > Render as audio clip...: the current pattern only, and the file becomes an audio clip channel
+    /// (spec: ui/pattern-render.md §1); the choices are not kept for the next export.
+    pub to_clip: bool,
 }
 
 impl ExportForm {
@@ -309,6 +312,7 @@ impl App {
             o,
             device_rate,
             list: None,
+            to_clip: false,
         };
         self.show_form(Body::Project(Form::Export(Box::new(f))));
     }
@@ -401,6 +405,9 @@ impl App {
         if reply != Reply::Button(Answer::Ok) {
             return;
         }
+        if f.to_clip {
+            return self.render_pattern_with(&f);
+        }
         f.o.save();
         crate::settings_file::write("export_folder", &f.folder.to_string_lossy());
         let job = self.export_job(&f);
@@ -409,25 +416,44 @@ impl App {
 
     /// What the audio thread needs for form `f`: the span, the markers, loop and tempo at the device's rate, the
     /// mixer tracks' names.
-    fn export_job(&self, f: &ExportForm) -> ex::Job {
+    pub(crate) fn export_job(&self, f: &ExportForm) -> ex::Job {
         let s = &self.state;
         let o = f.o.clone();
         let rate = f.device_rate;
         let tempo = s.project.tick_tempo(s.tempo);
         let ppq = s.project.ppq;
-        let start = f.span().map_or(0, |(a, _)| a);
-        let end = f.span().map(|(_, b)| b);
-        let frame = |tick: u32| os_engine::laws::tick_to_frame(f64::from(tick.saturating_sub(start)), ppq, tempo, rate) as u64;
-        let inside = |tick: u32| tick >= start && end.is_none_or(|b| tick < b);
+        let song_end = crate::playlist::clips(s).iter().map(|c| c.end()).max().unwrap_or(0);
+        // The spans of ticks the file plays, in order: the export's span; a whole song from its start marker, broken at
+        // skips (spec: audio/song-structure.md "Time markers"); else everything. A tick is placed in the file through
+        // them, or is not in it.
+        let spans: Vec<(u64, u64)> = match f.span() {
+            Some((a, b)) => vec![(u64::from(a), u64::from(b))],
+            None if f.song => os_engine::engine::rendered_spans(s.project.arrangement().map_or(&[], |a| a.markers.as_slice()), u64::from(song_end)),
+            None => vec![(0, u64::MAX)],
+        };
+        let place = |tick: u32| {
+            let t = u64::from(tick);
+            let mut before = 0;
+            for &(a, b) in &spans {
+                if t >= a && t < b {
+                    return Some(before + t - a);
+                }
+                before += b - a;
+            }
+            None
+        };
+        let frame = |t: u64| os_engine::laws::tick_to_frame(t as f64, ppq, tempo, rate) as u64;
         let mut markers = Vec::new();
         if o.markers {
             let list = if f.song { s.project.arrangement().map(|a| a.markers.clone()) } else { s.project.pattern(s.pattern).map(|p| p.markers.clone()) };
-            for m in list.unwrap_or_default().iter().filter(|m| m.kind == 0 && inside(m.position)) {
-                markers.push(ex::Marker { frame: frame(m.position), name: m.name.clone() });
+            for m in list.unwrap_or_default().iter().filter(|m| m.kind == 0) {
+                if let Some(t) = place(m.position) {
+                    markers.push(ex::Marker { frame: frame(t), name: m.name.clone() });
+                }
             }
         }
         if o.note_markers && !f.song {
-            let mut starts: Vec<u32> = s.project.pattern(s.pattern).map(|p| p.notes.iter().map(|n| n.position).filter(|&t| inside(t)).collect()).unwrap_or_default();
+            let mut starts: Vec<u64> = s.project.pattern(s.pattern).map(|p| p.notes.iter().filter_map(|n| place(n.position)).collect()).unwrap_or_default();
             starts.sort_unstable();
             starts.dedup();
             markers.extend(starts.into_iter().map(|t| ex::Marker { frame: frame(t), name: String::new() }));
@@ -436,13 +462,13 @@ impl App {
         // Loop points: the time selection when the whole song renders, else the file.
         let loop_frames = if f.span().is_none() {
             let sel = if f.song { f.song_sel } else { f.pat_sel };
-            sel.map(|(a, b)| (frame(a), frame(b)))
+            sel.and_then(|(a, b)| Some((frame(place(a)?), frame(place(b.max(a + 1) - 1)? + 1))))
         } else {
             None
         };
         let ticks = match f.span() {
             Some((a, b)) => b - a,
-            None if f.song => crate::playlist::clips(s).iter().map(|c| c.end()).max().unwrap_or(0),
+            None if f.song => spans.iter().map(|&(a, b)| b - a).sum::<u64>().min(u64::from(u32::MAX)) as u32,
             None => crate::piano::pattern_length(s, s.pattern),
         };
         let tracks = s.project.mixer.iter().map(|m| m.index).max().unwrap_or(0);
