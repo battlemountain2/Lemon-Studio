@@ -1172,6 +1172,15 @@ impl Engine {
                 }
                 // A channel its hosted instrument plays: the length and rate of its sample are all it needs.
                 let length = ch.sample_path.as_deref().filter(|_| plays_sample && hosted.contains(&row)).and_then(|p| library.length(p));
+                // The hosted sampler loops the sample: "Use loop points" is on (a sampler's default; an audio clip's is
+                // off) and there is a loop, the channel's own (one that is not the whole file) or the file's. Its voices
+                // are not one-shot voices: they sound until their note ends (spec: audio/note-rules.md, audio/sampler.md
+                // "The sample file"). The engine's own voices never loop.
+                let use_loop = ch.sound.sampler_flags.map_or(ch.kind == ChannelKind::Sampler, |f| f & os_model::ChannelSound::USE_LOOP != 0);
+                let own_loop = |n: usize| ch.sound.loop_points.is_some_and(|[a, b]| b > a && (a > 0 || b < n as i64));
+                let looped = length.is_some_and(|(n, _)| {
+                    use_loop && (own_loop(n) || ch.sample_path.as_deref().is_some_and(|p| library.file_loops(p)))
+                });
                 let sample = if plays_sample && length.is_none() {
                     match ch.sample_path.as_deref() {
                         Some(p) => {
@@ -1276,13 +1285,18 @@ impl Engine {
                 let played = state.played();
                 let r = &mut state.rules;
                 r.plugin = ch.kind == ChannelKind::Plugin;
-                r.one_shot = ch.kind.is_sampler() && state.vol_env.is_none();
+                r.one_shot = ch.kind.is_sampler() && state.vol_env.is_none() && !looped;
                 r.root = ch.misc.root;
                 r.close = notes::closing_frames(ch.sound.declick, rate);
                 r.ring = match (played, r.plugin) {
+                    _ if looped => f64::INFINITY,
                     (Some((frames, _)), false) if frames > 0 => frames as f64 / state.src_ratio.max(1e-9) * state.realtime.map_or(1.0, |t| t.0.max(1e-9)),
                     _ => f64::INFINITY,
                 };
+                if looped {
+                    let release = state.vol_env.as_ref().map_or(0.0, |e| e.release_seconds() * f64::from(rate));
+                    r.tail = release + f64::from(r.close);
+                }
                 state
             })
             .collect();
@@ -1624,6 +1638,13 @@ impl Engine {
     /// Ticks of the count-in left to render (0: none, or over).
     pub fn counting_in(&self) -> u64 {
         self.count_in
+    }
+
+    /// The mixer track the metronome's clicks and the Tempo tapper's enter (spec: ui/metronome.md §4): the switch's
+    /// track when the project has that insert track (not the master, not the hidden last track), else the master.
+    fn click_track(&self) -> usize {
+        let t = self.metronome.as_ref().map_or(0, |m| usize::from(m.switch().track()));
+        if t + 1 < self.bus.len() { t } else { 0 }
     }
 
     fn beat_ticks(&self) -> u32 {
@@ -2630,16 +2651,17 @@ impl Engine {
         let (channels, w) = (&self.channels, self.sinc_w);
         let bus = &mut self.bus;
         self.voices.retain_mut(|v| render_voice(v, channels, bus, 0, 0, len, w));
-        // The metronome's click enters the master track (spec: ui/metronome.md §4): live playback only, and no new
+        // The metronome's click enters its mixer track (spec: ui/metronome.md §4): live playback only, and no new
         // click once a song is over.
         // Counted from the start of the time-signature region the tick is in, so the accent is on its bar lines.
         let (from, beat, beats) = self.click_bars.iter().rev().find(|r| r.0 <= tick).copied().unwrap_or((0, self.beat_ticks(), self.beats_per_accent));
+        let click = self.click_track();
         if let Some(m) = self.metronome.as_mut().filter(|_| !self.exporting && !self.live_only) {
             let start = self.looping || tick < self.end_tick;
-            m.tick(tick - from, beat, beats, start, &mut self.bus[0][..len * 2]);
+            m.tick(tick - from, beat, beats, start, &mut self.bus[click][..len * 2]);
         }
         if !self.exporting {
-            self.tap_clicks.mix(&mut self.bus[0][..len * 2]);
+            self.tap_clicks.mix(&mut self.bus[click][..len * 2]);
         }
         self.pad_voices(len);
         self.render_instruments(len, &song);
@@ -2741,8 +2763,9 @@ impl Engine {
         let bus = &mut self.bus;
         self.voices.retain_mut(|v| render_voice(v, channels, bus, 0, 0, len, w));
         let beat = self.beat_ticks();
+        let click = self.click_track();
         if let Some(m) = self.metronome.as_mut() {
-            m.count_in(done, beat, self.beats_per_accent, &mut self.bus[0][..len * 2]);
+            m.count_in(done, beat, self.beats_per_accent, &mut self.bus[click][..len * 2]);
         }
         self.pad_voices(len);
         self.render_instruments(len, &song);
@@ -5246,6 +5269,58 @@ mod tests {
         }
     }
 
+    /// A hosted sampler that loops its sample (user report 2026-10-26: a single-cycle wave with its file's `smpl` loop
+    /// rang on for ever): its voices are not one-shot voices, so the note's end reaches the instrument when the note
+    /// ends, however short the sample. A sample without a loop, or with "Use loop points" off, keeps its one-shot
+    /// voices, whose note ends never reach it. The channel's own loop points loop it too.
+    #[test]
+    fn a_looping_hosted_sampler_gets_its_note_ends() {
+        #[derive(Default)]
+        struct Log(Vec<(u64, bool)>, u64);
+        impl crate::Instrument for Log {
+            fn note_on(&mut self, o: u32, _k: u8, _v: f32) {
+                self.0.push((self.1 + u64::from(o), true));
+            }
+            fn note_off(&mut self, o: u32, _k: u8) {
+                self.0.push((self.1 + u64::from(o), false));
+            }
+            fn process(&mut self, _rate: u32, l: &mut [f32], _r: &mut [f32]) {
+                self.1 += l.len() as u64;
+            }
+        }
+        fn read(path: &std::path::Path) -> Option<(usize, u32)> {
+            crate::sample::length(path).map(|(n, r)| (n as usize, r))
+        }
+        // 550 frames: about 11 ms, played out long before the note's end.
+        let wav = std::env::temp_dir().join(format!("os-engine-looped-{}.wav", std::process::id()));
+        crate::wav::write_f32_stereo(&mut std::fs::File::create(&wav).unwrap(), 48000, &vec![0.25; 1100]).unwrap();
+        let mut p = project(vec![long_note(0, 96, 0)], vec![]);
+        p.channels[0].sample_path = Some(wav.to_string_lossy().into_owned());
+        // The note ends one beat in, at 130 BPM.
+        let end = (48000.0 * 60.0 / 130.0) as u64;
+        let offs = |p: &Project, loops: fn(&std::path::Path) -> bool| {
+            let mut lib = SampleLibrary::new(None);
+            lib.length_reader = Some(read);
+            lib.loop_reader = Some(loops);
+            let log = Arc::new(std::sync::Mutex::new(Log::default()));
+            let mut e = Engine::with_instruments(p, &mut lib, 48000, PlayMode::Pattern(1), &[(0, log.clone() as SharedInstrument)]);
+            e.render_all(480);
+            let offs: Vec<u64> = log.lock().unwrap().0.iter().filter(|n| !n.1).map(|n| n.0).collect();
+            offs
+        };
+        let at_end = |o: &[u64]| o.len() == 1 && o[0].abs_diff(end) < 480;
+        let o = offs(&p, |_| true);
+        assert!(at_end(&o), "the file's loop: {o:?} (end {end})");
+        assert!(offs(&p, |_| false).is_empty(), "no loop: a one-shot voice");
+        p.channels[0].sound.sampler_flags = Some(os_model::ChannelSound::LOAD_REGIONS);
+        assert!(offs(&p, |_| true).is_empty(), "Use loop points off");
+        p.channels[0].sound.sampler_flags = None;
+        p.channels[0].sound.loop_points = Some([100, 400]);
+        let o = offs(&p, |_| false);
+        assert!(at_end(&o), "the channel's own loop: {o:?}");
+        let _ = std::fs::remove_file(&wav);
+    }
+
     /// A paused playback whose hosted instruments another stream processes lets go of them: an audio clip's voice is
     /// choked (a note off leaves a sample without a volume envelope playing on), and resuming starts the clip again
     /// where the song has got to.
@@ -7459,6 +7534,57 @@ mod tests {
         let mut out = vec![0.0; 2 * 48000];
         e.process(&mut out);
         assert!(out.iter().all(|&s| s == 0.0), "muted master");
+    }
+
+    /// Settings > Audio "Metronome track": the clicks enter that insert track, so muting it silences them; a track the
+    /// project does not have (or the hidden last one) is the master. The count-in and a tap go the same way.
+    #[test]
+    fn metronome_enters_its_mixer_track() {
+        let mut p = project(vec![], vec![]);
+        p.mixer = (0..4).map(os_model::MixerTrack::new).collect();
+        let mut lib = SampleLibrary::new(None);
+        let play = |p: &Project, lib: &mut SampleLibrary, track: u16| {
+            let sw = metronome_on();
+            sw.set_track(track);
+            let mut e = Engine::new(p, lib, 48000, PlayMode::Pattern(1));
+            e.set_looping(true);
+            e.set_metronome(sw);
+            let mut out = vec![0.0; 2 * 48000];
+            e.process(&mut out);
+            out
+        };
+        assert!(play(&p, &mut lib, 2).iter().any(|&s| s != 0.0), "insert 2 goes on to the master");
+        p.mixer[2].enabled = false;
+        assert!(play(&p, &mut lib, 2).iter().all(|&s| s == 0.0), "insert 2 muted");
+        assert!(play(&p, &mut lib, 1).iter().any(|&s| s != 0.0), "another track");
+        for missing in [3, 9] {
+            assert!(play(&p, &mut lib, missing).iter().any(|&s| s != 0.0), "track {missing}: the master");
+        }
+        // The count-in (the switch off: it clicks anyway) and a tap.
+        for (track, heard) in [(2, false), (0, true)] {
+            let sw = metronome_on();
+            sw.set_on(false);
+            sw.set_track(track);
+            let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+            e.set_metronome(sw);
+            e.set_count_in(1);
+            let mut out = vec![0.0; 2 * 48000];
+            e.process(&mut out);
+            assert_eq!(out.iter().any(|&s| s != 0.0), heard, "count-in into track {track}");
+        }
+        let sw = metronome_on();
+        sw.set_track(2);
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        e.set_metronome(sw.clone());
+        e.clear_schedule();
+        e.tap_click(true, 0);
+        let mut out = vec![0.0; 2 * 2000];
+        e.process(&mut out);
+        assert!(out.iter().all(|&s| s == 0.0), "a tap into muted insert 2");
+        sw.set_track(0);
+        e.tap_click(true, 0);
+        e.process(&mut out);
+        assert!(out.iter().any(|&s| s != 0.0), "a tap into the master");
     }
 
     // spec: ui/tempo-tapper.md §8

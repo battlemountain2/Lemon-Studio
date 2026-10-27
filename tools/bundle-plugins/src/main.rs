@@ -35,6 +35,8 @@ const PLUGINS: &[(&str, &str, &str)] = &[
     ("lemon-stereo-shaper", "lemon_stereo_shaper", "Lemon Stereo Shaper"),
     ("citrus", "citrus", "Citrus"),
     ("tesla", "tesla", "Tesla"),
+    ("pulp-filter", "pulp_filter", "Pulp Filter"),
+    ("press", "press", "Press"),
 ];
 /// The plugins' earlier display names: an install removes bundles left under them (same plugin ids, so a DAW would
 /// list each plugin twice).

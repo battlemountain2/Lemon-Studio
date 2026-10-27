@@ -928,8 +928,13 @@ mod tests {
             let d = pl.descriptor(key).unwrap();
             let infos = pl.param_infos(key);
             for p in factory_in(FACTORY, &d.name) {
-                let Ok((h, Body::Params(list))) = load(&p.path, &d.uid()) else { panic!("{} does not load for {}", p.name, d.name) };
+                let Ok((h, body)) = load(&p.path, &d.uid()) else { panic!("{} does not load for {}", p.name, d.name) };
                 assert_eq!(h.plugin, d.name);
+                // A state preset (Press, Pulp Filter): the plugin's own tests read its state.
+                let Body::Params(list) = body else {
+                    checked += 1;
+                    continue;
+                };
                 for (name, v) in list {
                     let i = infos.iter().find(|i| i.name == name).unwrap_or_else(|| panic!("{}/{}: no parameter {name}", d.name, p.name));
                     let (lo, hi) = (i.min.min(i.max), i.max.max(i.min));
@@ -1149,7 +1154,8 @@ mod tests {
         assert_eq!(channel(&app), "808 HiHat", "off: the channel keeps its name");
         // Effect slots: off by default.
         run(&mut app, PCmd::Load(fx, bandpass.clone()));
-        assert_eq!(slot(&app), "Fruity Delay 3", "off: the slot keeps its name");
+        // The slot shows the Lemon effect that plays Delay 3 (`plugins::FL_RECREATIONS`).
+        assert_eq!(slot(&app), "Lemon Delay", "off: the slot keeps its name");
         prefs::set_check(&AUTO_NAME_EFFECT_SLOTS, true);
         run(&mut app, PCmd::Load(fx, chorus));
         assert_eq!(slot(&app), "Chorus");
