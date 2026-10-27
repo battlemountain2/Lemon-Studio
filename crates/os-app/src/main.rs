@@ -29,6 +29,7 @@ mod clock;
 mod cpu;
 mod data_folder;
 mod device;
+mod drum_chop;
 mod dialog;
 mod filedlg;
 mod enable_groups;

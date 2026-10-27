@@ -57,6 +57,9 @@ pub enum PaletteAction {
     FocusChannel(usize),
     FocusMixer(u16),
     OpenSettings(usize),
+    ChopTransients,
+    ChopGrid(crate::playlist::ChopGrid),
+    ChopStutter(usize),
     CloseAll,
     CloseUnfocused,
     ClosePlugins,
@@ -251,6 +254,55 @@ pub fn items(s: &State) -> Vec<PaletteItem> {
         category: Category::Action,
         shortcut: Some("Shift+R"),
         action: PaletteAction::DawAction(Action::PlTool(crate::playlist::PlTool::Select)),
+    });
+    list.push(PaletteItem {
+        title: "Slice at Transients (Drum Chopper)".into(),
+        subtitle: "Cut selected audio clips along acoustic onsets at zero-crossings".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::ChopTransients,
+    });
+    list.push(PaletteItem {
+        title: "Chop to Grid: Beat (1/4)".into(),
+        subtitle: "Slice selected clips every quarter-note beat".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::ChopGrid(crate::playlist::ChopGrid::Beat),
+    });
+    list.push(PaletteItem {
+        title: "Chop to Grid: Half-Beat (1/8)".into(),
+        subtitle: "Slice selected clips every eighth-note".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::ChopGrid(crate::playlist::ChopGrid::HalfBeat),
+    });
+    list.push(PaletteItem {
+        title: "Chop to Grid: Step (1/16)".into(),
+        subtitle: "Slice selected clips every sixteenth-note step".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::ChopGrid(crate::playlist::ChopGrid::Step),
+    });
+    list.push(PaletteItem {
+        title: "Chop to Grid: Bar (1/1)".into(),
+        subtitle: "Slice selected clips every bar".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::ChopGrid(crate::playlist::ChopGrid::Bar),
+    });
+    list.push(PaletteItem {
+        title: "Stutter Clips (4x Repeat)".into(),
+        subtitle: "Split and repeat first slice 4 times for quick glitch rolls".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::ChopStutter(4),
+    });
+    list.push(PaletteItem {
+        title: "Stutter Clips (8x Roll)".into(),
+        subtitle: "Split and repeat first slice 8 times for rapid drum rolls".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::ChopStutter(8),
     });
     list.push(PaletteItem {
         title: "Undo".into(),
@@ -605,6 +657,36 @@ pub fn execute(app: &mut App, item: &PaletteItem) {
         }
         PaletteAction::OpenSettings(tab) => {
             app.open_settings(*tab);
+        }
+        PaletteAction::ChopTransients => {
+            let n = crate::drum_chop::chop_selected_or_target(&mut app.state, None, |s, idx| {
+                crate::drum_chop::chop_clip_transients(s, idx)
+            });
+            app.say(if n > 1 {
+                format!("Chopped into {n} slices (transients)")
+            } else {
+                "Select an audio clip to slice at transients".into()
+            });
+        }
+        PaletteAction::ChopGrid(grid) => {
+            let n = crate::drum_chop::chop_selected_or_target(&mut app.state, None, |s, idx| {
+                crate::drum_chop::chop_clip_grid(s, idx, *grid)
+            });
+            app.say(if n > 1 {
+                format!("Chopped into {n} slices ({})", grid.label())
+            } else {
+                "Select a clip to chop to grid".into()
+            });
+        }
+        PaletteAction::ChopStutter(repeats) => {
+            let n = crate::drum_chop::chop_selected_or_target(&mut app.state, None, |s, idx| {
+                crate::drum_chop::chop_clip_stutter(s, idx, *repeats)
+            });
+            app.say(if n > 1 {
+                format!("Stutter chopped into {n} slices ({repeats}x)")
+            } else {
+                "Select a clip to stutter chop".into()
+            });
         }
         PaletteAction::CloseAll => {
             app.close_windows(CloseAll::All);

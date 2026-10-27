@@ -203,6 +203,45 @@ pub enum Mark {
     Radio(bool),
 }
 
+/// Musical grid divisions for playlist clip chopping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChopGrid {
+    Bar,
+    HalfBar,
+    Beat,
+    HalfBeat,
+    Step,
+    ThirtySecond,
+    TripletSixth,
+}
+
+impl ChopGrid {
+    pub fn label(self) -> &'static str {
+        match self {
+            ChopGrid::Bar => "Bar (1/1)",
+            ChopGrid::HalfBar => "Half-Bar (1/2)",
+            ChopGrid::Beat => "Beat (1/4)",
+            ChopGrid::HalfBeat => "Half-Beat (1/8)",
+            ChopGrid::Step => "Step (1/16)",
+            ChopGrid::ThirtySecond => "32nd (1/32)",
+            ChopGrid::TripletSixth => "Triplet (1/6)",
+        }
+    }
+
+    pub fn ticks(self, ppq: u16) -> u32 {
+        let p = u32::from(ppq.max(1));
+        match self {
+            ChopGrid::Bar => p * 4,
+            ChopGrid::HalfBar => p * 2,
+            ChopGrid::Beat => p,
+            ChopGrid::HalfBeat => (p / 2).max(1),
+            ChopGrid::Step => (p / 4).max(1),
+            ChopGrid::ThirtySecond => (p / 8).max(1),
+            ChopGrid::TripletSixth => (p * 4 / 6).max(1),
+        }
+    }
+}
+
 /// Commands of the playlist's popup menus (§10).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cmd {
@@ -281,6 +320,10 @@ pub enum Cmd {
     ClipRename(usize),
     ClipRandomColor(usize),
     ClipPreview(usize),
+    /// Chop & transient slicing tools (Phase 7: Drum Chopper).
+    ChopTransients(usize),
+    ChopGrid(usize, ChopGrid),
+    ChopStutter(usize, usize),
     /// A picker item's menu (§10a) on an audio or automation clip source: the command and the source's channel index.
     Pick(PickCmd, u16),
     PointDelete(u16, usize),
@@ -2405,6 +2448,23 @@ pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
             items.push(PItem::new("Reverse source sample (Shift+R)", Cmd::ToggleReverse).mark(Mark::Check(is_rev)));
         }
     }
+    // Chop / Slice tools (Phase 7: Drum Chopper)
+    let chop_sub = vec![
+        PItem::new("Slice at transients (Drum Chopper)", Cmd::ChopTransients(i)),
+        PItem::sep(),
+        PItem::new("Chop to Bar (1/1)", Cmd::ChopGrid(i, ChopGrid::Bar)),
+        PItem::new("Chop to Beat (1/4)", Cmd::ChopGrid(i, ChopGrid::Beat)),
+        PItem::new("Chop to Half-Beat (1/8)", Cmd::ChopGrid(i, ChopGrid::HalfBeat)),
+        PItem::new("Chop to Step (1/16)", Cmd::ChopGrid(i, ChopGrid::Step)),
+        PItem::new("Chop to 32nd (1/32)", Cmd::ChopGrid(i, ChopGrid::ThirtySecond)),
+        PItem::sep(),
+        PItem::new("Chop to Triplet (1/6)", Cmd::ChopGrid(i, ChopGrid::TripletSixth)),
+        PItem::sep(),
+        PItem::new("Stutter 4x (Repeat)", Cmd::ChopStutter(i, 4)),
+        PItem::new("Stutter 8x (Roll)", Cmd::ChopStutter(i, 8)),
+    ];
+    items.push(PItem::sub("Chop / Slice", chop_sub));
+    items.push(PItem::sep());
     items.push(PItem::new("Select all similar clips", Cmd::ClipSelectSimilar(i)));
     items.push(PItem::new("Delete", Cmd::ClipDelete(i)));
     Popup { x, y, items, sub: None, scroll: [0; 2] }
@@ -4077,13 +4137,38 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             let count = toggled_channels.len();
             return Some(format!("Reversed {count} source sample{} (all clips using the source)", if count == 1 { "" } else { "s" }));
         }
+        Cmd::ChopTransients(i) => {
+            let n = crate::drum_chop::chop_selected_or_target(&mut app.state, Some(i), |s, idx| {
+                crate::drum_chop::chop_clip_transients(s, idx)
+            });
+            app.invalidate();
+            return Some(if n > 1 {
+                format!("Chopped into {n} slices (transients)")
+            } else {
+                "No transients found in clip to slice".into()
+            });
+        }
+        Cmd::ChopGrid(i, grid) => {
+            let n = crate::drum_chop::chop_selected_or_target(&mut app.state, Some(i), |s, idx| {
+                crate::drum_chop::chop_clip_grid(s, idx, grid)
+            });
+            app.invalidate();
+            return Some(format!("Chopped into {n} slices ({})", grid.label()));
+        }
+        Cmd::ChopStutter(i, repeats) => {
+            let n = crate::drum_chop::chop_selected_or_target(&mut app.state, Some(i), |s, idx| {
+                crate::drum_chop::chop_clip_stutter(s, idx, repeats)
+            });
+            app.invalidate();
+            return Some(format!("Stutter chopped into {n} slices ({repeats}x)"));
+        }
         _ => {}
     }
     let s = &mut app.state;
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::ToggleReverse | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::ToggleReverse | Cmd::ChopTransients(_) | Cmd::ChopGrid(..) | Cmd::ChopStutter(..) | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
