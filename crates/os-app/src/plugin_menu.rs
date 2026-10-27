@@ -101,12 +101,22 @@ fn section(s: &State, effect: bool, target: Target, nested: bool) -> Vec<PItem> 
                 }
             }
         }
+        MenuView::Favorites => {
+            if v.is_empty() {
+                v.push(PItem::new(if effect { "(no favorite effect plugins)" } else { "(no favorite instruments)" }, Cmd::Nothing).off());
+            }
+        }
     }
     v
 }
 
 /// The display modes as their radio items name them (spec §2-3); ADD's radios are the same.
-pub const VIEWS: &[(&str, MenuView)] = &[("Categories", MenuView::Categories), ("Simple", MenuView::Simple), ("By vendor", MenuView::Vendor)];
+pub const VIEWS: &[(&str, MenuView)] = &[
+    ("Favorites", MenuView::Favorites),
+    ("Categories", MenuView::Categories),
+    ("Simple", MenuView::Simple),
+    ("By vendor", MenuView::Vendor),
+];
 
 /// After the lists (spec §2): Find new plugins, Manage plugins..., the display modes.
 fn footer(s: &State) -> Vec<PItem> {
@@ -285,6 +295,7 @@ pub struct Search {
     pub top: usize,
     pub cursor: usize,
     pub selected_text: bool,
+    pub options: Option<(bool, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -293,6 +304,11 @@ pub enum Hit {
     Clear,
     Pick(PlugCmd),
     Scroll(i32),
+    ToggleFavorite(bool, usize),
+    Options(bool, usize),
+    OpenFileLocation(bool, usize),
+    CopyPath(bool, usize),
+    PluginDetails(bool, usize),
 }
 
 pub fn searchable(items: &[PItem]) -> bool {
@@ -322,6 +338,7 @@ impl Choice<'_> {
         match (view, self.entry) {
             (MenuView::Categories, Some(entry)) => entry.category,
             (MenuView::Vendor, Some(entry)) => &entry.vendor,
+            (MenuView::Favorites, _) => "Favorites",
             _ => "",
         }
     }
@@ -346,7 +363,7 @@ impl Choice<'_> {
 pub fn choices<'a>(s: &'a State, items: &'a [PItem]) -> Vec<Choice<'a>> {
     let lookup: BTreeMap<_, _> = s.plugdb.lists.gens.iter().map(|entry| ((false, entry.index), entry))
         .chain(s.plugdb.lists.fx.iter().map(|entry| ((true, entry.index), entry))).collect();
-    fn collect<'a>(items: &'a [PItem], lookup: &BTreeMap<(bool, usize), &'a Entry>, out: &mut Vec<Choice<'a>>) {
+    fn collect<'a>(items: &'a [PItem], lookup: &BTreeMap<(bool, usize), &'a Entry>, seen: &mut std::collections::HashSet<(bool, usize)>, out: &mut Vec<Choice<'a>>) {
         for item in items {
             let key = match item.cmd {
                 Cmd::Plugin(PlugCmd::Generator { index, .. }) => Some((false, index)),
@@ -354,16 +371,17 @@ pub fn choices<'a>(s: &'a State, items: &'a [PItem]) -> Vec<Choice<'a>> {
                 _ => None,
             };
             if let Some((effect, index)) = key {
-                if item.enabled {
+                if item.enabled && seen.insert((effect, index)) {
                     out.push(Choice { item, entry: lookup.get(&(effect, index)).copied(), effect });
                 }
             } else {
-                collect(&item.children, lookup, out);
+                collect(&item.children, lookup, seen, out);
             }
         }
     }
     let mut out = Vec::new();
-    collect(items, &lookup, &mut out);
+    let mut seen = std::collections::HashSet::new();
+    collect(items, &lookup, &mut seen, &mut out);
     let words: Vec<_> = s.plugin_search.text.split_whitespace().map(str::to_lowercase).collect();
     out.retain(|choice| {
         let entry = choice.entry;
@@ -372,6 +390,9 @@ pub fn choices<'a>(s: &'a State, items: &'a [PItem]) -> Vec<Choice<'a>> {
         words.iter().all(|word| text.contains(word))
     });
     let view = s.plugdb.prefs.menu_view;
+    if view == MenuView::Favorites {
+        out.retain(|choice| choice.entry.is_some_and(|entry| entry.favorite));
+    }
     out.sort_by_cached_key(|choice| (
         !choice.entry.is_some_and(|entry| entry.favorite), choice.effect,
         choice.group(view).to_lowercase(), choice.item.label.to_lowercase(),
@@ -404,18 +425,135 @@ pub fn scroll(s: &mut State, delta: f32) {
     s.plugin_search.top = ((s.plugin_search.top as f32 + delta).round().max(0.0) as usize).min(max);
 }
 
+fn get_descriptor<'a>(app: &'a App, effect: bool, index: usize) -> Option<&'a os_host::Descriptor> {
+    if effect {
+        app.plugins.effects.get(index).map(|a| &a.desc)
+    } else {
+        app.plugins.available.get(index).map(|a| &a.desc)
+    }
+}
+
+fn open_file_location(app: &mut App, effect: bool, index: usize) {
+    let Some(desc) = get_descriptor(app, effect, index) else { return };
+    if crate::project_plugins::is_builtin(desc) {
+        app.state.message = Some(format!("'{}' is a built-in Lemon Studio plugin", desc.name));
+        return;
+    }
+    let path = &desc.path;
+    let folder = if path.is_file() {
+        path.parent().map(|p| p.to_path_buf())
+    } else if path.exists() {
+        Some(path.clone())
+    } else {
+        path.parent().map(|p| p.to_path_buf())
+    };
+    if let Some(folder) = folder {
+        #[cfg(target_os = "linux")]
+        let res = std::process::Command::new("xdg-open").arg(&folder).spawn();
+        #[cfg(target_os = "macos")]
+        let res = std::process::Command::new("open").arg(&folder).spawn();
+        #[cfg(target_os = "windows")]
+        let res = std::process::Command::new("explorer").arg(&folder).spawn();
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        let res: Result<std::process::Child, std::io::Error> = Err(std::io::Error::new(std::io::ErrorKind::Other, "unsupported"));
+
+        match res {
+            Ok(_) => app.state.message = Some(format!("Opened folder: {}", folder.display())),
+            Err(e) => app.state.message = Some(format!("Could not open folder {}: {e}", folder.display())),
+        }
+    } else {
+        app.state.message = Some(format!("Location not found: {}", path.display()));
+    }
+}
+
+fn copy_file_path(app: &mut App, effect: bool, index: usize) {
+    let Some(desc) = get_descriptor(app, effect, index) else { return };
+    let path_str = if crate::project_plugins::is_builtin(desc) {
+        format!("builtin:{}", desc.name)
+    } else {
+        desc.path.to_string_lossy().into_owned()
+    };
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Write;
+        if let Ok(mut child) = std::process::Command::new("wl-copy").stdin(std::process::Stdio::piped()).spawn() {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(path_str.as_bytes());
+            }
+            let _ = child.wait();
+        } else if let Ok(mut child) = std::process::Command::new("xclip").args(["-selection", "clipboard"]).stdin(std::process::Stdio::piped()).spawn() {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(path_str.as_bytes());
+            }
+            let _ = child.wait();
+        }
+    }
+    app.state.message = Some(format!("Plugin path: {path_str}"));
+}
+
+fn show_plugin_details(app: &mut App, effect: bool, index: usize) {
+    let Some(desc) = get_descriptor(app, effect, index) else { return };
+    let version = if desc.version.is_empty() { String::new() } else { format!(" v{}", desc.version) };
+    let vendor = if desc.vendor.is_empty() { String::new() } else { format!(" by {}", desc.vendor) };
+    let path_str = if crate::project_plugins::is_builtin(desc) { "Built-in".to_string() } else { desc.path.to_string_lossy().into_owned() };
+    app.state.message = Some(format!("{} [{}]{version}{vendor} · {path_str}", desc.name, desc.format.as_str().to_uppercase()));
+}
+
 pub fn click(app: &mut App, hit: Hit) {
     match hit {
-        Hit::Area => {}
+        Hit::Area => {
+            app.state.plugin_search.options = None;
+        }
         Hit::Clear => app.state.plugin_search = Search::default(),
-        Hit::Scroll(direction) => scroll(&mut app.state, direction as f32),
+        Hit::Scroll(direction) => {
+            app.state.plugin_search.options = None;
+            scroll(&mut app.state, direction as f32);
+        }
+        Hit::ToggleFavorite(effect, index) => {
+            app.state.plugin_search.options = None;
+            let info = {
+                let list = if effect { &app.state.plugdb.lists.fx } else { &app.state.plugdb.lists.gens };
+                list.iter().find(|e| e.index == index).map(|e| (e.uid.clone(), e.name.clone()))
+            };
+            if let Some((uid, name)) = info {
+                app.state.plugdb.prefs.toggle_favorite(&uid);
+                app.prefs_changed();
+                let fav = app.state.plugdb.prefs.is_favorite(&uid);
+                app.state.message = Some(if fav {
+                    format!("Added '{name}' to Favorites (★)")
+                } else {
+                    format!("Removed '{name}' from Favorites")
+                });
+            }
+        }
+        Hit::Options(effect, index) => {
+            if app.state.plugin_search.options == Some((effect, index)) {
+                app.state.plugin_search.options = None;
+            } else {
+                app.state.plugin_search.options = Some((effect, index));
+            }
+        }
+        Hit::OpenFileLocation(effect, index) => {
+            app.state.plugin_search.options = None;
+            open_file_location(app, effect, index);
+        }
+        Hit::CopyPath(effect, index) => {
+            app.state.plugin_search.options = None;
+            copy_file_path(app, effect, index);
+        }
+        Hit::PluginDetails(effect, index) => {
+            app.state.plugin_search.options = None;
+            show_plugin_details(app, effect, index);
+        }
         Hit::Pick(PlugCmd::View(view)) => {
+            app.state.plugin_search.options = None;
             app.state.plugdb.prefs.menu_view = view;
             app.state.plugin_search.top = 0;
             app.state.plugin_search.cursor = 0;
             app.prefs_changed();
         }
         Hit::Pick(cmd) => {
+            app.state.plugin_search.options = None;
             if let Some(message) = crate::playlist::run(app, Cmd::Plugin(cmd)) {
                 app.state.message = Some(message);
             }
@@ -437,6 +575,9 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
     let page = page_rows(&app.state);
     let search = &mut app.state.plugin_search;
     match key {
+        Key::Named(NamedKey::Escape) if search.options.is_some() => {
+            search.options = None;
+        }
         Key::Named(NamedKey::Escape) if !search.text.is_empty() => *search = Search::default(),
         Key::Named(NamedKey::Escape) => {
             app.state.playlist.popup = None;
@@ -449,12 +590,14 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
             *search = Search::default();
         }
         Key::Named(NamedKey::Enter) => {
+            search.options = None;
             let command = active(&app.state).and_then(|items| choices(&app.state, items).get(app.state.plugin_search.cursor).map(|choice| choice.item.cmd.clone()));
             if let Some(Cmd::Plugin(command)) = command {
                 click(app, Hit::Pick(command));
             }
         }
         Key::Named(named @ (NamedKey::ArrowDown | NamedKey::ArrowUp | NamedKey::PageDown | NamedKey::PageUp | NamedKey::Home | NamedKey::End)) => {
+            search.options = None;
             search.cursor = match named {
                 NamedKey::ArrowDown => search.cursor.saturating_add(1),
                 NamedKey::ArrowUp => search.cursor.saturating_sub(1),
@@ -470,6 +613,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         }
         Key::Character(text) if ctrl && !alt && text.eq_ignore_ascii_case("a") => search.selected_text = true,
         Key::Named(NamedKey::Backspace | NamedKey::Delete) => {
+            search.options = None;
             if search.selected_text {
                 search.text.clear();
             } else {
@@ -480,6 +624,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
             search.top = 0;
         }
         Key::Character(text) if !ctrl && !alt => {
+            search.options = None;
             if search.selected_text {
                 search.text.clear();
             }
@@ -489,6 +634,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
             search.top = 0;
         }
         Key::Named(NamedKey::Space) if !ctrl && !alt => {
+            search.options = None;
             if search.selected_text {
                 search.text.clear();
                 search.selected_text = false;
@@ -536,6 +682,7 @@ pub fn paint(ui: &mut crate::app::Ui, s: &State, items: &[PItem], at: (f32, f32)
     let list = Rect::new(rect.x + 4.0, list_y, rect.w - 17.0, shown as f32 * ROW_H);
     ui.c.push_clip(list);
     let view = s.plugdb.prefs.menu_view;
+    const STAR_ON: os_ui::tabler::TablerIcon = os_ui::tabler::TablerIcon { filled: true, d: os_ui::tabler::STAR.d };
     for (position, choice) in choices.iter().enumerate().skip(top).take(capacity) {
         let row = Rect::new(list.x, list.y + (position - top) as f32 * ROW_H, list.w, ROW_H);
         let Cmd::Plugin(command) = choice.item.cmd else { continue };
@@ -543,14 +690,91 @@ pub fn paint(ui: &mut crate::app::Ui, s: &State, items: &[PItem], at: (f32, f32)
         if hovered || position == s.plugin_search.cursor {
             os_ui::kit::row_highlight(ui.c, theme, row);
         }
-        ui.c.text_clip(Font::new(15), row.x + 9.0, row.y + 3.0, row.w - 18.0, theme.menu_pop_text, &choice.item.label);
-        ui.c.text_clip(Font::new(12), row.x + 9.0, row.y + 22.0, row.w - 18.0,
+        ui.c.text_clip(Font::new(15), row.x + 9.0, row.y + 3.0, (row.w - 62.0).max(0.0), theme.menu_pop_text, &choice.item.label);
+        ui.c.text_clip(Font::new(12), row.x + 9.0, row.y + 22.0, (row.w - 62.0).max(0.0),
             theme.menu_pop_text, &choice.detail(view));
+
+        if let Some(entry) = choice.entry {
+            // Star button (★ / ☆)
+            let star_r = Rect::new(row.right() - 52.0, row.y + 7.0, 24.0, 24.0);
+            let is_fav = entry.favorite;
+            let star_hov = ui.hit(star_r, Action::PluginMenu(Hit::ToggleFavorite(choice.effect, entry.index)),
+                if is_fav { "Remove from Favorites (★)" } else { "Add to Favorites (☆)" });
+            if star_hov {
+                ui.c.fill_rrect(star_r, 4.0, theme.menu_pop_head);
+            }
+            let ir = Rect::new(star_r.cx() - 6.5, star_r.cy() - 6.5, 13.0, 13.0);
+            if is_fav {
+                ui.c.icon(&STAR_ON, ir, theme.h(0xfdc13d));
+            } else {
+                ui.c.icon(&os_ui::tabler::STAR, ir, if star_hov { theme.menu_pop_text } else { theme.menu_pop_dim });
+            }
+
+            // Triple dots options button (⋮)
+            let opt_r = Rect::new(row.right() - 26.0, row.y + 7.0, 24.0, 24.0);
+            let is_opt_open = s.plugin_search.options == Some((choice.effect, entry.index));
+            let opt_hov = ui.hit(opt_r, Action::PluginMenu(Hit::Options(choice.effect, entry.index)), "Plugin options");
+            if opt_hov || is_opt_open {
+                ui.c.fill_rrect(opt_r, 4.0, theme.menu_pop_head);
+            }
+            let dot_x = opt_r.cx();
+            let dot_y = opt_r.cy();
+            let dot_col = if opt_hov || is_opt_open { theme.menu_pop_text } else { theme.menu_pop_dim };
+            ui.c.fill_circle(dot_x, dot_y - 5.0, 1.5, dot_col);
+            ui.c.fill_circle(dot_x, dot_y, 1.5, dot_col);
+            ui.c.fill_circle(dot_x, dot_y + 5.0, 1.5, dot_col);
+        }
     }
     if choices.is_empty() {
-        ui.c.text_clip(Font::new(14), list.x + 9.0, list.y + 10.0, list.w - 18.0, theme.menu_pop_text, "No matching plugins");
+        let empty_msg = if view == MenuView::Favorites {
+            "No favorite plugins yet · Click ★ on any plugin to favorite"
+        } else {
+            "No matching plugins"
+        };
+        ui.c.text_clip(Font::new(13), list.x + 9.0, list.y + 10.0, list.w - 18.0, theme.menu_pop_text, empty_msg);
     }
     ui.c.pop_clip();
+
+    // Paint options popup overlay if open
+    if let Some((opt_effect, opt_index)) = s.plugin_search.options {
+        if let Some((pos, choice)) = choices.iter().enumerate().skip(top).take(capacity).find(|(_, c)| {
+            c.effect == opt_effect && c.entry.is_some_and(|e| e.index == opt_index)
+        }) {
+            let row = Rect::new(list.x, list.y + (pos - top) as f32 * ROW_H, list.w, ROW_H);
+            let opt_w = 175.0f32;
+            let item_h = 24.0f32;
+            let opt_h = 5.0 * item_h + 8.0;
+            let opt_x = (row.right() - opt_w).clamp(rect.x + 4.0, (rect.right() - opt_w - 4.0).max(rect.x + 4.0));
+            let mut opt_y = row.bottom() + 2.0;
+            if opt_y + opt_h > rect.bottom() - 4.0 {
+                opt_y = (row.y - opt_h - 2.0).max(rect.y + 4.0);
+            }
+            let opt_rect = Rect::new(opt_x, opt_y, opt_w, opt_h);
+            os_ui::kit::popup(ui.c, theme, opt_rect);
+            ui.hit(opt_rect, Action::PluginMenu(Hit::Area), "");
+
+            let is_fav = choice.entry.is_some_and(|e| e.favorite);
+            let options: [(&str, Hit, &str); 5] = [
+                (if is_fav { "Remove from Favorites" } else { "Add to Favorites" }, Hit::ToggleFavorite(opt_effect, opt_index), "Toggle favorite"),
+                ("Open File Location", Hit::OpenFileLocation(opt_effect, opt_index), "Open folder containing this plugin"),
+                ("Copy File Path", Hit::CopyPath(opt_effect, opt_index), "Copy plugin file path"),
+                ("Show Plugin Details", Hit::PluginDetails(opt_effect, opt_index), "Show plugin details in status bar"),
+                ("Manage Plugins…", Hit::Pick(PlugCmd::Manage), "Open plugin manager in settings"),
+            ];
+
+            for (i, (label, hit, hint)) in options.into_iter().enumerate() {
+                let item_r = Rect::new(opt_rect.x + 4.0, opt_rect.y + 4.0 + i as f32 * item_h, opt_rect.w - 8.0, item_h);
+                let hov = ui.hit(item_r, Action::PluginMenu(hit), hint);
+                if hov {
+                    ui.c.fill_rrect(item_r, 3.0, theme.menu_pop_hi);
+                }
+                ui.c.push_clip(item_r);
+                ui.c.text_clip(Font::new(12), item_r.x + 8.0, item_r.y + 4.0, item_r.w - 12.0, theme.menu_pop_text, label);
+                ui.c.pop_clip();
+            }
+        }
+    }
+
     if choices.len() > capacity {
         let track = Rect::new(rect.right() - 10.0, list.y, 5.0, list.h);
         ui.c.fill_rrect(track, 2.0, theme.menu_pop_head);
@@ -567,8 +791,14 @@ pub fn paint(ui: &mut crate::app::Ui, s: &State, items: &[PItem], at: (f32, f32)
     let label = format!("{} {noun} · Up/Down · Enter adds · Esc clears/closes", choices.len());
     ui.c.text_clip(Font::new(12), rect.x + 10.0, footer_y, rect.w - 20.0, theme.menu_pop_text, &label);
     let button_y = footer_y + 20.0;
-    let button_w = (rect.w - 16.0) / 4.0;
-    for (position, (label, value)) in [("Category", MenuView::Categories), ("Vendor", MenuView::Vendor), ("A–Z", MenuView::Simple)].iter().enumerate() {
+    let button_w = (rect.w - 16.0) / 5.0;
+    let filter_buttons = [
+        ("★ Favs", MenuView::Favorites),
+        ("Category", MenuView::Categories),
+        ("Vendor", MenuView::Vendor),
+        ("A–Z", MenuView::Simple),
+    ];
+    for (position, (label, value)) in filter_buttons.iter().enumerate() {
         let button = Rect::new(rect.x + 8.0 + position as f32 * button_w, button_y, button_w - 4.0, 26.0);
         if view == *value {
             ui.c.fill_rrect(button, 3.0, theme.menu_pop_hi);
@@ -578,7 +808,7 @@ pub fn paint(ui: &mut crate::app::Ui, s: &State, items: &[PItem], at: (f32, f32)
         ui.c.text_center(Font::new(12), button, theme.menu_pop_text, label);
         ui.c.pop_clip();
     }
-    let manage = Rect::new(rect.x + 8.0 + 3.0 * button_w, button_y, button_w - 4.0, 26.0);
+    let manage = Rect::new(rect.x + 8.0 + 4.0 * button_w, button_y, button_w - 4.0, 26.0);
     ui.hit(manage, Action::PluginMenu(Hit::Pick(PlugCmd::Manage)), "Manage plugins and scan folders");
     ui.c.push_clip(manage);
     ui.c.text_center(Font::new(12), manage, theme.menu_pop_text, "Manage…");
@@ -614,7 +844,7 @@ mod tests {
     fn search_matches_words_and_metadata_without_losing_the_destination() {
         let mut app = app_with_library(1000);
         app.state.playlist.popup = Some(crate::mixer::effect_menu(&app.state, 4, 1800.0, 800.0));
-        app.key(&Key::Character("LEMON eq".into()), false, false);
+        app.key(&Key::Character("LEMON Parametric".into()), false, false);
         let results = choices(&app.state, active(&app.state).unwrap());
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].item.cmd, Cmd::Plugin(PlugCmd::Effect { index: 0, slot: Some(4) }));
@@ -665,18 +895,19 @@ mod tests {
     fn large_menu_navigation_scrolls_without_editing_the_project() {
         let mut app = app_with_library(1000);
         app.open_plugin_menu(Target::Fx(Some(7)), (0.0, 0.0));
+        let total = choices(&app.state, active(&app.state).unwrap()).len();
         let before = app.state.project.clone();
         app.key(&Key::Named(NamedKey::End), false, false);
-        assert_eq!(app.state.plugin_search.cursor, 1000);
-        assert_eq!(app.state.plugin_search.top + page_rows(&app.state), 1001);
+        assert_eq!(app.state.plugin_search.cursor, total - 1);
+        assert_eq!(app.state.plugin_search.top + page_rows(&app.state), total);
         app.key(&Key::Named(NamedKey::PageUp), false, false);
-        assert!(app.state.plugin_search.cursor < 1000);
+        assert!(app.state.plugin_search.cursor < total - 1);
         app.key(&Key::Named(NamedKey::Home), false, false);
         assert_eq!(app.state.plugin_search.cursor, 0);
         app.wheel(0.0, -2.0, false, false);
         assert_eq!(app.state.plugin_search.top, 6);
         assert_eq!(app.state.project, before);
-        app.key(&Key::Character("lemon".into()), false, false);
+        app.key(&Key::Character("lemon parametric".into()), false, false);
         assert_eq!((app.state.plugin_search.cursor, app.state.plugin_search.top), (0, 0));
         app.key(&Key::Named(NamedKey::Enter), false, false);
         assert!(app.state.playlist.popup.is_none());
@@ -689,7 +920,7 @@ mod tests {
         let mut app = app_with_library(100);
         app.state.plugdb.prefs.menu_view = MenuView::Vendor;
         app.open_plugin_menu(Target::Fx(Some(3)), (0.0, 0.0));
-        app.state.plugin_search.text = "lemon".into();
+        app.state.plugin_search.text = "lemon parametric".into();
         assert_eq!(choices(&app.state, active(&app.state).unwrap()).len(), 1);
         click(&mut app, Hit::Clear);
         let results = choices(&app.state, active(&app.state).unwrap());
@@ -699,9 +930,91 @@ mod tests {
         assert_eq!(app.state.plugdb.prefs.menu_view, MenuView::Categories);
         app.state.playlist.popup = Some(crate::mixer::slot_menu(&app.state, 3, 0.0, 0.0));
         app.state.playlist.popup.as_mut().unwrap().sub = Some(0);
-        app.state.plugin_search.text = "lemon eq".into();
+        app.state.plugin_search.text = "lemon parametric".into();
         let results = choices(&app.state, active(&app.state).unwrap());
         assert_eq!(results[0].item.cmd, Cmd::Plugin(PlugCmd::Effect { index: 0, slot: Some(3) }));
+    }
+
+    #[test]
+    fn favorite_star_toggles_and_moves_to_favorites_group() {
+        let mut app = app_with_library(0);
+        app.open_plugin_menu(Target::Fx(Some(0)), (0.0, 0.0));
+        let target_idx = app.state.plugdb.lists.fx[0].index;
+        let target_uid = app.state.plugdb.lists.fx[0].uid.clone();
+        assert!(!app.state.plugdb.prefs.is_favorite(&target_uid));
+
+        // Click favorite star for target_idx
+        click(&mut app, Hit::ToggleFavorite(true, target_idx));
+        assert!(app.state.plugdb.prefs.is_favorite(&target_uid));
+        assert!(app.state.message.as_ref().unwrap().contains("Added"));
+
+        // Now that plugin should be at the top in Favorites
+        let updated = choices(&app.state, active(&app.state).unwrap());
+        assert_eq!(updated[0].entry.unwrap().uid, target_uid);
+        assert!(updated[0].entry.unwrap().favorite);
+
+        // Click again to un-favorite
+        click(&mut app, Hit::ToggleFavorite(true, target_idx));
+        assert!(!app.state.plugdb.prefs.is_favorite(&target_uid));
+        assert!(app.state.message.as_ref().unwrap().contains("Removed"));
+    }
+
+    #[test]
+    fn options_menu_open_toggle_and_actions() {
+        let mut app = app_with_library(10);
+        app.open_plugin_menu(Target::Fx(Some(0)), (0.0, 0.0));
+        assert_eq!(app.state.plugin_search.options, None);
+
+        // Open options menu for index 0
+        click(&mut app, Hit::Options(true, 0));
+        assert_eq!(app.state.plugin_search.options, Some((true, 0)));
+
+        // Toggling options on same plugin closes it
+        click(&mut app, Hit::Options(true, 0));
+        assert_eq!(app.state.plugin_search.options, None);
+
+        // Re-open
+        click(&mut app, Hit::Options(true, 0));
+        assert_eq!(app.state.plugin_search.options, Some((true, 0)));
+
+        // Show details action
+        click(&mut app, Hit::PluginDetails(true, 0));
+        assert_eq!(app.state.plugin_search.options, None);
+        assert!(app.state.message.as_ref().unwrap().contains("Lemon"));
+
+        // Copy path action
+        click(&mut app, Hit::CopyPath(true, 0));
+        assert!(app.state.message.as_ref().unwrap().contains("Plugin path:"));
+
+        // Open file location action (builtin)
+        click(&mut app, Hit::OpenFileLocation(true, 0));
+        assert!(app.state.message.as_ref().unwrap().contains("built-in"));
+
+        // Escape closes options first
+        app.state.plugin_search.options = Some((true, 0));
+        app.key(&Key::Named(NamedKey::Escape), false, false);
+        assert_eq!(app.state.plugin_search.options, None);
+        assert!(app.state.playlist.popup.is_some());
+    }
+
+    #[test]
+    fn favorites_view_filters_to_only_starred_plugins() {
+        let mut app = app_with_library(10);
+        app.open_plugin_menu(Target::Fx(Some(0)), (0.0, 0.0));
+        let all_count = choices(&app.state, active(&app.state).unwrap()).len();
+
+        // Switch to Favorites view
+        click(&mut app, Hit::Pick(PlugCmd::View(MenuView::Favorites)));
+        assert_eq!(app.state.plugdb.prefs.menu_view, MenuView::Favorites);
+
+        let fav_results = choices(&app.state, active(&app.state).unwrap());
+        assert!(fav_results.iter().all(|c| c.entry.is_some_and(|e| e.favorite)));
+        assert!(fav_results.len() < all_count);
+
+        // Switch back to Categories
+        click(&mut app, Hit::Pick(PlugCmd::View(MenuView::Categories)));
+        assert_eq!(app.state.plugdb.prefs.menu_view, MenuView::Categories);
+        assert_eq!(choices(&app.state, active(&app.state).unwrap()).len(), all_count);
     }
 
     #[test]
