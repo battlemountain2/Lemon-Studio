@@ -16,6 +16,7 @@ pub mod menus;
 pub mod midi_form;
 pub mod midi_page;
 pub mod mondebug;
+pub mod palette;
 pub mod settings;
 pub mod mixer;
 pub mod piano;
@@ -289,6 +290,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     if over_dialog {
         playlist::paint_overlays(ui, s);
     }
+    // Omni Command Palette modal overlay (Ctrl+K).
+    palette::paint(ui, s);
     overlays
 }
 
