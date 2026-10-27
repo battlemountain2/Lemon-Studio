@@ -9548,7 +9548,7 @@ mod tests {
         assert!(a.state.menu_sub.is_none());
 
         // 2. Level 1: Playlist popup dismissal
-        a.state.playlist.popup = Some(crate::playlist::Popup { x: 0.0, y: 0.0, items: vec![], sub: None });
+        a.state.playlist.popup = Some(crate::playlist::Popup { x: 0.0, y: 0.0, items: vec![], sub: None, scroll: [0; 2] });
         assert!(a.smart_escape());
         assert!(a.state.playlist.popup.is_none());
 
