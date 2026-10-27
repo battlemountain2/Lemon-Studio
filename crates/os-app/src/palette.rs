@@ -60,6 +60,7 @@ pub enum PaletteAction {
     ChopTransients,
     ChopGrid(crate::playlist::ChopGrid),
     ChopStutter(usize),
+    SeparateStems(crate::stem_separator::StemMode),
     CloseAll,
     CloseUnfocused,
     ClosePlugins,
@@ -303,6 +304,43 @@ pub fn items(s: &State) -> Vec<PaletteItem> {
         category: Category::Action,
         shortcut: None,
         action: PaletteAction::ChopStutter(8),
+    });
+    // Audio Stem Separation (Phase 6)
+    use crate::stem_separator::StemMode;
+    list.push(PaletteItem {
+        title: "Extract 8 Stems (Ultimate Deconstruction)".into(),
+        subtitle: "Separate clip into Kick, Snare, Hats, Bass, Lead Vocals, Backing Vocals, Instruments, Ambient FX".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::SeparateStems(StemMode::Stems8),
+    });
+    list.push(PaletteItem {
+        title: "Extract 6 Stems (Producer Suite)".into(),
+        subtitle: "Separate clip into Kick, Snare & Perc, Bass, Vocals, Instruments, Ambient FX".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::SeparateStems(StemMode::Stems6),
+    });
+    list.push(PaletteItem {
+        title: "Extract 4 Stems (Standard DAW)".into(),
+        subtitle: "Separate clip into Drums, Bass, Vocals, Other".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::SeparateStems(StemMode::All4),
+    });
+    list.push(PaletteItem {
+        title: "Extract Stems: Vocals & Music (2 Stems)".into(),
+        subtitle: "Isolate vocals and full instrumental backing track".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::SeparateStems(StemMode::VocalsAndMusic),
+    });
+    list.push(PaletteItem {
+        title: "Extract Stems: Drums & Melodic (2 Stems)".into(),
+        subtitle: "Isolate drums and all melodic musical content".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::SeparateStems(StemMode::DrumsAndMelody),
     });
     list.push(PaletteItem {
         title: "Undo".into(),
@@ -686,6 +724,13 @@ pub fn execute(app: &mut App, item: &PaletteItem) {
                 format!("Stutter chopped into {n} slices ({repeats}x)")
             } else {
                 "Select a clip to stutter chop".into()
+            });
+        }
+        PaletteAction::SeparateStems(mode) => {
+            let res = crate::stem_separator::separate_selected_or_target(&mut app.state, None, *mode);
+            app.say(match res {
+                Ok(clips) => format!("Extracted {} stems ({})", clips.len(), mode.label()),
+                Err(e) => format!("Stem separation: {e}"),
             });
         }
         PaletteAction::CloseAll => {

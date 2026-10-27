@@ -324,6 +324,8 @@ pub enum Cmd {
     ChopTransients(usize),
     ChopGrid(usize, ChopGrid),
     ChopStutter(usize, usize),
+    /// Audio stem separation (Phase 6).
+    SeparateStems(usize, crate::stem_separator::StemMode),
     /// A picker item's menu (§10a) on an audio or automation clip source: the command and the source's channel index.
     Pick(PickCmd, u16),
     PointDelete(u16, usize),
@@ -2464,6 +2466,21 @@ pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
         PItem::new("Stutter 8x (Roll)", Cmd::ChopStutter(i, 8)),
     ];
     items.push(PItem::sub("Chop / Slice", chop_sub));
+    // Audio stem separation (Phase 6)
+    if let ClipSource::Channel(ch) = c.source {
+        if s.project.channel(ch).is_some_and(|chan| chan.sample_path.is_some()) {
+            use crate::stem_separator::StemMode;
+            let stem_sub = vec![
+                PItem::new("8 Stems: Ultimate Deconstruction", Cmd::SeparateStems(i, StemMode::Stems8)),
+                PItem::new("6 Stems: Producer Suite", Cmd::SeparateStems(i, StemMode::Stems6)),
+                PItem::new("4 Stems: Standard DAW", Cmd::SeparateStems(i, StemMode::All4)),
+                PItem::sep(),
+                PItem::new("2 Stems: Vocals & Music", Cmd::SeparateStems(i, StemMode::VocalsAndMusic)),
+                PItem::new("2 Stems: Drums & Melodic", Cmd::SeparateStems(i, StemMode::DrumsAndMelody)),
+            ];
+            items.push(PItem::sub("Extract Stems", stem_sub));
+        }
+    }
     items.push(PItem::sep());
     items.push(PItem::new("Select all similar clips", Cmd::ClipSelectSimilar(i)));
     items.push(PItem::new("Delete", Cmd::ClipDelete(i)));
@@ -4162,13 +4179,21 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             app.invalidate();
             return Some(format!("Stutter chopped into {n} slices ({repeats}x)"));
         }
+        Cmd::SeparateStems(i, mode) => {
+            let res = crate::stem_separator::separate_clip_stems(&mut app.state, i, mode);
+            app.invalidate();
+            return Some(match res {
+                Ok(clips) => format!("Extracted {} stems ({})", clips.len(), mode.label()),
+                Err(e) => format!("Stem separation failed: {e}"),
+            });
+        }
         _ => {}
     }
     let s = &mut app.state;
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::ToggleReverse | Cmd::ChopTransients(_) | Cmd::ChopGrid(..) | Cmd::ChopStutter(..) | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::ToggleReverse | Cmd::ChopTransients(_) | Cmd::ChopGrid(..) | Cmd::ChopStutter(..) | Cmd::SeparateStems(..) | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
