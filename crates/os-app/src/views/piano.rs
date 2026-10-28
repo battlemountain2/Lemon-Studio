@@ -242,14 +242,22 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
                 room = x1 - w - 2.0 - nr.x;
             }
         }
-        if room > 8.0 && g.row >= 9.0 {
+        if room > 6.0 && g.row >= 5.5 {
             let label = match s.piano.note_display {
                 crate::piano::NoteDisplay::Name => Some(key_name(i32::from(n.key))),
                 crate::piano::NoteDisplay::Number => Some(n.key.to_string()),
                 crate::piano::NoteDisplay::None => None,
             };
             if let Some(label) = label {
-                let font = if g.row >= 13.0 { Font::new(11) } else if g.row >= 11.0 { Font::new(10) } else { Font::new(9) };
+                let font = if g.row >= 13.0 {
+                    Font::new(11)
+                } else if g.row >= 10.0 {
+                    Font::new(10)
+                } else if g.row >= 8.0 {
+                    Font::new(9)
+                } else {
+                    Font::new(8)
+                };
                 let w = ui.c.text_width(font, &label);
                 let shown = if w <= room - 4.0 {
                     label
@@ -259,8 +267,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
                     String::new()
                 };
                 if !shown.is_empty() {
-                    let y_offset = ((g.row - font.size as f32) / 2.0).clamp(1.0, 3.0);
+                    let lh = ui.c.line_height(font);
+                    let y_offset = ((g.row - lh) / 2.0).round();
+                    ui.c.push_clip(vis);
                     ui.c.text_clip(font, nr.x + if lemon { 4.0 } else { 3.0 }, nr.y + y_offset, room - 4.0, text, &shown);
+                    ui.c.pop_clip();
                 }
             }
         }
@@ -524,21 +535,10 @@ fn keyboard(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, lit: &[i32]) {
                     ui.c.fill_rect_gradient(Rect::new(k.x, y, 45.0, row - 1.0), left, left, 0.0);
                     ui.c.fill_rect(Rect::new(k.x + 45.0, y - half, k.w - 46.0, row - 1.0 + half), t.key_c);
                 }
-                if row >= 10.0 && s.piano.key_labels != crate::piano::KeyLabels::None {
-                    ui.c.text_right(Font::new(12), k.right() - 4.0, y + 1.0 + (row - ROW) / 2.0, t.key_label, &key_name(key));
-                }
                 ui.c.fill_rect(Rect::new(k.x, y + row - 1.0, k.w - 1.0, 1.0), sep);
             }
             5 => {
                 ui.c.fill_rect(Rect::new(k.x, y + row - 1.0, k.w - 1.0, 1.0), sep);
-                if row >= 10.0 && s.piano.key_labels == crate::piano::KeyLabels::AllWhite {
-                    ui.c.text_right(Font::new(if row >= 13.0 { 11 } else { 10 }), k.right() - 4.0, y + 1.0 + (row - ROW) / 2.0, t.key_label.with_alpha(190), &key_name(key));
-                }
-            }
-            2 | 4 | 7 | 9 | 11 => {
-                if row >= 10.0 && s.piano.key_labels == crate::piano::KeyLabels::AllWhite {
-                    ui.c.text_right(Font::new(if row >= 13.0 { 11 } else { 10 }), k.right() - 4.0, y + 1.0 + (row - ROW) / 2.0, t.key_label.with_alpha(190), &key_name(key));
-                }
             }
             _ => {}
         }
@@ -557,6 +557,34 @@ fn keyboard(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, lit: &[i32]) {
                 let x = k.x + if i == 0 { 0.0 } else { 10.0 + 8.0 * (i - 1) as f32 };
                 let w = if i == 0 { 10.0 } else if i == 5 { 3.0 } else { 8.0 };
                 ui.c.fill_rect(Rect::new(x, y, w, row), c);
+            }
+        }
+    }
+    // Key labels: drawn after black keys so text is completely unobstructed at all zoom levels.
+    if s.piano.key_labels != crate::piano::KeyLabels::None {
+        for key in lo..=hi {
+            let is_c = key.rem_euclid(12) == 0;
+            let is_white = !is_black(key);
+            let is_root = highlight.enabled && key.rem_euclid(12) == highlight.root as i32;
+            let show = if s.piano.key_labels == crate::piano::KeyLabels::AllWhite {
+                is_white
+            } else {
+                is_c || is_root
+            };
+            if show && row >= 5.0 {
+                let y = g.y_of(key);
+                let (font, y_text) = if is_c {
+                    let f = if row >= 13.0 { Font::new(11) } else if row >= 9.0 { Font::new(10) } else if row >= 7.0 { Font::new(9) } else { Font::new(8) };
+                    let lh = ui.c.line_height(f);
+                    let y_mid = y + (row - half) / 2.0;
+                    (f, (y_mid - lh / 2.0).round())
+                } else {
+                    let f = if row >= 13.0 { Font::new(10) } else if row >= 9.0 { Font::new(9) } else { Font::new(8) };
+                    let lh = ui.c.line_height(f);
+                    (f, (y + row / 2.0 - lh / 2.0).round())
+                };
+                let col = if is_c || is_root { t.key_label } else { t.key_label.with_alpha(190) };
+                ui.c.text_right(font, k.right() - 4.0, y_text, col, &key_name(key));
             }
         }
     }
