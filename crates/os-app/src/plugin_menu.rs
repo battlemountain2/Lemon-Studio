@@ -520,7 +520,7 @@ pub fn click(app: &mut App, hit: Hit) {
                 app.prefs_changed();
                 let fav = app.state.plugdb.prefs.is_favorite(&uid);
                 app.state.message = Some(if fav {
-                    format!("Added '{name}' to Favorites (★)")
+                    format!("Added '{name}' to Favorites")
                 } else {
                     format!("Removed '{name}' from Favorites")
                 });
@@ -695,11 +695,11 @@ pub fn paint(ui: &mut crate::app::Ui, s: &State, items: &[PItem], at: (f32, f32)
             theme.menu_pop_text, &choice.detail(view));
 
         if let Some(entry) = choice.entry {
-            // Star button (★ / ☆)
+            // Star button (Favorites)
             let star_r = Rect::new(row.right() - 52.0, row.y + 7.0, 24.0, 24.0);
             let is_fav = entry.favorite;
             let star_hov = ui.hit(star_r, Action::PluginMenu(Hit::ToggleFavorite(choice.effect, entry.index)),
-                if is_fav { "Remove from Favorites (★)" } else { "Add to Favorites (☆)" });
+                if is_fav { "Remove from Favorites" } else { "Add to Favorites" });
             if star_hov {
                 ui.c.fill_rrect(star_r, 4.0, theme.menu_pop_head);
             }
@@ -727,7 +727,7 @@ pub fn paint(ui: &mut crate::app::Ui, s: &State, items: &[PItem], at: (f32, f32)
     }
     if choices.is_empty() {
         let empty_msg = if view == MenuView::Favorites {
-            "No favorite plugins yet · Click ★ on any plugin to favorite"
+            "No favorite plugins yet · Click the star icon on any plugin to favorite"
         } else {
             "No matching plugins"
         };
@@ -793,7 +793,7 @@ pub fn paint(ui: &mut crate::app::Ui, s: &State, items: &[PItem], at: (f32, f32)
     let button_y = footer_y + 20.0;
     let button_w = (rect.w - 16.0) / 5.0;
     let filter_buttons = [
-        ("★ Favs", MenuView::Favorites),
+        ("Favorites", MenuView::Favorites),
         ("Category", MenuView::Categories),
         ("Vendor", MenuView::Vendor),
         ("A–Z", MenuView::Simple),

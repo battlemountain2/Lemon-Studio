@@ -338,6 +338,7 @@ impl App {
         if double {
             s.browser_w = crate::views::BROWSER_W;
             save_width(s.browser_w);
+            crate::win_clamp::keep_all(s);
             return self.invalidate();
         }
         self.drag = Some(Drag::BrowserSplit { dx: self.mouse.0 - crate::views::browser_w(&self.state) });
@@ -350,6 +351,7 @@ impl App {
         let w = right.min(s.screen.0 / 2.0).max(crate::views::BROWSER_W).round();
         if w != s.browser_w {
             s.browser_w = w;
+            crate::win_clamp::keep_all(s);
             self.invalidate();
         }
     }

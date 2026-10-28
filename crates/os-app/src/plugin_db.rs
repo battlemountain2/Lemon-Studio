@@ -811,7 +811,7 @@ impl Col {
 
     pub fn title(self) -> &'static str {
         match self {
-            Col::Star => "★",
+            Col::Star => "Fav",
             Col::Show => "Show",
             Col::Name => "Name",
             Col::Format => "Format",
