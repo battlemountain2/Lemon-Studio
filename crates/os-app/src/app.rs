@@ -3245,6 +3245,35 @@ impl App {
     /// Returns true if an action was taken / key consumed.
     pub fn smart_escape(&mut self) -> bool {
         // --- LEVEL 1: Popups, Dialogs, Menus, In-place Editors, Settings, Searches ---
+        if self.modal_open() {
+            use winit::keyboard::{Key, NamedKey};
+            self.dialog_key(&Key::Named(NamedKey::Escape), false, false);
+            return true;
+        }
+        if crate::remote::is_open(&self.state) {
+            self.state.link_box = None;
+            self.invalidate();
+            return true;
+        }
+        if self.state.piano.stamp.take().is_some() {
+            self.state.message = Some("Chord stamp cancelled".into());
+            self.damage_piano();
+            self.invalidate();
+            return true;
+        }
+        if self.state.piano.overlay.take().is_some() {
+            self.damage_piano();
+            self.invalidate();
+            return true;
+        }
+        if self.drag.take().is_some() {
+            self.hold = None;
+            self.damage_piano();
+            self.damage_win(Win::Playlist);
+            self.damage_win(Win::Mixer);
+            self.invalidate();
+            return true;
+        }
         if self.state.plugin_search.options.is_some() {
             self.state.plugin_search.options = None;
             self.invalidate();
@@ -3354,6 +3383,20 @@ impl App {
             self.invalidate();
             return true;
         }
+        if self.state.shown(Win::PianoRoll) && self.state.piano.tool != crate::piano::Tool::Draw {
+            self.state.piano.tool = crate::piano::Tool::Draw;
+            self.state.message = Some("Draw tool (Pencil)".into());
+            self.damage_piano();
+            self.invalidate();
+            return true;
+        }
+        if self.pl_focus() && self.state.playlist.tool != crate::playlist::PlTool::Draw {
+            self.state.playlist.tool = crate::playlist::PlTool::Draw;
+            self.state.message = Some("Draw tool (Pencil)".into());
+            self.damage_win(Win::Playlist);
+            self.invalidate();
+            return true;
+        }
         if self.state.piano.has_selection() {
             self.state.piano.clear_selection();
             self.invalidate();
@@ -3373,7 +3416,7 @@ impl App {
 
         // --- LEVEL 3: Frontmost Floating Plugin Windows ---
         match self.state.z.last().copied() {
-            Some(window @ (Win::Strum | Win::Arp)) => {
+            Some(window @ (Win::Strum | Win::Arp | Win::PianoDlg)) => {
                 self.act(Action::CloseWin(window));
                 return true;
             }
@@ -3421,13 +3464,17 @@ impl App {
         }
 
         // --- LEVEL 5: Background / unfocused floating plugin windows ---
-        if let Some(&top_plugin) = self.state.z.iter().rev().find(|&&w| matches!(w, Win::Plugin | Win::Hosted(_))) {
+        if let Some(&top_plugin) = self.state.z.iter().rev().find(|&&w| matches!(w, Win::Plugin | Win::Hosted(_) | Win::PianoDlg | Win::Strum | Win::Arp)) {
             match top_plugin {
                 Win::Hosted(row) => {
                     self.plugins.close_if_open(row);
                 }
                 Win::Plugin => {
                     self.state.hide(Win::Plugin);
+                }
+                w @ (Win::PianoDlg | Win::Strum | Win::Arp) => {
+                    self.act(Action::CloseWin(w));
+                    return true;
                 }
                 _ => {}
             }
@@ -6184,6 +6231,15 @@ impl App {
         self.raise_under_mouse();
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
+        if let Some(Action::ChannelSelect(i)) = action {
+            let at = crate::rack::box_at_row(&self.state, i, (x, y));
+            crate::rack::open_box(&mut self.state, crate::rack::RBox::Channel(i), at);
+            return self.invalidate();
+        }
+        if let Some(Action::PlHeader(t)) = action {
+            crate::playlist::start_edit(&mut self.state, crate::playlist::EditTarget::TrackName(t), (x, y));
+            return self.invalidate();
+        }
         if let Some(Action::Mix(h)) = action {
             if crate::mixer::middle(self, h) {
                 return self.invalidate();
@@ -6260,6 +6316,25 @@ impl App {
         }
         if self.state.plugin_search.options.is_some() {
             self.state.plugin_search.options = None;
+            self.invalidate();
+            return;
+        }
+        if self.state.piano.stamp.take().is_some() {
+            self.state.message = Some("Chord stamp cancelled".into());
+            self.damage_piano();
+            self.invalidate();
+            return;
+        }
+        if self.state.piano.overlay.take().is_some() {
+            self.damage_piano();
+            self.invalidate();
+            return;
+        }
+        if self.drag.take().is_some() {
+            self.hold = None;
+            self.damage_piano();
+            self.damage_win(Win::Playlist);
+            self.damage_win(Win::Mixer);
             self.invalidate();
             return;
         }
@@ -7323,6 +7398,24 @@ impl App {
             let scale_name = crate::chords::label(sh.scale_idx);
             let status = if sh.enabled { "on" } else { "off" };
             self.state.message = Some(format!("Scale highlighting: {status} ({root_name} {scale_name})"));
+            self.damage_piano();
+            self.invalidate();
+            return;
+        }
+        // Alt+N: Cycle Piano Roll note label display (Name -> Number -> None).
+        if let Key::Character(c) = key && alt && !ctrl && c.eq_ignore_ascii_case("n") {
+            let next = match self.state.piano.note_display {
+                crate::piano::NoteDisplay::Name => crate::piano::NoteDisplay::Number,
+                crate::piano::NoteDisplay::Number => crate::piano::NoteDisplay::None,
+                crate::piano::NoteDisplay::None => crate::piano::NoteDisplay::Name,
+            };
+            self.state.piano.note_display = next;
+            let desc = match next {
+                crate::piano::NoteDisplay::Name => "Note names (e.g. C5, D#5)",
+                crate::piano::NoteDisplay::Number => "MIDI note numbers (e.g. 60, 63)",
+                crate::piano::NoteDisplay::None => "None (clean note bodies)",
+            };
+            self.state.message = Some(format!("Piano roll note display: {desc}"));
             self.damage_piano();
             self.invalidate();
             return;
@@ -8783,10 +8876,18 @@ impl App {
         use crate::knobs::KnobId;
         use crate::rack as rk;
         let (x, y) = self.mouse;
+        if let Action::ChannelEnable(i) = *a {
+            if self.shift {
+                let popup = rk::led_menu(&self.state, i, x, y);
+                self.state.playlist.popup = Some(popup);
+            } else {
+                rk::solo(&mut self.state, i);
+            }
+            return true;
+        }
         let s = &self.state;
         let popup = match *a {
             Action::ChannelSelect(i) => rk::channel_menu(s, i, x, y),
-            Action::ChannelEnable(i) => rk::led_menu(s, i, x, y),
             Action::RackMixer(i) => rk::mixer_menu(s, i, x, y),
             Action::Knob(k @ (KnobId::ChanVol(_) | KnobId::ChanPan(_) | KnobId::Swing)) => rk::knob_menu(s, k, self.automation_target(a), x, y),
             Action::RackFilter => rk::filter_edit_menu(s, x, y),
@@ -21271,5 +21372,73 @@ mod tests {
         // - cycles to previous pattern
         app.key(&Key::Character("-".into()), false, false);
         assert_eq!(app.state.pattern, 1);
+    }
+
+    #[test]
+    fn fl_studio_smart_escape_and_interaction_parity() {
+        use winit::keyboard::Key;
+        let mut app = App::new(None);
+
+        // 1. Modal dialog dismiss via mouse_back (smart_escape Level 1)
+        app.show_msg(crate::dialog::Msg::new(
+            crate::dialog::Kind::Info,
+            "Notice",
+            crate::dialog::spans(&["Test modal"]),
+            &[crate::dialog::Answer::Ok],
+            crate::dialog::Then::Nothing,
+        ));
+        assert!(app.modal_open(), "Modal is open");
+        app.mouse_back();
+        assert!(!app.modal_open(), "Mouse back (smart_escape) dismissed modal dialog");
+
+        // 2. Chord stamp cancel via smart_escape & right-click
+        app.state.piano.stamp = Some(1);
+        app.mouse_back();
+        assert!(app.state.piano.stamp.is_none(), "Mouse back cancelled chord stamp");
+
+        app.state.piano.stamp = Some(2);
+        app.mouse_down_right();
+        assert!(app.state.piano.stamp.is_none(), "Right click cancelled chord stamp without altering notes");
+
+        // 3. Piano roll overlay cancel via smart_escape
+        app.state.piano.overlay = Some(crate::piano::Overlay::Slice(48));
+        app.mouse_back();
+        assert!(app.state.piano.overlay.is_none(), "Mouse back cancelled piano roll overlay");
+
+        // 4. Active drag cancel via smart_escape
+        app.drag = Some(Drag::NoteErase);
+        app.mouse_back();
+        assert!(app.drag.is_none(), "Mouse back cancelled active drag");
+
+        // 5. Piano roll tool reset to Draw on Escape before closing window
+        app.state.raise(Win::PianoRoll);
+        app.state.piano.tool = crate::piano::Tool::Slice;
+        app.mouse_back();
+        assert_eq!(app.state.piano.tool, crate::piano::Tool::Draw, "Smart escape returned Slice tool to Draw tool");
+        assert!(app.state.shown(Win::PianoRoll), "Piano roll window remains open when tool was reset");
+
+        // 6. Win::PianoDlg closed via smart_escape
+        app.state.raise(Win::PianoDlg);
+        app.mouse_back();
+        assert!(!app.state.shown(Win::PianoDlg), "Smart escape closed PianoDlg");
+
+        // 7. Channel enable LED right-click solos / un-solos channel
+        app.rack_right(&Action::ChannelEnable(0));
+        assert_eq!(app.state.rack.soloed, Some(0), "Right click on channel LED soloed channel 0");
+        app.rack_right(&Action::ChannelEnable(0));
+        assert_eq!(app.state.rack.soloed, None, "Second right click on channel LED restored/un-soloed");
+
+        // 8. Alt+N cycles Piano roll note display (Name -> Number -> None -> Name)
+        assert_eq!(app.state.piano.note_display, crate::piano::NoteDisplay::Name);
+        app.key(&Key::Character("n".into()), false, true);
+        assert_eq!(app.state.piano.note_display, crate::piano::NoteDisplay::Number);
+        app.key(&Key::Character("n".into()), false, true);
+        assert_eq!(app.state.piano.note_display, crate::piano::NoteDisplay::None);
+        app.key(&Key::Character("n".into()), false, true);
+        assert_eq!(app.state.piano.note_display, crate::piano::NoteDisplay::Name);
+
+        // 9. Mixer middle-click starts track rename
+        crate::mixer::middle(&mut app, crate::mixer::MHit::Strip(1));
+        assert!(app.state.playlist.edit.is_some(), "Middle click on mixer strip opened track rename");
     }
 }
