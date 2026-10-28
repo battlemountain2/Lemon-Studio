@@ -210,6 +210,88 @@ impl App {
             }
             return true;
         }
+        if over && !focus && !ctrl && !alt {
+            match key {
+                Key::Named(NamedKey::ArrowDown) if !shift => {
+                    let list = crate::views::browser::rows(&self.state);
+                    if !list.is_empty() {
+                        let cur_idx = self.state.browser_sel.as_ref().and_then(|k| list.iter().position(|r| &r.key == k));
+                        let next_idx = cur_idx.map_or(0, |i| (i + 1).min(list.len() - 1));
+                        let target = &list[next_idx];
+                        self.state.browser_sel = Some(target.key.clone());
+                        if let Item::Sample(ref path) = target.item {
+                            self.preview_sample(path);
+                        }
+                        self.invalidate();
+                        return true;
+                    }
+                }
+                Key::Named(NamedKey::ArrowUp) if !shift => {
+                    let list = crate::views::browser::rows(&self.state);
+                    if !list.is_empty() {
+                        let cur_idx = self.state.browser_sel.as_ref().and_then(|k| list.iter().position(|r| &r.key == k));
+                        let next_idx = cur_idx.map_or(0, |i| i.saturating_sub(1));
+                        let target = &list[next_idx];
+                        self.state.browser_sel = Some(target.key.clone());
+                        if let Item::Sample(ref path) = target.item {
+                            self.preview_sample(path);
+                        }
+                        self.invalidate();
+                        return true;
+                    }
+                }
+                Key::Named(NamedKey::Space) => {
+                    let list = crate::views::browser::rows(&self.state);
+                    if let Some(target) = self.state.browser_sel.as_ref().and_then(|k| list.iter().find(|r| &r.key == k)) {
+                        if let Item::Sample(ref path) = target.item {
+                            self.preview_sample(path);
+                            return true;
+                        }
+                    }
+                }
+                Key::Named(NamedKey::Enter) => {
+                    let list = crate::views::browser::rows(&self.state);
+                    if let Some(target) = self.state.browser_sel.as_ref().and_then(|k| list.iter().find(|r| &r.key == k)) {
+                        if let Item::Sample(ref path) = target.item {
+                            if let Some(m) = send_sample(&mut self.state, path, &target.label) {
+                                self.state.message = Some(m);
+                            }
+                            self.invalidate();
+                            return true;
+                        } else if target.open.is_some() {
+                            if self.state.browser_open.contains(&target.key) {
+                                self.state.browser_open.remove(&target.key);
+                            } else {
+                                self.state.browser_open.insert(target.key.clone());
+                            }
+                            self.invalidate();
+                            return true;
+                        }
+                    }
+                }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    let list = crate::views::browser::rows(&self.state);
+                    if let Some(target) = self.state.browser_sel.as_ref().and_then(|k| list.iter().find(|r| &r.key == k)) {
+                        if target.open == Some(true) {
+                            self.state.browser_open.remove(&target.key);
+                            self.invalidate();
+                            return true;
+                        }
+                    }
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    let list = crate::views::browser::rows(&self.state);
+                    if let Some(target) = self.state.browser_sel.as_ref().and_then(|k| list.iter().find(|r| &r.key == k)) {
+                        if target.open == Some(false) {
+                            self.state.browser_open.insert(target.key.clone());
+                            self.invalidate();
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         let s = &mut self.state;
         if focus {
             match key {

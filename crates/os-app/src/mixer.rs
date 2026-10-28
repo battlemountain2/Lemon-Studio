@@ -51,6 +51,7 @@ pub enum MHit {
 pub enum MCmd {
     Rename(u16),
     Color(u16, Option<Rgb>),
+    ColorGradient,
     RandomColor(u16),
     Reset(u16),
     ResetRouting(u16),
@@ -970,7 +971,7 @@ fn track_items(n: u16) -> Vec<PItem> {
         PItem::new("Rename, color and icon...", mx(MCmd::Rename(n))).key("F2"),
         PItem::sub("Change color...", colors),
         PItem::new("Random color", mx(MCmd::RandomColor(n))),
-        PItem::not_yet("Gradient color..."),
+        PItem::new("Gradient color...", mx(MCmd::ColorGradient)).key("Shift+Alt+C"),
         PItem::not_yet("Change icon..."),
         PItem::not_yet("Assign to new Audio track(s)"),
         PItem::not_yet("Unassign from Audio track(s)"),
@@ -1173,6 +1174,10 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
             }
             None
         }
+        MCmd::ColorGradient => {
+            gradient(&mut app.state);
+            Some("Applied color gradient to mixer tracks".into())
+        }
         MCmd::AudioEditor(n) => {
             app.audio_editor(n, false);
             return None;
@@ -1328,6 +1333,35 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
     };
     app.invalidate();
     msg
+}
+
+/// Applies a smooth color gradient across the selected mixer tracks (or all inserts if < 2 selected).
+pub fn gradient(s: &mut State) {
+    let mut tracks = s.mixer.sel.clone();
+    if tracks.len() < 2 {
+        tracks = (1..=s.project.mixer.len().saturating_sub(1) as u16).collect();
+    }
+    if tracks.len() < 2 {
+        return;
+    }
+    tracks.sort_unstable();
+    let first_col = track(s, tracks[0]).and_then(|t| t.color);
+    let last_col = track(s, *tracks.last().unwrap()).and_then(|t| t.color);
+    let n = (tracks.len() - 1) as f32;
+    for (i, &tr) in tracks.iter().enumerate() {
+        let t = i as f32 / n;
+        let c = match (first_col, last_col) {
+            (Some(a), Some(b)) if a != b => {
+                let l = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+                os_model::Rgb::new(l(a.r, b.r), l(a.g, b.g), l(a.b, b.b))
+            }
+            _ => crate::playlist::hsl_rgb(300.0 * t, 0.40, 0.50),
+        };
+        if let Some(m) = track_mut(s, tr) {
+            m.color = Some(c);
+        }
+    }
+    changed(s);
 }
 
 /// Tracks a "selected track(s)" command acts on: the selection when `n` is in it, else `n` alone.

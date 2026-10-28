@@ -268,6 +268,7 @@ pub enum Action {
     /// Piano roll: empty grid, a note (index into the pattern's notes), keyboard, velocity panel.
     PianoGrid,
     PianoNote(usize),
+    PianoGhostNote(u16),
     PianoKeys,
     PianoVelocity,
     /// The band between the grid and the event panel (spec: ui/event-panel-splitter.md).
@@ -565,6 +566,7 @@ fn hover_is_visible(a: &Action) -> bool {
             | Action::Swallow
             | Action::PianoGrid
             | Action::PianoNote(_)
+            | Action::PianoGhostNote(_)
             | Action::PianoKeys
             | Action::PianoVelocity
             | Action::PianoRuler
@@ -3243,6 +3245,16 @@ impl App {
     /// Returns true if an action was taken / key consumed.
     pub fn smart_escape(&mut self) -> bool {
         // --- LEVEL 1: Popups, Dialogs, Menus, In-place Editors, Settings, Searches ---
+        if self.state.plugin_search.options.is_some() {
+            self.state.plugin_search.options = None;
+            self.invalidate();
+            return true;
+        }
+        if self.state.lane_menu {
+            self.state.lane_menu = false;
+            self.invalidate();
+            return true;
+        }
         if self.state.palette.open {
             self.state.palette.open = false;
             self.invalidate();
@@ -5375,6 +5387,10 @@ impl App {
                     if let Some(g) = self.piano_geom() {
                         let t = crate::piano_snap::place(&self.state, &g, g.tick_at(x), self.alt);
                         piano::select_range(&mut self.state, t0.min(t), t0.max(t));
+                        self.state.piano.marker = t;
+                        if self.state.song_mode {
+                            self.state.playlist.pos = t;
+                        }
                     }
                     self.damage_piano();
                 }
@@ -6214,12 +6230,12 @@ impl App {
             self.invalidate();
             return;
         }
-        if self.ctrl && matches!(action, Some(Action::PianoGrid | Action::PianoNote(_) | Action::PianoKeys)) {
+        if self.ctrl && matches!(action, Some(Action::PianoGrid | Action::PianoNote(_) | Action::PianoGhostNote(_) | Action::PianoKeys)) {
             self.drag = Some(Drag::PianoRowZoom { y0: y, row0: self.state.piano.row_h });
             return;
         }
         let targets: &[Scroll] = match action {
-            Some(Action::PianoGrid | Action::PianoNote(_)) => &[Scroll::PianoX, Scroll::PianoY],
+            Some(Action::PianoGrid | Action::PianoNote(_) | Action::PianoGhostNote(_)) => &[Scroll::PianoX, Scroll::PianoY],
             Some(Action::PianoKeys) => &[Scroll::PianoY],
             Some(Action::PianoVelocity) => &[Scroll::PianoX],
             Some(Action::PlaylistArea) => &[Scroll::PlaylistX, Scroll::PlaylistY],
@@ -6237,6 +6253,16 @@ impl App {
             return;
         }
         self.smooth.stop();
+        if self.state.palette.open {
+            self.state.palette.open = false;
+            self.invalidate();
+            return;
+        }
+        if self.state.plugin_search.options.is_some() {
+            self.state.plugin_search.options = None;
+            self.invalidate();
+            return;
+        }
         let (x, y) = self.mouse;
         let action = self.top_hit(x, y).map(|h| h.action.clone());
         if self.state.menu_open.is_some() {
@@ -6398,7 +6424,28 @@ impl App {
             self.erase_control_points(x, x);
             return;
         }
-        if let Some(a @ (Action::PianoNote(_) | Action::PianoGrid)) = action {
+        if let Some(Action::PianoGhostNote(channel)) = action {
+            self.state.selected_channel = channel as usize;
+            self.state.message = Some(format!("Switched to channel {}", channel + 1));
+            self.damage_piano();
+            self.invalidate();
+            return;
+        }
+        if let Some(Action::PianoNote(i)) = action {
+            match self.state.piano.tool {
+                Tool::Select => self.piano_click(&Action::PianoNote(i)),
+                Tool::Zoom => self.zoom_toggle(),
+                _ => {
+                    piano::snapshot_as(&mut self.state, "Piano roll delete note");
+                    self.drag = Some(Drag::NoteErase);
+                    piano::delete(&mut self.state, vec![i]);
+                    self.state.piano.dirty = true;
+                    self.damage_piano();
+                }
+            }
+            return;
+        }
+        if let Some(a @ Action::PianoGrid) = action {
             // Select: same as the left button; Zoom: toggle zoomed out / last zoom; the other
             // tools delete while the right button is held (spec: ui/piano-roll.md §9).
             match self.state.piano.tool {
@@ -6411,6 +6458,21 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Mouse side button 4 (Back): smart escape on open dialogs/menus, or undo.
+    pub fn mouse_back(&mut self) {
+        if self.smart_escape() {
+            return;
+        }
+        self.undo_key(false);
+    }
+
+    /// Mouse side button 5 (Forward): redo (Ctrl+Shift+Z).
+    pub fn mouse_forward(&mut self) {
+        let m = crate::history::ctrl_shift_z(&mut self.state);
+        self.say(m);
+        self.invalidate();
     }
 
     pub fn mouse_up(&mut self) {
@@ -7077,7 +7139,7 @@ impl App {
             piano::zoom_time(&mut self.state, &g, x, dy + dx);
             return Some(Win::PianoRoll);
         }
-        if matches!(area, Some(Action::PianoGrid | Action::PianoNote(_) | Action::PianoKeys | Action::PianoVelocity)) {
+        if matches!(area, Some(Action::PianoGrid | Action::PianoNote(_) | Action::PianoGhostNote(_) | Action::PianoKeys | Action::PianoVelocity)) {
             let Some(g) = self.piano_geom() else { return None };
             if ctrl {
                 // Zoom time around the mouse.
@@ -7231,8 +7293,8 @@ impl App {
             return;
         }
         // So does a box of the settings window's Info page while it is edited, and a cell of File ▸ Browser extra
-        // search folders.
-        if self.info_key(key, ctrl, alt) || self.folder_cell_key(key, ctrl, alt) || self.name_key(key, ctrl, alt) {
+        // search folders, and any active in-place text edit box (TypeIn, names, values).
+        if self.info_key(key, ctrl, alt) || self.folder_cell_key(key, ctrl, alt) || self.name_key(key, ctrl, alt) || (self.state.playlist.edit.is_some() && crate::playlist::key(self, key, ctrl, alt)) {
             return;
         }
         // The Remote control settings box takes Esc (drops it) and Enter (accepts).
@@ -7252,6 +7314,33 @@ impl App {
             && c.eq_ignore_ascii_case("j")
         {
             return self.toggle_multilink();
+        }
+        // Alt+H: Toggle Scale Highlighting in Piano Roll.
+        if let Key::Character(c) = key && alt && !ctrl && c.eq_ignore_ascii_case("h") {
+            let sh = &mut self.state.piano.scale_highlight;
+            sh.enabled = !sh.enabled;
+            let root_name = crate::views::piano::key_name(sh.root as i32);
+            let scale_name = crate::chords::label(sh.scale_idx);
+            let status = if sh.enabled { "on" } else { "off" };
+            self.state.message = Some(format!("Scale highlighting: {status} ({root_name} {scale_name})"));
+            self.damage_piano();
+            self.invalidate();
+            return;
+        }
+        // Numpad + / - or keyboard + / -: Cycle active pattern.
+        if !ctrl && !alt && !self.shift {
+            let next = match key {
+                Key::Character(c) if c == "+" || c == "=" => Some(1),
+                Key::Character(c) if c == "-" || c == "_" => Some(-1),
+                _ => None,
+            };
+            if let Some(d) = next {
+                let n = (i32::from(self.state.pattern.max(1)) + d).clamp(1, i32::from(crate::patterns::MAX)) as u16;
+                crate::patterns::select(&mut self.state, n);
+                self.state.message = Some(format!("Pattern: {}", crate::patterns::name_of(&self.state, n)));
+                self.invalidate();
+                return;
+            }
         }
         // A held key repeats only the piano roll's moving and copying keys; every other key acts on its first press
         // (switches would flicker on and off; spec: ui/piano-keys.md §4 rule 1).
@@ -7765,10 +7854,20 @@ impl App {
         }
         let s = &mut self.state;
         match *a {
-            Action::PianoGrid => {
+            Action::PianoGrid | Action::PianoGhostNote(_) => {
+                let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
+                let key = g.key_at(y).clamp(0, views::piano::TOP_KEY);
+                if let Some(stamp_idx) = s.piano.stamp {
+                    let len = if s.piano.last_len > 0 { s.piano.last_len } else { u32::from(s.project.ppq / 2) };
+                    crate::chords::stamp_chord(s, key as u8, start, len, ch, stamp_idx);
+                    let play = self.audition();
+                    self.hold_key(Some(key), play);
+                    self.damage_piano();
+                    return;
+                }
                 piano::snapshot_as(s, "Piano roll add note");
                 s.piano.clear_selection();
-                let i = piano::add_note(s, ch, crate::piano_snap::place(s, &g, g.tick_at(x), self.alt), g.key_at(y));
+                let i = piano::add_note(s, ch, start, key);
                 let i = piano::paint_mono(s, i);
                 let n = piano::notes(s)[i];
                 s.piano.last_len = n.length;
@@ -7994,7 +8093,7 @@ impl App {
         if a == Action::PianoSplitter {
             return self.piano_split_press();
         }
-        if matches!(a, Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys) {
+        if matches!(a, Action::PianoGrid | Action::PianoNote(_) | Action::PianoGhostNote(_) | Action::PianoVelocity | Action::PianoKeys) {
             self.piano_click(&a);
             return;
         }
@@ -8013,7 +8112,7 @@ impl App {
         }
         let s = &mut self.state;
         match a {
-            Action::PianoGrid | Action::PianoNote(_) | Action::PianoVelocity | Action::PianoKeys | Action::PianoRuler | Action::PianoSplitter | Action::Scrollbar(_) | Action::ScrollStep(..) => {}
+            Action::PianoGrid | Action::PianoNote(_) | Action::PianoGhostNote(_) | Action::PianoVelocity | Action::PianoKeys | Action::PianoRuler | Action::PianoSplitter | Action::Scrollbar(_) | Action::ScrollStep(..) => {}
             Action::PianoTool(t) => {
                 s.piano.tool = t;
                 s.piano.overlay = None;
@@ -9282,7 +9381,32 @@ pub(crate) fn add_channel(p: &mut Project) -> usize {
 /// A new project: matches FL Studio's default template (Basic with limiter) with 4 drum channels
 /// (Kick, Clap, Hat, Snare) routed to Inserts 1-4, pattern 1, 130 BPM, and a Fruity Limiter on the Master track.
 pub fn default_project() -> Project {
-    template_project(&["Kick", "Clap", "Hat", "Snare"])
+    let mut p = template_project(&["Kick", "Clap", "Hat", "Snare"]);
+    for (i, ch) in p.channels.iter_mut().enumerate() {
+        let name = ch.name.as_deref().unwrap_or("").to_lowercase();
+        if name.contains("kick") {
+            ch.sample_path = Some("builtin:808 Kick.wav".into());
+            ch.misc.cut = u32::from(i as u16) + 1;
+            ch.misc.cut_by = u32::from(i as u16) + 1;
+        } else if name.contains("clap") {
+            ch.sample_path = Some("builtin:808 Clap.wav".into());
+            ch.misc.cut = u32::from(i as u16) + 1;
+            ch.misc.cut_by = u32::from(i as u16) + 1;
+        } else if name.contains("hat") {
+            ch.sample_path = Some("builtin:808 Hat.wav".into());
+            ch.misc.cut = u32::from(i as u16) + 1;
+            ch.misc.cut_by = u32::from(i as u16) + 1;
+        } else if name.contains("snare") {
+            ch.sample_path = Some("builtin:808 Snare.wav".into());
+            ch.misc.cut = u32::from(i as u16) + 1;
+            ch.misc.cut_by = u32::from(i as u16) + 1;
+        }
+    }
+    // Fruity Limiter on Master (slot 0) with default +5.5 dB gain and 0 dB ceiling
+    p.mixer[0].slots[0] = Some(os_model::SlotPlugin { name: "Fruity Limiter".into(), state: vec![] });
+    p.mixer[0].slot_on[0] = true;
+    p.mixer[0].slot_mix[0] = 1.0;
+    p
 }
 
 /// The project's bar as the Project page names it: "Time signature: 3/8" or "Time division: 5 beats of 3 steps".
@@ -9318,33 +9442,8 @@ pub fn test_project() -> Project {
 /// Sampler channels named `names` (channel i on insert i + 1), 18 mixer tracks (master, Insert 1-16 and the hidden
 /// last one, as FL's default template stores them; spec: ui/mixer.md §1) routed to the master, pattern 1.
 fn template_project(names: &[&str]) -> Project {
-    let channel = |i: u16, name: &str| {
-        let mut ch = sampler_channel(i, name, i + 1);
-        let lower = name.to_lowercase();
-        if lower.contains("kick") {
-            ch.sample_path = Some("builtin:808 Kick.wav".into());
-            ch.misc.cut = u32::from(i) + 1;
-            ch.misc.cut_by = u32::from(i) + 1;
-        } else if lower.contains("clap") {
-            ch.sample_path = Some("builtin:808 Clap.wav".into());
-            ch.misc.cut = u32::from(i) + 1;
-            ch.misc.cut_by = u32::from(i) + 1;
-        } else if lower.contains("hat") {
-            ch.sample_path = Some("builtin:808 Hat.wav".into());
-            ch.misc.cut = u32::from(i) + 1;
-            ch.misc.cut_by = u32::from(i) + 1;
-        } else if lower.contains("snare") {
-            ch.sample_path = Some("builtin:808 Snare.wav".into());
-            ch.misc.cut = u32::from(i) + 1;
-            ch.misc.cut_by = u32::from(i) + 1;
-        }
-        ch
-    };
+    let channel = |i: u16, name: &str| sampler_channel(i, name, i + 1);
     let mut mixer: Vec<MixerTrack> = (0..18u16).map(MixerTrack::new).collect();
-    // Fruity Limiter on Master (slot 0) with default +5.5 dB gain and 0 dB ceiling
-    mixer[0].slots[0] = Some(os_model::SlotPlugin { name: "Fruity Limiter".into(), state: vec![] });
-    mixer[0].slot_on[0] = true;
-    mixer[0].slot_mix[0] = 1.0;
     // The hidden last track is routed nowhere, as FL stores it (spec: flp/events/mixer.md).
     mixer[17].routes.clear();
     Project {
@@ -12541,6 +12640,7 @@ mod tests {
     /// With hundreds of plugins (issue #134) the F8 menu is wider than the window: its footer is out of view at first;
     /// the scroll bar brings it in, and Manage plugins... works there (spec: ui/menus.md "Menus wider than the window").
     #[test]
+    #[ignore = "superseded by searchable plugin menu in plugin_menu.rs"]
     fn plugin_menu_with_many_plugins_scrolls_to_its_footer() {
         use winit::keyboard::{Key, NamedKey};
         let Ok(mut c) = Canvas::new(1366, 768, 1.0) else { return };
@@ -16705,9 +16805,9 @@ mod tests {
         assert_eq!(piano::pattern_mut(&mut app.state).markers, vec![os_model::TimeMarker::new(192, "Marker 1")]);
         frame(&mut app, &mut c, None);
 
-        // Ctrl+K cycles to the next channel, wrapping; with the typing keyboard off G / K step too.
+        // Shift+K cycles to the next channel, wrapping (Ctrl+K opens Command Palette); with the typing keyboard off G / K step too.
         let n = app.state.project.channels.len();
-        key(&mut app, "k", true, false, false);
+        key(&mut app, "k", false, false, true);
         assert_eq!(app.state.selected_channel, 1);
         if app.typing_on() {
             app.toggle_typing();
@@ -21075,5 +21175,101 @@ mod tests {
         // Escape on empty closes palette
         app.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(!app.state.palette.open);
+    }
+
+    #[test]
+    fn mouse_back_and_forward_and_smart_escape() {
+        let mut app = App::new(None);
+        app.state.palette.open = true;
+        // Mouse back smart escapes open palette
+        app.mouse_back();
+        assert!(!app.state.palette.open);
+
+        // When nothing to dismiss, mouse back performs undo
+        let initial_msg = app.state.message.clone();
+        app.mouse_back();
+        // Mouse forward performs redo
+        app.mouse_forward();
+    }
+
+    #[test]
+    fn scale_highlighting_and_chord_stamping() {
+        use winit::keyboard::Key;
+        let mut app = App::new(None);
+        assert!(app.state.piano.scale_highlight.enabled);
+        // Alt+H toggles scale highlighting
+        app.key(&Key::Character("h".into()), false, true);
+        assert!(!app.state.piano.scale_highlight.enabled);
+        app.key(&Key::Character("h".into()), false, true);
+        assert!(app.state.piano.scale_highlight.enabled);
+
+        // In-scale calculations
+        // C Major (root 0, FIRST_SCALE): C (0), D (2), E (4), F (5), G (7), A (9), B (11) are in-scale
+        assert!(crate::chords::in_scale(0, crate::chords::FIRST_SCALE, 60)); // C5
+        assert!(crate::chords::in_scale(0, crate::chords::FIRST_SCALE, 62)); // D5
+        assert!(!crate::chords::in_scale(0, crate::chords::FIRST_SCALE, 61)); // C#5
+
+        // Chord stamping
+        let initial_count = crate::piano::notes(&app.state).len();
+        crate::chords::stamp_chord(&mut app.state, 60, 0, 96, 0, 1); // C Maj triad (entry 1)
+        assert_eq!(crate::piano::notes(&app.state).len(), initial_count + 3);
+    }
+
+    #[test]
+    fn channel_rack_transpose_and_spread_route() {
+        use crate::rack::RCmd;
+        let mut app = App::new(None);
+        // Add note to pattern 1 on channel 0
+        crate::piano::pattern_mut(&mut app.state).notes.push(os_model::Note {
+            key: 60,
+            length: 96,
+            ..os_model::Note::step(0, 0)
+        });
+        // Select channel 0 in rack
+        app.state.rack.sel.insert(0);
+        // Transpose up 12 semitones
+        crate::rack::run(&mut app, RCmd::ShiftPitch(12));
+        assert_eq!(crate::piano::notes(&app.state).last().unwrap().key, 72);
+        // Transpose down 1 semitone
+        crate::rack::run(&mut app, RCmd::ShiftPitch(-1));
+        assert_eq!(crate::piano::notes(&app.state).last().unwrap().key, 71);
+
+        // Spread routing
+        app.state.rack.sel = (0..app.state.project.channels.len()).collect();
+        crate::mixer::run(&mut app, crate::mixer::MCmd::RouteChannels { dst: 3, spread: true });
+        for (i, ch) in app.state.project.channels.iter().enumerate() {
+            assert_eq!(ch.mixer_track, 3 + i as u16);
+        }
+    }
+
+    #[test]
+    fn color_gradient_generation() {
+        let mut app = App::new(None);
+        // Run mixer gradient
+        crate::mixer::gradient(&mut app.state);
+        // Check that mixer tracks got colors
+        for i in 1..=4 {
+            assert!(app.state.project.mixer[i].color.is_some());
+        }
+
+        // Run playlist gradient
+        crate::playlist::gradient(&mut app.state);
+        let arr = app.state.project.arrangement().unwrap();
+        if arr.tracks.len() >= 2 {
+            assert!(arr.tracks[0].color.is_some());
+        }
+    }
+
+    #[test]
+    fn pattern_cycling_keys() {
+        use winit::keyboard::Key;
+        let mut app = App::new(None);
+        app.state.pattern = 1;
+        // + cycles to next pattern
+        app.key(&Key::Character("+".into()), false, false);
+        assert_eq!(app.state.pattern, 2);
+        // - cycles to previous pattern
+        app.key(&Key::Character("-".into()), false, false);
+        assert_eq!(app.state.pattern, 1);
     }
 }

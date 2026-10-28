@@ -157,8 +157,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     lit.extend(s.piano.typed.iter().filter(|&&(c, _)| Some(c) == ch).map(|&(_, k)| k));
     lit.extend(f.sounding.iter().filter(|&&(c, _)| Some(c) == ch).map(|&(_, k)| i32::from(k)));
     ui.live(Live::Sounding, l.keys);
-    keyboard(ui, &l, &g, &lit);
-    grid(ui, &l, &g, range);
+    keyboard(ui, s, &l, &g, &lit);
+    grid(ui, s, &l, &g, range);
 
     // Notes: ghosts of the other channels first (when shown, Alt+V), then this channel's (§5).
     ui.hit(l.grid, Action::PianoGrid, "Piano roll: click to add a note, drag a note to move it or its end to resize, right-click to delete");
@@ -166,10 +166,12 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let ghost = t.text_faint.with_alpha(110);
     for n in notes.iter().filter(|n| s.piano.ghosts && Some(n.channel) != ch) {
         if let Some(nr) = g.note_rect(n).filter(|nr| nr.intersect(&l.grid).w > 0.0) {
+            let vis = nr.intersect(&l.grid);
+            let hint = format!("Ghost note (channel {}): right-click to switch channel", n.channel + 1);
+            ui.hit(vis, Action::PianoGhostNote(n.channel), hint);
             ui.c.stroke_rrect(nr.inset(1.5), if lemon { 3.0 } else { 2.0 }, 1.0, ghost);
         }
     }
-    let label_font = Font::new(11);
     for (i, n) in notes.iter().enumerate().filter(|(_, n)| Some(n.channel) == ch) {
         let Some(nr) = g.note_rect(n) else { continue };
         let vis = nr.intersect(&l.grid);
@@ -240,11 +242,27 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
                 room = x1 - w - 2.0 - nr.x;
             }
         }
-        if room > 12.0 && g.row >= 13.0 {
-            let label = key_name(i32::from(n.key));
-            let w = ui.c.text_width(label_font, &label);
-            let shown = if w <= room - 5.0 { label } else { format!("{}..", &label[..1]) };
-            ui.c.text_clip(label_font, nr.x + if lemon { 4.0 } else { 3.0 }, nr.y + 2.0, room - 4.0, text, &shown);
+        if room > 8.0 && g.row >= 9.0 {
+            let label = match s.piano.note_display {
+                crate::piano::NoteDisplay::Name => Some(key_name(i32::from(n.key))),
+                crate::piano::NoteDisplay::Number => Some(n.key.to_string()),
+                crate::piano::NoteDisplay::None => None,
+            };
+            if let Some(label) = label {
+                let font = if g.row >= 13.0 { Font::new(11) } else if g.row >= 11.0 { Font::new(10) } else { Font::new(9) };
+                let w = ui.c.text_width(font, &label);
+                let shown = if w <= room - 4.0 {
+                    label
+                } else if room >= 12.0 {
+                    format!("{}..", &label[..1.min(label.len())])
+                } else {
+                    String::new()
+                };
+                if !shown.is_empty() {
+                    let y_offset = ((g.row - font.size as f32) / 2.0).clamp(1.0, 3.0);
+                    ui.c.text_clip(font, nr.x + if lemon { 4.0 } else { 3.0 }, nr.y + y_offset, room - 4.0, text, &shown);
+                }
+            }
         }
     }
     // Tool overlays (§9): marquee and zoom box (orange, rounded), slice and scrub lines.
@@ -462,7 +480,7 @@ fn ruler(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>, marker: u
     ui.c.pop_clip();
 }
 
-fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
+fn keyboard(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, lit: &[i32]) {
     let t = ui.t;
     let k = l.keys;
     ui.hit(k, Action::PianoKeys, "Keyboard");
@@ -493,6 +511,7 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
         ui.c.fill_rect(Rect::new(k.right() - 1.0, top, 1.0, bottom - top), t.key_lit_edge);
     }
     let sep = t.key_white_left.shade(-0.12);
+    let highlight = s.piano.scale_highlight;
     for key in lo..=hi {
         let y = g.y_of(key);
         match key.rem_euclid(12) {
@@ -505,12 +524,22 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
                     ui.c.fill_rect_gradient(Rect::new(k.x, y, 45.0, row - 1.0), left, left, 0.0);
                     ui.c.fill_rect(Rect::new(k.x + 45.0, y - half, k.w - 46.0, row - 1.0 + half), t.key_c);
                 }
-                if row >= 10.0 {
+                if row >= 10.0 && s.piano.key_labels != crate::piano::KeyLabels::None {
                     ui.c.text_right(Font::new(12), k.right() - 4.0, y + 1.0 + (row - ROW) / 2.0, t.key_label, &key_name(key));
                 }
                 ui.c.fill_rect(Rect::new(k.x, y + row - 1.0, k.w - 1.0, 1.0), sep);
             }
-            5 => ui.c.fill_rect(Rect::new(k.x, y + row - 1.0, k.w - 1.0, 1.0), sep),
+            5 => {
+                ui.c.fill_rect(Rect::new(k.x, y + row - 1.0, k.w - 1.0, 1.0), sep);
+                if row >= 10.0 && s.piano.key_labels == crate::piano::KeyLabels::AllWhite {
+                    ui.c.text_right(Font::new(if row >= 13.0 { 11 } else { 10 }), k.right() - 4.0, y + 1.0 + (row - ROW) / 2.0, t.key_label.with_alpha(190), &key_name(key));
+                }
+            }
+            2 | 4 | 7 | 9 | 11 => {
+                if row >= 10.0 && s.piano.key_labels == crate::piano::KeyLabels::AllWhite {
+                    ui.c.text_right(Font::new(if row >= 13.0 { 11 } else { 10 }), k.right() - 4.0, y + 1.0 + (row - ROW) / 2.0, t.key_label.with_alpha(190), &key_name(key));
+                }
+            }
             _ => {}
         }
     }
@@ -528,6 +557,21 @@ fn keyboard(ui: &mut Ui, l: &Layout, g: &Geom, lit: &[i32]) {
                 let x = k.x + if i == 0 { 0.0 } else { 10.0 + 8.0 * (i - 1) as f32 };
                 let w = if i == 0 { 10.0 } else if i == 5 { 3.0 } else { 8.0 };
                 ui.c.fill_rect(Rect::new(x, y, w, row), c);
+            }
+        }
+    }
+    if highlight.enabled && row >= 8.0 {
+        for key in lo..=hi {
+            let in_key = crate::chords::in_scale(highlight.root, highlight.scale_idx, key);
+            let is_root = key.rem_euclid(12) == highlight.root as i32;
+            if in_key {
+                let y = g.y_of(key);
+                let (dot_x, dot_y) = (k.right() - 6.0, y + row / 2.0);
+                if is_root {
+                    ui.c.fill_circle(dot_x, dot_y, 3.0, t.pill);
+                } else {
+                    ui.c.fill_circle(dot_x, dot_y, 2.0, t.key_label.with_alpha(150));
+                }
             }
         }
     }
@@ -566,29 +610,46 @@ fn columns(ui: &mut Ui, g: &Geom, area: Rect, bands: &[(f32, f32, Color)], bar: 
     }
 }
 
-fn grid(ui: &mut Ui, l: &Layout, g: &Geom, range: Option<(f32, f32)>) {
-    grid_rows(ui, l, g, l.grid, false);
+fn grid(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, range: Option<(f32, f32)>) {
+    grid_rows(ui, s, l, g, l.grid, false);
     if let Some((x0, x1)) = range {
         let r = Rect::span(x0, x1, l.grid.y, l.grid.bottom()).intersect(&l.grid);
         if r.w > 0.0 {
-            grid_rows(ui, l, g, r, true);
+            grid_rows(ui, s, l, g, r, true);
         }
     }
 }
 
 /// The note-grid rows and columns, clipped to `clip` (`selecting` = the red time-selection tint).
-fn grid_rows(ui: &mut Ui, l: &Layout, g: &Geom, clip: Rect, selecting: bool) {
+fn grid_rows(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, clip: Rect, selecting: bool) {
     let t = ui.t;
     let gr = l.grid;
     let (white, black) = if selecting { (t.pr_row_sel, t.pr_row_black_sel) } else { (t.pr_row, t.pr_row_black) };
     ui.c.push_clip(clip);
     let (lo, hi) = g.visible_keys();
     let mut bands = Vec::with_capacity((hi - lo + 1).max(0) as usize);
+    let highlight = s.piano.scale_highlight;
     for key in lo..=hi {
         let y = g.y_of(key);
-        let fill = if is_black(key) { black } else { white };
+        let mut fill = if is_black(key) { black } else { white };
+        let is_root = highlight.enabled && key.rem_euclid(12) == highlight.root as i32;
+        let in_key = highlight.enabled && crate::chords::in_scale(highlight.root, highlight.scale_idx, key);
+        if highlight.enabled {
+            if is_root {
+                fill = fill.mix(t.pill, 0.16);
+            } else if in_key {
+                fill = if is_black(key) { black.mix(white, 0.40) } else { white.shade(0.08) };
+            } else {
+                fill = if is_black(key) { black.shade(-0.12) } else { white.mix(black, 0.32) };
+            }
+        }
         ui.c.fill_rect(Rect::new(gr.x, y, gr.w, g.row - 1.0), fill);
-        ui.c.fill_rect(Rect::new(gr.x, y + g.row - 1.0, gr.w, 1.0), sub(t, white, 0x0a));
+        let sep_color = if is_root {
+            t.pill.with_alpha(150)
+        } else {
+            sub(t, white, 0x0a)
+        };
+        ui.c.fill_rect(Rect::new(gr.x, y + g.row - 1.0, gr.w, 1.0), sep_color);
         bands.push((y, g.row - 1.0, fill));
     }
     let bar = if selecting { ui.t.s(0x0e080c) } else { bar_line(t) };

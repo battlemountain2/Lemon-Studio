@@ -64,6 +64,13 @@ pub enum PaletteAction {
     CloseAll,
     CloseUnfocused,
     ClosePlugins,
+    ToggleScaleHighlight,
+    CycleNoteDisplay,
+    CycleKeyLabels,
+    StampChord(usize),
+    ClearStamp,
+    ColorGradientTracks,
+    TransposeChannel(i32),
 }
 
 /// A single item searchable within the command palette.
@@ -248,6 +255,104 @@ pub fn items(s: &State) -> Vec<PaletteItem> {
         category: Category::Action,
         shortcut: Some("Alt+Q"),
         action: PaletteAction::DawAction(Action::PianoToolsMenu),
+    });
+    list.push(PaletteItem {
+        title: "Toggle Scale Highlighting".into(),
+        subtitle: "Highlight in-key notes and root tone on piano roll".into(),
+        category: Category::Action,
+        shortcut: Some("Alt+H"),
+        action: PaletteAction::ToggleScaleHighlight,
+    });
+    list.push(PaletteItem {
+        title: "Cycle Note Pitch Display".into(),
+        subtitle: "Switch between note names (C5), MIDI numbers (60), or none".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::CycleNoteDisplay,
+    });
+    list.push(PaletteItem {
+        title: "Cycle Piano Key Labels".into(),
+        subtitle: "Switch between all white notes, root notes only, or none".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::CycleKeyLabels,
+    });
+    list.push(PaletteItem {
+        title: "Color Selected: Gradient".into(),
+        subtitle: "Interpolate colors across selected playlist tracks, mixer tracks, or channels".into(),
+        category: Category::Action,
+        shortcut: Some("Shift+Alt+C"),
+        action: PaletteAction::ColorGradientTracks,
+    });
+    list.push(PaletteItem {
+        title: "Transpose Selected +1 Octave (+12)".into(),
+        subtitle: "Shift selected channel notes up by 12 semitones".into(),
+        category: Category::Action,
+        shortcut: Some("Ctrl+Up"),
+        action: PaletteAction::TransposeChannel(12),
+    });
+    list.push(PaletteItem {
+        title: "Transpose Selected -1 Octave (-12)".into(),
+        subtitle: "Shift selected channel notes down by 12 semitones".into(),
+        category: Category::Action,
+        shortcut: Some("Ctrl+Down"),
+        action: PaletteAction::TransposeChannel(-12),
+    });
+    list.push(PaletteItem {
+        title: "Transpose Selected +1 Semitone".into(),
+        subtitle: "Shift selected channel notes up by 1 semitone".into(),
+        category: Category::Action,
+        shortcut: Some("Shift+Up"),
+        action: PaletteAction::TransposeChannel(1),
+    });
+    list.push(PaletteItem {
+        title: "Transpose Selected -1 Semitone".into(),
+        subtitle: "Shift selected channel notes down by 1 semitone".into(),
+        category: Category::Action,
+        shortcut: Some("Shift+Down"),
+        action: PaletteAction::TransposeChannel(-1),
+    });
+    list.push(PaletteItem {
+        title: "Stamp Tool: Major Chord".into(),
+        subtitle: "Left-click piano roll grid to place a Major chord".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::StampChord(1),
+    });
+    list.push(PaletteItem {
+        title: "Stamp Tool: Minor Chord".into(),
+        subtitle: "Left-click piano roll grid to place a minor chord".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::StampChord(5),
+    });
+    list.push(PaletteItem {
+        title: "Stamp Tool: 7th Chord".into(),
+        subtitle: "Left-click piano roll grid to place a dominant 7th chord".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::StampChord(15),
+    });
+    list.push(PaletteItem {
+        title: "Stamp Tool: Minor 7th Chord".into(),
+        subtitle: "Left-click piano roll grid to place a minor 7th chord".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::StampChord(32),
+    });
+    list.push(PaletteItem {
+        title: "Stamp Tool: Major 7th Chord".into(),
+        subtitle: "Left-click piano roll grid to place a Major 7th chord".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::StampChord(27),
+    });
+    list.push(PaletteItem {
+        title: "Clear Stamp Tool".into(),
+        subtitle: "Return to normal single-note draw tool".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::ClearStamp,
     });
     list.push(PaletteItem {
         title: "Reverse Audio Clips".into(),
@@ -741,6 +846,70 @@ pub fn execute(app: &mut App, item: &PaletteItem) {
         }
         PaletteAction::ClosePlugins => {
             app.close_windows(CloseAll::Plugins);
+        }
+        PaletteAction::ToggleScaleHighlight => {
+            let sh = &mut app.state.piano.scale_highlight;
+            sh.enabled = !sh.enabled;
+            let root_name = crate::views::piano::key_name(sh.root as i32);
+            let scale_name = crate::chords::label(sh.scale_idx);
+            let status = if sh.enabled { "on" } else { "off" };
+            app.state.message = Some(format!("Scale highlighting: {status} ({root_name} {scale_name})"));
+            app.damage_piano();
+        }
+        PaletteAction::CycleNoteDisplay => {
+            app.state.piano.note_display = match app.state.piano.note_display {
+                crate::piano::NoteDisplay::Name => crate::piano::NoteDisplay::Number,
+                crate::piano::NoteDisplay::Number => crate::piano::NoteDisplay::None,
+                crate::piano::NoteDisplay::None => crate::piano::NoteDisplay::Name,
+            };
+            app.state.message = Some(format!("Note pitch display: {:?}", app.state.piano.note_display));
+            app.damage_piano();
+        }
+        PaletteAction::CycleKeyLabels => {
+            app.state.piano.key_labels = match app.state.piano.key_labels {
+                crate::piano::KeyLabels::AllWhite => crate::piano::KeyLabels::RootOnly,
+                crate::piano::KeyLabels::RootOnly => crate::piano::KeyLabels::None,
+                crate::piano::KeyLabels::None => crate::piano::KeyLabels::AllWhite,
+            };
+            app.state.message = Some(format!("Piano key labels: {:?}", app.state.piano.key_labels));
+            app.damage_piano();
+        }
+        PaletteAction::StampChord(k) => {
+            app.state.piano.stamp = Some(*k);
+            let name = crate::chords::label(*k);
+            app.state.message = Some(format!("Stamp tool active: {name} chord (click on grid to stamp)"));
+        }
+        PaletteAction::ClearStamp => {
+            app.state.piano.stamp = None;
+            app.state.message = Some("Stamp tool cleared".into());
+        }
+        PaletteAction::ColorGradientTracks => {
+            if app.state.shown(Win::Mixer) {
+                crate::mixer::gradient(&mut app.state);
+                app.state.message = Some("Applied color gradient across mixer tracks".into());
+            } else if app.state.shown(Win::Playlist) {
+                crate::playlist::gradient(&mut app.state);
+                app.state.message = Some("Applied color gradient across playlist tracks".into());
+            } else {
+                crate::rack::gradient(&mut app.state);
+                app.state.message = Some("Applied color gradient across channels".into());
+            }
+        }
+        PaletteAction::TransposeChannel(semi) => {
+            let semi = *semi;
+            let sel = app.state.rack.sel.clone();
+            let pat = app.state.pattern;
+            let mut count = 0;
+            if let Some(p) = app.state.project.patterns.iter_mut().find(|p| p.number == pat) {
+                for n in &mut p.notes {
+                    if sel.contains(&(n.channel as usize)) || (sel.is_empty() && n.channel as usize == app.state.selected_channel) {
+                        n.key = (n.key as i32 + semi).clamp(0, 127) as u16;
+                        count += 1;
+                    }
+                }
+            }
+            app.state.piano.dirty = true;
+            app.state.message = Some(format!("Transposed {count} note(s) by {semi:+} semitones"));
         }
     }
     app.invalidate();

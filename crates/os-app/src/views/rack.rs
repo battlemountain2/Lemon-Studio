@@ -344,14 +344,19 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) {
         if s.rack.show_mixer {
             let mb = Rect::span(x + 66.0, x + 99.0, ry + 1.0, ry + 25.0);
             let mhov = ui.hit(mb, Action::RackMixer(i), format!("Target mixer track: {}  (double-click)", insert_name(ch.mixer_track)));
+            let is_active_mixer = s.selected_mixer == ch.mixer_track;
             let face = match (s.rack.colorful, ch.color) {
+                _ if is_active_mixer => t.accent.mix(t.rack_row_box, 0.45),
                 (true, Some(col)) => rgb(col).mix(t.rack_row_box, 0.5),
                 _ => t.rack_row_box,
             };
             if lemon {
                 lk::small_box(ui.c, t, mb, face, mhov);
+                if is_active_mixer {
+                    ui.c.stroke_rrect(mb, 3.0, 1.2, t.accent);
+                }
             } else {
-                ui.c.fill_rrect(mb, 3.0, t.rack_control_border);
+                ui.c.fill_rrect(mb, 3.0, if is_active_mixer { t.accent } else { t.rack_control_border });
                 ui.c.fill_rect_gradient(mb.inset(1.0), face.shade(-0.04), face, 2.5);
             }
             // Brighter under High visibility (the Lemon look's brightest text colour, also on hover).

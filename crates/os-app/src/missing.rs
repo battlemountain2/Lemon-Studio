@@ -95,7 +95,7 @@ pub fn missing_samples(s: &State) -> Vec<(usize, String)> {
         .iter()
         .enumerate()
         .filter_map(|(row, ch)| Some((row, ch.sample_path.clone().filter(|p| !p.trim().is_empty())?)))
-        .filter(|(_, p)| !Path::new(&crate::plugins::resolve_sample(p)).is_file())
+        .filter(|(_, p)| !p.starts_with("builtin:") && !Path::new(&crate::plugins::resolve_sample(p)).is_file())
         .collect()
 }
 

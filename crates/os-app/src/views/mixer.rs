@@ -424,6 +424,7 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
     if n != 0 {
         let hr = Rect::new(left, ly.y(HEAD_Y0), STRIP_W, ly.y(HEAD_Y1) - ly.y(HEAD_Y0) + 1.0);
         ui.c.fill_rect(hr, ui.t.s(0x2b2e30));
+        let is_chan_target = s.project.channels.get(s.selected_channel).is_some_and(|c| c.mixer_track == n);
         if selected && lemon {
             lk::lit_in(ui.c, ui.t, Rect::new(hr.x + 3.0, hr.y + 2.0, hr.w - 6.0, hr.h - 4.0), lk::r_btn(t), false);
         } else if selected {
@@ -434,6 +435,8 @@ fn strip(ui: &mut Ui, s: &State, n: u16, left: f32, bottom: f32, f: &FrameInfo, 
                 ui.c.line(x, hr.bottom(), x + 21.0, hr.y, 1.0, ui.t.s(0x34383a));
             }
             ui.c.pop_clip();
+        } else if is_chan_target {
+            ui.c.stroke_rrect(hr.inset(1.0), 2.0, 1.5, t.pill);
         }
         let c = if selected && lemon { lk::ink_on_lit(ui.t) } else if selected || hov { ui.t.tx(0x9aa1a5) } else { ui.t.s(0x6d7275) };
         ui.c.text_center(Font::new(17), Rect::new(left, ly.y(HEAD_Y0), STRIP_W, 21.0), c, &n.to_string());

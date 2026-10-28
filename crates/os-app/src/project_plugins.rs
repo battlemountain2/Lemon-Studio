@@ -625,7 +625,9 @@ mod tests {
                 plugin.desc.id == lemon_ray::CLAP_ID || plugin.desc.id == lemon_wavetable::CLAP_ID
             );
         }
-        for plugin in crate::plugins::builtin_effects() { assert!(!is_wrapped(&plugin.desc)); }
+        for plugin in crate::plugins::builtin_effects() {
+            assert_eq!(is_wrapped(&plugin.desc), crate::plugins::LINKED_EFFECTS.contains(&plugin.desc.name.as_str()));
+        }
     }
 
     #[test]

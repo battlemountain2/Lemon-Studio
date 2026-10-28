@@ -140,6 +140,38 @@ pub fn classes(k: usize, root: u8) -> [bool; 12] {
     on
 }
 
+/// Whether MIDI `key` belongs to the scale or chord `k` (1..=88) with root note `root` (0 = C).
+pub fn in_scale(root: u8, k: usize, key: i32) -> bool {
+    let pc = key.rem_euclid(12) as usize;
+    classes(k, root)[pc]
+}
+
+/// Stamps a chord from entry `k` (1..=88) at `root_key` and tick `start` on channel `ch`.
+pub fn stamp_chord(s: &mut crate::app::State, root_key: u8, start: u32, len: u32, ch: u16, k: usize) {
+    if let Some(entry) = entry(k) {
+        crate::piano::snapshot_as(s, "Stamp chord");
+        let mut notes_to_add = vec![os_model::Note {
+            length: len,
+            key: root_key as u16,
+            ..os_model::Note::step(ch, start)
+        }];
+        let mut cur = root_key as i32;
+        for &iv in entry.intervals {
+            cur += iv as i32;
+            if (0..=127).contains(&cur) {
+                notes_to_add.push(os_model::Note {
+                    length: len,
+                    key: cur as u16,
+                    ..os_model::Note::step(ch, start)
+                });
+            }
+        }
+        let p = crate::piano::pattern_mut(s);
+        p.notes.extend(notes_to_add);
+        s.piano.dirty = true;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +189,11 @@ mod tests {
         // 7add13 (4 3 3 11): C E G Bb and A.
         let c = classes(25, 0);
         assert_eq!((0..12).filter(|&i| c[i]).collect::<Vec<_>>(), [0, 4, 7, 9, 10]);
+
+        // in_scale checks
+        assert!(in_scale(0, FIRST_SCALE, 60)); // C5 in C Major
+        assert!(in_scale(0, FIRST_SCALE, 64)); // E5 in C Major
+        assert!(!in_scale(0, FIRST_SCALE, 61)); // C#5 not in C Major
+        assert!(in_scale(9, 73, 69)); // A4 in A Natural Minor (entry 73 is Minor Natural)
     }
 }

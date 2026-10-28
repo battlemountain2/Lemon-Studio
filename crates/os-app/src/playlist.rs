@@ -279,6 +279,7 @@ pub enum Cmd {
     Consolidate,
     /// Shift+R: toggle sample reverse on selected audio clips.
     ToggleReverse,
+    ColorGradient,
     SelectAll,
     Deselect,
     InvertSelection,
@@ -3391,6 +3392,7 @@ pub fn drag_move(app: &mut App, d: PlDrag, grid: Rect) {
         PlDrag::TimeSel { t0 } => {
             let t = snap_round(s, &g, g.tick_at(x), alt);
             s.playlist.range = (t != t0).then(|| (t0.min(t), t0.max(t)));
+            s.playlist.pos = t;
         }
         PlDrag::Marker { i, t0, .. } => {
             let t = snap_round(s, &g, g.tick_at(x), alt);
@@ -4154,6 +4156,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             let count = toggled_channels.len();
             return Some(format!("Reversed {count} source sample{} (all clips using the source)", if count == 1 { "" } else { "s" }));
         }
+        Cmd::ColorGradient => {
+            gradient(&mut app.state);
+            app.invalidate();
+            return Some("Applied color gradient to playlist tracks".into());
+        }
         Cmd::ChopTransients(i) => {
             let n = crate::drum_chop::chop_selected_or_target(&mut app.state, Some(i), |s, idx| {
                 crate::drum_chop::chop_clip_transients(s, idx)
@@ -4193,7 +4200,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let grid_w = grid.map_or(1400.0, |g| g.w);
     let grid_wh = grid.map_or((1400.0, 800.0), |g| (g.w, g.h));
     let msg = match cmd {
-        Cmd::Nothing | Cmd::ToggleReverse | Cmd::ChopTransients(_) | Cmd::ChopGrid(..) | Cmd::ChopStutter(..) | Cmd::SeparateStems(..) | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
+        Cmd::Nothing | Cmd::ToggleReverse | Cmd::ColorGradient | Cmd::ChopTransients(_) | Cmd::ChopGrid(..) | Cmd::ChopStutter(..) | Cmd::SeparateStems(..) | Cmd::Pick(..) | Cmd::Browser(_) | Cmd::Plugin(_) | Cmd::Project(_) | Cmd::Rack(_) | Cmd::Mixer(_) | Cmd::Param(_) | Cmd::Preset(_) | Cmd::Misc(..) | Cmd::PluginMenu(..) | Cmd::PluginDetach(..) | Cmd::Piano(_) | Cmd::Audio(_) | Cmd::Cpu(_) | Cmd::MetronomeSound(_) | Cmd::MetronomeVolume(_) | Cmd::Record(_) | Cmd::RecPrecountBars(_) | Cmd::OneClick(..) | Cmd::OneClickEditor | Cmd::Rec(_) | Cmd::ContinuousScrolling | Cmd::Pattern(_) | Cmd::ClockMode(_) | Cmd::ClockBeat(_) | Cmd::Toolbar(_) | Cmd::ToolbarPreset(_) | Cmd::ToolbarSave | Cmd::ToolbarDelete | Cmd::TimeSig(..) | Cmd::AddSignature | Cmd::MarkerSigAt(_) | Cmd::MarkerEveryMenu | Cmd::Bar(..) | Cmd::PanningLaw(_) | Cmd::TimeMode(_) | Cmd::Timebase(_) => None,
         Cmd::NotYet(name) => Some(format!("{name}: not available yet")),
         Cmd::Tool(t) => {
             s.playlist.tool = t;
@@ -4691,6 +4698,34 @@ pub(crate) fn hsl_rgb(h: f32, s: f32, l: f32) -> Rgb {
     Rgb::new(k(r), k(g), k(b))
 }
 
+/// Applies a smooth color gradient across the selected playlist tracks (or all tracks if < 2 selected).
+pub fn gradient(s: &mut State) {
+    let mut tracks: Vec<usize> = s.playlist.sel.iter().copied().collect();
+    if tracks.len() < 2 {
+        tracks = (0..arr_mut(s).tracks.len()).collect();
+    }
+    if tracks.len() < 2 {
+        return;
+    }
+    tracks.sort_unstable();
+    let first_col = arr_mut(s).tracks.get(tracks[0]).and_then(|t| t.color);
+    let last_col = arr_mut(s).tracks.get(*tracks.last().unwrap()).and_then(|t| t.color);
+    let n = (tracks.len() - 1) as f32;
+    for (i, &tr) in tracks.iter().enumerate() {
+        let t = i as f32 / n;
+        let c = match (first_col, last_col) {
+            (Some(a), Some(b)) if a != b => {
+                let l = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+                os_model::Rgb::new(l(a.r, b.r), l(a.g, b.g), l(a.b, b.b))
+            }
+            _ => hsl_rgb(300.0 * t, 0.40, 0.50),
+        };
+        if let Some(track) = arr_mut(s).tracks.get_mut(tr) {
+            track.color = Some(c);
+        }
+    }
+}
+
 /// Ctrl+Alt+C: render the selection (or the time selection) to a WAV file and put it on a new track as an audio
 /// clip; the rendered clips are muted so the song sounds the same (OS choice, §5).
 /// Tools > Quick quantize start times (§10, OS): every selected clip (every clip when none is selected) starts on the
@@ -4900,6 +4935,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("t") => Cmd::PlaceLoop,
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("z") => Cmd::ZoomSelection,
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("r") => Cmd::ToggleReverse,
+        Key::Character(c) if shift && alt && !ctrl && c.eq_ignore_ascii_case("c") => Cmd::ColorGradient,
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("m") => Cmd::StretchMode,
         Key::Character(c) if shift && !ctrl && !alt && c.eq_ignore_ascii_case("i") => Cmd::InvertSelection,
         Key::Character(c) if shift && !ctrl && !alt && (c == "4" || c == "$") => Cmd::ZoomAll,

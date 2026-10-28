@@ -206,6 +206,9 @@ impl Pack {
     fn gather(&mut self, p: &mut os_model::Project) {
         for ch in &mut p.channels {
             let Some(stored) = ch.sample_path.clone().filter(|s| !s.trim().is_empty()) else { continue };
+            if stored.starts_with("builtin:") {
+                continue;
+            }
             let real = PathBuf::from(crate::plugins::resolve_sample(&stored));
             if !real.is_file() {
                 self.missing.push(file_name(&stored).to_string());

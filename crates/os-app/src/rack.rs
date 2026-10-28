@@ -1167,6 +1167,7 @@ pub enum RCmd {
     ColorRandom,
     MuteSel(bool),
     TransposeSel,
+    ShiftPitch(i32),
     AssignFreeSel,
     SelectMixerTracks,
     /// Change declicking for selected channels to ▸: declick mode 0..5 (spec: audio/declick.md).
@@ -1828,6 +1829,20 @@ pub fn run(app: &mut App, c: RCmd) -> Option<String> {
             open_box(s, RBox::Transpose, crate::patterns::box_at_mouse(mouse));
             None
         }
+        RCmd::ShiftPitch(semi) => {
+            let pat = s.pattern;
+            let mut count = 0;
+            if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == pat) {
+                for n in &mut p.notes {
+                    if sel.contains(&(n.channel as usize)) {
+                        n.key = (n.key as i32 + semi).clamp(0, 127) as u16;
+                        count += 1;
+                    }
+                }
+            }
+            s.piano.dirty = true;
+            Some(format!("Transposed {count} note(s) by {semi:+} semitones"))
+        }
         RCmd::ZipSel => {
             s.rack.zipped.extend(sel.iter().copied());
             autosize(s);
@@ -1987,9 +2002,13 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
     let focus = s.selected_channel;
     let letter = |c: &str, l: &str| c.eq_ignore_ascii_case(l);
     let cmd = match key {
+        Key::Named(NamedKey::ArrowUp) if ctrl && !shift && !alt => RCmd::ShiftPitch(12),
+        Key::Named(NamedKey::ArrowDown) if ctrl && !shift && !alt => RCmd::ShiftPitch(-12),
+        Key::Named(NamedKey::ArrowUp) if shift && !ctrl && !alt => RCmd::ShiftPitch(1),
+        Key::Named(NamedKey::ArrowDown) if shift && !ctrl && !alt => RCmd::ShiftPitch(-1),
         Key::Named(NamedKey::ArrowUp) if alt => RCmd::MoveSel(-1),
         Key::Named(NamedKey::ArrowDown) if alt => RCmd::MoveSel(1),
-        Key::Named(k @ (NamedKey::ArrowUp | NamedKey::ArrowDown)) if !ctrl => {
+        Key::Named(k @ (NamedKey::ArrowUp | NamedKey::ArrowDown)) if !ctrl && !shift => {
             let rows = shown(s);
             let cur = rows.iter().position(|&r| Some(&r) == s.rack.sel.iter().next()).or_else(|| rows.iter().position(|&r| r == focus));
             let next = match (cur, k) {
@@ -2026,7 +2045,12 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if alt && !ctrl && letter(c, "z") => RCmd::ZipSel,
         Key::Character(c) if alt && !ctrl && letter(c, "u") => RCmd::UnzipAll,
         Key::Character(c) if alt && !ctrl && letter(c, "m") => RCmd::ShowMixer,
-        Key::Character(c) if ctrl && !alt && letter(c, "l") => RCmd::AssignFreeSel,
+        Key::Character(c) if ctrl && shift && !alt && letter(c, "l") => {
+            let dst = s.selected_mixer;
+            crate::mixer::run(app, crate::mixer::MCmd::RouteChannels { dst, spread: true });
+            return true;
+        }
+        Key::Character(c) if ctrl && !shift && !alt && letter(c, "l") => RCmd::AssignFreeSel,
         Key::Character(c) if ctrl && !alt && !shift && letter(c, "x") => RCmd::CutSel,
         Key::Character(c) if ctrl && !alt && !shift && letter(c, "c") => RCmd::CopySel,
         Key::Character(c) if ctrl && !alt && !shift && letter(c, "v") => RCmd::PasteSel,
@@ -2565,6 +2589,7 @@ mod tests {
     #[test]
     fn cut_itself_toggles_cut_and_cut_by() {
         let mut app = App::new(None);
+        app.state.project = crate::app::default_project();
         assert_eq!(app.state.project.channels[0].misc.cut, 1);
         assert_eq!(app.state.project.channels[0].misc.cut_by, 1);
 
