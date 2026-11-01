@@ -6,6 +6,11 @@ do not reset or force-push main to update it.
 
 ## Patch inventory
 
+The [October 28 isolated candidate](upstream-integration-2026-10-28.md) records current upstream integration, extraction
+safety, adapted Hyprland window handling, persistent browser favorites/waveforms, and live clip-gain changes.
+The downstream-only `browser_assets.rs`, `stem_separator/job.rs` and preserved `legacy_delay.rs` are listed in the
+watermark exceptions rather than adding upstream authorship headers to these files.
+
 Lemon Ray's first playable laser milestone is documented in [lemon-ray.md](lemon-ray.md). It is a separate
 downstream instrument with stable identities and wrapper-based persistence, not a replacement for Trio.
 

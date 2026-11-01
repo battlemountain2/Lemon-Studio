@@ -2,23 +2,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Built-in Local Audio Stem Separation (Phase 6).
-//!
-//! Separates any audio clip or audio file into distinct musical stems right on the playlist tracks:
-//! - **8 Stems (Ultimate Deconstruction)**: Kick, Snare & Claps, Hi-Hats & Cymbals, Bass & Sub,
-//!   Lead Vocals, Backing Vocals, Guitars & Keys, Ambient FX & Reverb.
-//! - **6 Stems (Producer Suite)**: Kick, Snare & Percussion, Bass, Vocals, Instruments, Ambient FX.
-//! - **4 Stems (Standard DAW)**: Drums, Bass, Vocals, Other.
-//! - **2 Stems (Fast Splits)**: Vocals & Instrumental, Drums & Melodic.
-//!
-//! Uses a zero-latency, phase-exact multi-band Linkwitz-Riley spectral crossover and Mid/Side spatial
-//! acoustic decomposition engine that guarantees mathematical reconstruction:
-//! `\sum Stem_k[n] == Input[n]` for every sample across all modes.
-
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use os_model::{ClipSource, Rgb};
 use crate::app::State;
-use crate::playlist::{arr_mut, clips, free_track, add_audio_clip};
+use crate::playlist::{arr_mut, clips};
+
+mod job;
+pub use job::{Job, start, tick, cancel, paint};
+#[cfg(test)]
+use crate::playlist::add_audio_clip;
 
 /// Musical stem kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,11 +103,11 @@ pub enum StemMode {
 impl StemMode {
     pub fn label(self) -> &'static str {
         match self {
-            StemMode::Stems8 => "8 Stems (Ultimate Deconstruction)",
-            StemMode::Stems6 => "6 Stems (Producer Suite)",
-            StemMode::All4 => "4 Stems (Standard)",
-            StemMode::VocalsAndMusic => "Vocals & Music (2 Stems)",
-            StemMode::DrumsAndMelody => "Drums & Melodic (2 Stems)",
+            StemMode::Stems8 => "8 spectral layers (experimental)",
+            StemMode::Stems6 => "6 spectral layers (experimental)",
+            StemMode::All4 => "4 spectral layers (experimental)",
+            StemMode::VocalsAndMusic => "Vocal-range & music layers (experimental)",
+            StemMode::DrumsAndMelody => "Transient & melodic layers (experimental)",
         }
     }
 }
@@ -268,7 +261,15 @@ pub fn separate_audio_stems(
     rate: u32,
     mode: StemMode,
 ) -> Result<Vec<SeparatedStem>, String> {
+    split_controlled(left, right, rate, mode, &AtomicBool::new(false), &AtomicUsize::new(0))
+}
+
+fn split_controlled(left: &[f32], right: &[f32], rate: u32, mode: StemMode, cancel: &AtomicBool, progress: &AtomicUsize) -> Result<Vec<SeparatedStem>, String> {
+    let check = || if cancel.load(Ordering::Relaxed) { Err("Spectral split cancelled".to_string()) } else { Ok(()) };
+    check()?;
     let len = left.len().min(right.len());
+    if len > job::MAX_FRAMES { return Err("Source exceeds the spectral split frame limit; use a shorter audio file".into()); }
+    if rate < 12000 || rate > 384000 { return Err("Spectral splitting supports sample rates from 12 to 384 kHz".into()); }
     if len == 0 {
         return Err("Audio buffer is empty".into());
     }
@@ -305,15 +306,15 @@ pub fn separate_audio_stems(
         low_mid_r.push(right[i] - low_r[i] - high_r[i] - mid_high_r[i]);
     }
 
-    // Primary 8 discrete stem buffers (interleaved L, R)
-    let mut kick_buf = Vec::with_capacity(len * 2);
-    let mut snare_buf = Vec::with_capacity(len * 2);
-    let mut hihat_buf = Vec::with_capacity(len * 2);
-    let mut bass_buf = Vec::with_capacity(len * 2);
-    let mut lead_voc_buf = Vec::with_capacity(len * 2);
-    let mut back_voc_buf = Vec::with_capacity(len * 2);
-    let mut inst_buf = Vec::with_capacity(len * 2);
-    let mut amb_buf = Vec::with_capacity(len * 2);
+    check()?;
+    let groups: &[(StemKind, &str, &[usize])] = match mode {
+        StemMode::Stems8 => &[(StemKind::Kick, "Kick", &[0]), (StemKind::Snare, "Snare & Claps", &[1]), (StemKind::HiHats, "Hi-Hats & Cymbals", &[2]), (StemKind::Bass, "Bass & Sub", &[3]), (StemKind::LeadVocals, "Lead Vocals", &[4]), (StemKind::BackingVocals, "Backing Vocals", &[5]), (StemKind::Instruments, "Guitars & Keys", &[6]), (StemKind::Ambient, "Ambient FX", &[7])],
+        StemMode::Stems6 => &[(StemKind::Kick, "Kick", &[0]), (StemKind::Snare, "Snare & Percussion", &[1,2]), (StemKind::Bass, "Bass", &[3]), (StemKind::Vocals, "Vocals", &[4,5]), (StemKind::Instruments, "Instruments", &[6]), (StemKind::Ambient, "Ambient FX", &[7])],
+        StemMode::All4 => &[(StemKind::Drums, "Drums", &[0,1,2]), (StemKind::Bass, "Bass", &[3]), (StemKind::Vocals, "Vocals", &[4,5]), (StemKind::Other, "Other", &[6,7])],
+        StemMode::VocalsAndMusic => &[(StemKind::Vocals, "Vocals", &[4,5]), (StemKind::Music, "Music", &[0,1,2,3,6,7])],
+        StemMode::DrumsAndMelody => &[(StemKind::Drums, "Drums", &[0,1,2]), (StemKind::Melodic, "Melodic", &[3,4,5,6,7])],
+    };
+    let mut stems: Vec<_> = groups.iter().map(|(kind, label, _)| SeparatedStem { kind: *kind, label: (*label).into(), color: kind.color(), interleaved_audio: Vec::with_capacity(len * 2) }).collect();
 
     // Transient follower time constants
     let alpha_fast = (-1.0 / (0.003 * r)).exp(); // ~3ms fast attack
@@ -462,233 +463,21 @@ pub fn separate_audio_stems(
         let stem_amb_l = amb_m_l + amb_s_l;
         let stem_amb_r = amb_m_r + amb_s_r;
 
-        kick_buf.push(stem_kick_l);
-        kick_buf.push(stem_kick_r);
-
-        snare_buf.push(stem_snare_l);
-        snare_buf.push(stem_snare_r);
-
-        hihat_buf.push(stem_hihat_l);
-        hihat_buf.push(stem_hihat_r);
-
-        bass_buf.push(stem_bass_l);
-        bass_buf.push(stem_bass_r);
-
-        lead_voc_buf.push(stem_lead_voc_l);
-        lead_voc_buf.push(stem_lead_voc_r);
-
-        back_voc_buf.push(stem_back_voc_l);
-        back_voc_buf.push(stem_back_voc_r);
-
-        inst_buf.push(stem_inst_l);
-        inst_buf.push(stem_inst_r);
-
-        amb_buf.push(stem_amb_l);
-        amb_buf.push(stem_amb_r);
-    }
-
-    match mode {
-        StemMode::Stems8 => Ok(vec![
-            SeparatedStem {
-                kind: StemKind::Kick,
-                label: "Kick".into(),
-                color: StemKind::Kick.color(),
-                interleaved_audio: kick_buf,
-            },
-            SeparatedStem {
-                kind: StemKind::Snare,
-                label: "Snare & Claps".into(),
-                color: StemKind::Snare.color(),
-                interleaved_audio: snare_buf,
-            },
-            SeparatedStem {
-                kind: StemKind::HiHats,
-                label: "Hi-Hats & Cymbals".into(),
-                color: StemKind::HiHats.color(),
-                interleaved_audio: hihat_buf,
-            },
-            SeparatedStem {
-                kind: StemKind::Bass,
-                label: "Bass & Sub".into(),
-                color: StemKind::Bass.color(),
-                interleaved_audio: bass_buf,
-            },
-            SeparatedStem {
-                kind: StemKind::LeadVocals,
-                label: "Lead Vocals".into(),
-                color: StemKind::LeadVocals.color(),
-                interleaved_audio: lead_voc_buf,
-            },
-            SeparatedStem {
-                kind: StemKind::BackingVocals,
-                label: "Backing Vocals".into(),
-                color: StemKind::BackingVocals.color(),
-                interleaved_audio: back_voc_buf,
-            },
-            SeparatedStem {
-                kind: StemKind::Instruments,
-                label: "Guitars & Keys".into(),
-                color: StemKind::Instruments.color(),
-                interleaved_audio: inst_buf,
-            },
-            SeparatedStem {
-                kind: StemKind::Ambient,
-                label: "Ambient FX".into(),
-                color: StemKind::Ambient.color(),
-                interleaved_audio: amb_buf,
-            },
-        ]),
-
-        StemMode::Stems6 => {
-            // 6 Stems: Kick, Snare & Percussion, Bass, Vocals (Lead+Backing), Instruments, Ambient FX
-            let mut perc_buf = Vec::with_capacity(len * 2);
-            let mut full_voc_buf = Vec::with_capacity(len * 2);
-
-            for i in 0..(len * 2) {
-                perc_buf.push(snare_buf[i] + hihat_buf[i]);
-                full_voc_buf.push(lead_voc_buf[i] + back_voc_buf[i]);
-            }
-
-            Ok(vec![
-                SeparatedStem {
-                    kind: StemKind::Kick,
-                    label: "Kick".into(),
-                    color: StemKind::Kick.color(),
-                    interleaved_audio: kick_buf,
-                },
-                SeparatedStem {
-                    kind: StemKind::Snare,
-                    label: "Snare & Percussion".into(),
-                    color: StemKind::Snare.color(),
-                    interleaved_audio: perc_buf,
-                },
-                SeparatedStem {
-                    kind: StemKind::Bass,
-                    label: "Bass".into(),
-                    color: StemKind::Bass.color(),
-                    interleaved_audio: bass_buf,
-                },
-                SeparatedStem {
-                    kind: StemKind::Vocals,
-                    label: "Vocals".into(),
-                    color: StemKind::Vocals.color(),
-                    interleaved_audio: full_voc_buf,
-                },
-                SeparatedStem {
-                    kind: StemKind::Instruments,
-                    label: "Instruments".into(),
-                    color: StemKind::Instruments.color(),
-                    interleaved_audio: inst_buf,
-                },
-                SeparatedStem {
-                    kind: StemKind::Ambient,
-                    label: "Ambient FX".into(),
-                    color: StemKind::Ambient.color(),
-                    interleaved_audio: amb_buf,
-                },
-            ])
+        if i % 4096 == 0 {
+            check()?;
+            progress.store(20 + i * 60 / len, Ordering::Relaxed);
         }
-
-        StemMode::All4 => {
-            // Drums = Kick + Snare + HiHats
-            // Vocals = Lead + Backing
-            // Other = Instruments + Ambient
-            let mut drums_buf = Vec::with_capacity(len * 2);
-            let mut vocals_buf = Vec::with_capacity(len * 2);
-            let mut other_buf = Vec::with_capacity(len * 2);
-
-            for i in 0..(len * 2) {
-                drums_buf.push(kick_buf[i] + snare_buf[i] + hihat_buf[i]);
-                vocals_buf.push(lead_voc_buf[i] + back_voc_buf[i]);
-                other_buf.push(inst_buf[i] + amb_buf[i]);
+        let values = [[stem_kick_l, stem_kick_r], [stem_snare_l, stem_snare_r], [stem_hihat_l, stem_hihat_r], [stem_bass_l, stem_bass_r], [stem_lead_voc_l, stem_lead_voc_r], [stem_back_voc_l, stem_back_voc_r], [stem_inst_l, stem_inst_r], [stem_amb_l, stem_amb_r]];
+        for (stem, (_, _, indices)) in stems.iter_mut().zip(groups) {
+            for side in 0..2 {
+                let mut value = values[indices[0]][side];
+                for &index in &indices[1..] { value += values[index][side]; }
+                stem.interleaved_audio.push(value);
             }
-
-            Ok(vec![
-                SeparatedStem {
-                    kind: StemKind::Drums,
-                    label: "Drums".into(),
-                    color: StemKind::Drums.color(),
-                    interleaved_audio: drums_buf,
-                },
-                SeparatedStem {
-                    kind: StemKind::Bass,
-                    label: "Bass".into(),
-                    color: StemKind::Bass.color(),
-                    interleaved_audio: bass_buf,
-                },
-                SeparatedStem {
-                    kind: StemKind::Vocals,
-                    label: "Vocals".into(),
-                    color: StemKind::Vocals.color(),
-                    interleaved_audio: vocals_buf,
-                },
-                SeparatedStem {
-                    kind: StemKind::Other,
-                    label: "Other".into(),
-                    color: StemKind::Other.color(),
-                    interleaved_audio: other_buf,
-                },
-            ])
-        }
-
-        StemMode::VocalsAndMusic => {
-            // Vocals = Lead + Backing
-            // Music = Kick + Snare + HiHats + Bass + Instruments + Ambient
-            let mut vocals_buf = Vec::with_capacity(len * 2);
-            let mut music_buf = Vec::with_capacity(len * 2);
-
-            for i in 0..(len * 2) {
-                let voc = lead_voc_buf[i] + back_voc_buf[i];
-                let mus = kick_buf[i] + snare_buf[i] + hihat_buf[i] + bass_buf[i] + inst_buf[i] + amb_buf[i];
-                vocals_buf.push(voc);
-                music_buf.push(mus);
-            }
-
-            Ok(vec![
-                SeparatedStem {
-                    kind: StemKind::Vocals,
-                    label: "Vocals".into(),
-                    color: StemKind::Vocals.color(),
-                    interleaved_audio: vocals_buf,
-                },
-                SeparatedStem {
-                    kind: StemKind::Music,
-                    label: "Music".into(),
-                    color: StemKind::Music.color(),
-                    interleaved_audio: music_buf,
-                },
-            ])
-        }
-
-        StemMode::DrumsAndMelody => {
-            // Drums = Kick + Snare + HiHats
-            // Melodic = Bass + Lead Vocals + Backing Vocals + Instruments + Ambient
-            let mut drums_buf = Vec::with_capacity(len * 2);
-            let mut mel_buf = Vec::with_capacity(len * 2);
-
-            for i in 0..(len * 2) {
-                let d = kick_buf[i] + snare_buf[i] + hihat_buf[i];
-                let m = bass_buf[i] + lead_voc_buf[i] + back_voc_buf[i] + inst_buf[i] + amb_buf[i];
-                drums_buf.push(d);
-                mel_buf.push(m);
-            }
-
-            Ok(vec![
-                SeparatedStem {
-                    kind: StemKind::Drums,
-                    label: "Drums".into(),
-                    color: StemKind::Drums.color(),
-                    interleaved_audio: drums_buf,
-                },
-                SeparatedStem {
-                    kind: StemKind::Melodic,
-                    label: "Melodic".into(),
-                    color: StemKind::Melodic.color(),
-                    interleaved_audio: mel_buf,
-                },
-            ])
         }
     }
+    check()?;
+    Ok(stems)
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -704,119 +493,11 @@ pub fn stems_dir(s: &State) -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("Lemon Studio").join("Rendered").join("Stems"))
 }
 
-/// Separates an audio clip into distinct stems, exports the stem WAV files, adds new channels/tracks
-/// neatly stacked below the source clip, mutes the source clip, and selects the new stem clips.
-/// Supports atomic single-step `Ctrl+Z` undo.
-pub fn separate_clip_stems(
-    s: &mut State,
-    clip_idx: usize,
-    mode: StemMode,
-) -> Result<Vec<usize>, String> {
-    let clip = *clips(s).get(clip_idx).ok_or("Clip not found")?;
-
-    let ch = match clip.source {
-        ClipSource::Channel(ch) => ch,
-        ClipSource::Pattern(_) => return Err("Only audio clips can be separated into stems".into()),
-    };
-
-    let path_str = s
-        .project
-        .channel(ch)
-        .and_then(|chan| chan.sample_path.clone())
-        .ok_or("Channel has no audio sample path")?;
-
-    let resolved = crate::plugins::resolve_sample(&path_str);
-    let sample = os_engine::sample::load_shared(Path::new(&resolved))
-        .map_err(|e| format!("Failed to decode sample '{}': {e}", path_str))?;
-
-    let (left, right, rate) = (sample.left.clone(), sample.right.clone(), sample.rate);
-
-    // Compute separated stems via phase-aligned spectral engine
-    let stems = separate_audio_stems(&left, &right, rate, mode)?;
-
-    // Ensure output stems directory exists
-    let out_dir = stems_dir(s);
-    if let Err(e) = std::fs::create_dir_all(&out_dir) {
-        return Err(format!("Could not create stems folder '{}': {e}", out_dir.display()));
-    }
-
-    let base_name = Path::new(&resolved)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Stem".into());
-
-    // Single undo snapshot before creating stem files and channels
-    crate::playlist::snapshot_as(s, "Extract stems");
-
-    // Mute original clip so you hear the separated stems directly
-    if let Some(orig) = arr_mut(s).clips.get_mut(clip_idx) {
-        orig.muted = true;
-    }
-
-    let orig_pos = clip.position;
-    let orig_len = clip.length;
-    let orig_win = clip.window;
-    let mut track_cursor = clip.track + 1;
-    let mut new_clip_indices = Vec::new();
-
-    for stem in stems {
-        let file_path = out_dir.join(format!("{base_name} - {}.wav", stem.label));
-        let written = std::fs::File::create(&file_path).and_then(|f| {
-            let mut w = std::io::BufWriter::new(f);
-            os_engine::wav::write_f32_stereo(&mut w, rate, &stem.interleaved_audio)
-        });
-        if let Err(e) = written {
-            return Err(format!("Failed to write stem file '{}': {e}", file_path.display()));
-        }
-
-        let target_track = free_track(s, track_cursor, orig_pos, orig_pos + orig_len);
-        track_cursor = target_track + 1;
-
-        let stem_path = file_path.to_string_lossy().into_owned();
-        let Some(new_clip_idx) = add_audio_clip(s, &stem_path, target_track, orig_pos) else {
-            return Err(format!("Failed to insert stem clip '{}' into playlist", stem.label));
-        };
-
-        // Fold into single undo step
-        crate::history::unrecord(s);
-
-        // Match clip length and window to original clip
-        if let Some(c) = arr_mut(s).clips.get_mut(new_clip_idx) {
-            c.length = orig_len;
-            c.window = orig_win;
-        }
-
-        // Set distinctive stem name and color on the created channel
-        if let Some(c) = arr_mut(s).clips.get(new_clip_idx) {
-            if let ClipSource::Channel(new_ch) = c.source {
-                if let Some(chan) = s.project.channels.iter_mut().find(|c| c.index == new_ch) {
-                    chan.name = Some(format!("{base_name} - {}", stem.label));
-                    chan.color = Some(stem.color);
-                }
-            }
-        }
-
-        new_clip_indices.push(new_clip_idx);
-    }
-
-    // Select the new stem clips
-    s.playlist.sel = new_clip_indices.clone();
-    s.message = Some(format!("Extracted {} stems for '{}'", new_clip_indices.len(), base_name));
-
-    Ok(new_clip_indices)
-}
-
-/// Separate stems on the currently selected clip, or the given target clip.
-pub fn separate_selected_or_target(
-    s: &mut State,
-    target: Option<usize>,
-    mode: StemMode,
-) -> Result<Vec<usize>, String> {
-    let target_idx = target
-        .or_else(|| s.playlist.sel.first().copied())
-        .ok_or_else(|| "Select an audio clip first to extract stems".to_string())?;
-
-    separate_clip_stems(s, target_idx, mode)
+#[cfg(test)]
+pub fn separate_clip_stems(s: &mut State, clip_idx: usize, mode: StemMode) -> Result<Vec<usize>, String> {
+    let input = job::Input::capture(s, clip_idx, mode)?;
+    let prepared = input.prepare(&AtomicBool::new(false), &AtomicUsize::new(0))?;
+    prepared.commit(s)
 }
 
 // ---------------------------------------------------------------------------------------------------------

@@ -1178,31 +1178,34 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
     ui.c.fill_polygon(&[(fx_out, body.y), (fx_out - k, body.y), (fx_out, body.y + k)], col(pl::Handle::FadeOut));
 
     // Horizontal gain line across the clip bottom
-    let gain_line_alpha = if lit(pl::Handle::Gain) { 220 } else { 120 };
+    let gain_line_alpha = if lit(pl::Handle::Gain) { 220 } else { 85 };
     ui.c.line(body.x + 2.0, body.bottom() - 1.5, body.right() - 2.0, body.bottom() - 1.5, 1.2, white.with_alpha(gain_line_alpha));
 
-    // The gain handle: a half disc on the body's bottom edge (a shape, not a clipped circle: clips are costly).
     let (gx, gy) = (body.cx(), body.bottom());
-    let r = if lit(pl::Handle::Gain) { 5.5 } else { 4.0 };
-    let half: Vec<(f32, f32)> = (0..=8).map(|k| {
-        let a = std::f32::consts::PI * k as f32 / 8.0;
-        (gx - r * a.cos(), gy - r * a.sin())
-    }).collect();
-    ui.c.fill_polygon(&half, col(pl::Handle::Gain));
+    let width = 24.0f32.min((body.w - 4.0).max(4.0));
+    let grip = Rect::new(gx - width / 2.0, gy - 8.0, width, 7.0);
+    let active = lit(pl::Handle::Gain);
+    ui.c.fill_rrect(grip, 3.0, if active { ui.t.accent } else { ui.t.sunken_dark });
+    ui.c.stroke_rrect(grip, 3.0, 1.0, white.with_alpha(if active { 230 } else { 165 }));
+    for dx in [-3.0, 0.0, 3.0] {
+        if width > 12.0 { ui.c.fill_rect(Rect::new(gx + dx, gy - 6.0, 1.0, 3.0), if active { ui.t.sunken_dark } else { white.with_alpha(210) }); }
+    }
 
     // Floating badge for lit gain handle:
     if lit(pl::Handle::Gain) {
         let db = 20.0 * g_val.log10();
         let text = format!("{:+.1} dB", db);
-        let font = Font::new(10);
+        let font = Font::new(12).bold();
         let tw = ui.c.text_width(font, &text);
-        let bw = tw + 8.0;
-        let bx = (gx - bw / 2.0).clamp(body.x + 2.0, body.right() - bw - 2.0);
-        let by = (gy - 20.0).clamp(body.y + 2.0, body.bottom() - 16.0);
-        let br = Rect::new(bx, by, bw, 14.0);
-        ui.c.fill_rrect(br, 3.0, ui.t.s(0x181e22).with_alpha(230));
-        ui.c.stroke_rrect(br, 3.0, 1.0, white.with_alpha(160));
-        ui.c.text(font, bx + 4.0, by + 1.0, white, &text);
+        let bw = tw + 12.0;
+        if body.w >= bw + 4.0 && body.h >= 26.0 {
+            let bx = (gx - bw / 2.0).clamp(body.x + 2.0, body.right() - bw - 2.0);
+            let by = (gy - 29.0).clamp(body.y + 2.0, body.bottom() - 24.0);
+            let br = Rect::new(bx, by, bw, 18.0);
+            os_ui::kit::popup(ui.c, ui.t, br);
+            ui.c.stroke_rrect(br, 3.0, 1.0, ui.t.accent.with_alpha(190));
+            ui.c.text(font, bx + 6.0, by + 2.0, ui.t.text, &text);
+        }
     }
 
     if hovered {

@@ -12,17 +12,21 @@ pub mod distortion;
 pub mod dynamics;
 pub mod eq;
 pub mod fast_dist;
+mod legacy_delay;
 mod legacy_reverb;
+pub mod filter;
+pub mod flanger;
 pub mod limiter;
 pub mod love_philter;
 pub mod maximus;
+pub mod phaser;
 pub mod reverb;
 pub mod soft_clipper;
 pub mod stereo_enhancer;
 pub mod stereo_shaper;
 pub mod transient_processor;
 
-pub use delay::Delay;
+pub use legacy_delay::Delay;
 pub use distortion::{DistMode, Distortion};
 pub use limiter::Limiter;
 pub use reverb::Reverb;
@@ -78,6 +82,9 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
                 reverb::Reverb::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>)
             }
         }
+        "Lemon Delay" | "Delay" if state.is_empty() || state.starts_with(b"LMD1") => {
+            Some(Box::new(legacy_delay::Delay::from_state(state, sample_rate)))
+        }
         "Fruity Delay 3" | "Lemon Delay" | "Delay" => {
             delay::Delay::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>)
         }
@@ -86,6 +93,8 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
         "Fruity Balance" => balance::Balance::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Stereo Enhancer" => stereo_enhancer::StereoEnhancer::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Chorus" => chorus::Chorus::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Flanger" => flanger::Flanger::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
+        "Fruity Phaser" => phaser::Phaser::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Stereo Shaper" => stereo_shaper::StereoShaper::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Fruity Love Philter" => love_philter::LovePhilter::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         "Maximus" => maximus::Maximus::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
@@ -96,6 +105,7 @@ pub fn from_slot(name: &str, state: &[u8], sample_rate: u32) -> Option<Box<dyn E
         | "Overdrive" | "Waveshaper" => {
             Some(Box::new(distortion::Distortion::from_state(name, state, sample_rate)))
         }
+        "Fruity Filter" => filter::Filter::from_state(state, sample_rate).map(|e| Box::new(e) as Box<dyn Effect>),
         _ => None,
     }
 }

@@ -413,36 +413,36 @@ pub fn items(s: &State) -> Vec<PaletteItem> {
     // Audio Stem Separation (Phase 6)
     use crate::stem_separator::StemMode;
     list.push(PaletteItem {
-        title: "Extract 8 Stems (Ultimate Deconstruction)".into(),
-        subtitle: "Separate clip into Kick, Snare, Hats, Bass, Lead Vocals, Backing Vocals, Instruments, Ambient FX".into(),
+        title: "Spectral split: 8 layers (experimental)".into(),
+        subtitle: "Frequency/stereo estimates; not AI isolation. Short source files only.".into(),
         category: Category::Action,
         shortcut: None,
         action: PaletteAction::SeparateStems(StemMode::Stems8),
     });
     list.push(PaletteItem {
-        title: "Extract 6 Stems (Producer Suite)".into(),
-        subtitle: "Separate clip into Kick, Snare & Perc, Bass, Vocals, Instruments, Ambient FX".into(),
+        title: "Spectral split: 6 layers (experimental)".into(),
+        subtitle: "Experimental frequency/stereo estimates; short source files only.".into(),
         category: Category::Action,
         shortcut: None,
         action: PaletteAction::SeparateStems(StemMode::Stems6),
     });
     list.push(PaletteItem {
-        title: "Extract 4 Stems (Standard DAW)".into(),
-        subtitle: "Separate clip into Drums, Bass, Vocals, Other".into(),
+        title: "Spectral split: 4 layers (experimental)".into(),
+        subtitle: "Experimental frequency/stereo estimates; short source files only.".into(),
         category: Category::Action,
         shortcut: None,
         action: PaletteAction::SeparateStems(StemMode::All4),
     });
     list.push(PaletteItem {
-        title: "Extract Stems: Vocals & Music (2 Stems)".into(),
-        subtitle: "Isolate vocals and full instrumental backing track".into(),
+        title: "Spectral split: vocal-range & music (experimental)".into(),
+        subtitle: "Frequency/stereo estimates, not isolated vocals. Short source files only.".into(),
         category: Category::Action,
         shortcut: None,
         action: PaletteAction::SeparateStems(StemMode::VocalsAndMusic),
     });
     list.push(PaletteItem {
-        title: "Extract Stems: Drums & Melodic (2 Stems)".into(),
-        subtitle: "Isolate drums and all melodic musical content".into(),
+        title: "Spectral split: transients & melodic (experimental)".into(),
+        subtitle: "Transient/frequency estimates, not isolated drums. Short source files only.".into(),
         category: Category::Action,
         shortcut: None,
         action: PaletteAction::SeparateStems(StemMode::DrumsAndMelody),
@@ -832,10 +832,10 @@ pub fn execute(app: &mut App, item: &PaletteItem) {
             });
         }
         PaletteAction::SeparateStems(mode) => {
-            let res = crate::stem_separator::separate_selected_or_target(&mut app.state, None, *mode);
+            let res = crate::stem_separator::start(app, None, *mode);
             app.say(match res {
-                Ok(clips) => format!("Extracted {} stems ({})", clips.len(), mode.label()),
-                Err(e) => format!("Stem separation: {e}"),
+                Ok(()) => format!("Started {}", mode.label()),
+                Err(e) => format!("Spectral split: {e}"),
             });
         }
         PaletteAction::CloseAll => {

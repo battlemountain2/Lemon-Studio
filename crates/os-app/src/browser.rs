@@ -25,6 +25,14 @@ impl App {
             self.browser_split_press();
             return true;
         }
+        if let Action::BrowserFavorite(i) = *a {
+            if let Some(row) = view::rows(&self.state).into_iter().nth(i) { crate::browser_assets::toggle(self, row); }
+            return true;
+        }
+        if *a == Action::BrowserPreview {
+            if let Some(path) = crate::browser_assets::selected_audio(&self.state) { self.preview_sample(&path); }
+            return true;
+        }
         if self.state.assistant_enabled && !self.loading() {
             if let Action::BrowserRow(index) = *a {
                 if view::rows(&self.state).get(index).is_some_and(|row| matches!(row.item, Item::History(_))) { crate::assistant::capture(self); }

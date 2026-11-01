@@ -43,6 +43,21 @@ const OVERLAP: usize = 2 * N_MAX + 2;
 const KEEP: usize = 2 * N_MAX;
 
 static EXPORTING: AtomicBool = AtomicBool::new(false);
+static ACTIVE_EXPORTS: AtomicUsize = AtomicUsize::new(0);
+
+#[must_use]
+pub struct ExportGuard(());
+
+pub fn export_guard() -> ExportGuard {
+    ACTIVE_EXPORTS.fetch_add(1, Ordering::AcqRel);
+    ExportGuard(())
+}
+
+impl Drop for ExportGuard {
+    fn drop(&mut self) {
+        ACTIVE_EXPORTS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// The host renders an export (Lemon Studio sets it for every export, high quality or not): voices wait for their
 /// frames as in an offline render.
@@ -51,7 +66,7 @@ pub fn set_exporting(on: bool) {
 }
 
 pub fn exporting() -> bool {
-    EXPORTING.load(Ordering::Acquire)
+    EXPORTING.load(Ordering::Acquire) || ACTIVE_EXPORTS.load(Ordering::Acquire) > 0
 }
 
 static OPEN: AtomicUsize = AtomicUsize::new(0);
@@ -103,6 +118,29 @@ pub struct Layout {
 }
 
 impl Layout {
+    pub fn waveform(&self, path: &Path, points: usize, cancel: &AtomicBool) -> Option<Vec<(f32, f32)>> {
+        if points == 0 || points > 4096 { return None; }
+        let mut file = File::open(path).ok()?;
+        let chunk = (65536 / self.block()).clamp(1, 8192);
+        let (mut left, mut right, mut bytes) = (vec![0.0; chunk], vec![0.0; chunk], Vec::new());
+        let mut peaks = vec![(f32::MAX, f32::MIN); points.min(self.frames)];
+        let mut at = 0;
+        while at < self.frames {
+            if cancel.load(Ordering::Relaxed) { return None; }
+            let count = chunk.min(self.frames - at);
+            self.read(&mut file, at, &mut left[..count], &mut right[..count], &mut bytes);
+            for i in 0..count {
+                let value = (left[i] + right[i]) * 0.5;
+                let bucket = (at + i) as u128 * peaks.len() as u128 / self.frames as u128;
+                let peak = &mut peaks[bucket as usize];
+                if value.is_finite() { peak.0 = peak.0.min(value); peak.1 = peak.1.max(value); }
+            }
+            at += count;
+        }
+        for peak in &mut peaks { if peak.0 > peak.1 { *peak = (0.0, 0.0); } }
+        Some(peaks)
+    }
+
     /// The layout of the file at `path`, when it is one that streams and holds all the frames its headers name.
     pub fn of(path: &Path) -> Option<Layout> {
         let mut f = File::open(path).ok()?;
@@ -808,6 +846,48 @@ impl Summary {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn browser_waveform_covers_the_full_pcm_file_and_cancels() {
+        let directory = dir();
+        let path = directory.join("waveform.wav");
+        let mut samples = vec![0.0f32; 200_000 * 2];
+        samples[0] = -0.5;
+        samples[1] = -0.5;
+        let last = samples.len() - 1;
+        samples[last] = 0.8;
+        samples[last - 1] = 0.8;
+        let bytes: Vec<_> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        std::fs::write(&path, wav_file(3, 2, 32, 32, 44100, &bytes)).unwrap();
+        let layout = Layout::of(&path).unwrap();
+        let cancel = AtomicBool::new(false);
+        let peaks = layout.waveform(&path, 512, &cancel).unwrap();
+        assert_eq!(peaks.len(), 512);
+        assert_eq!(peaks[0].0, -0.5);
+        assert_eq!(peaks[511].1, 0.8);
+        cancel.store(true, Ordering::Relaxed);
+        assert!(layout.waveform(&path, 512, &cancel).is_none());
+        assert!(layout.waveform(&path, 8192, &AtomicBool::new(false)).is_none());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn overlapping_exports_keep_waiting_until_the_last_guard_drops() {
+        assert!(!exporting());
+        let first = export_guard();
+        let second = export_guard();
+        set_exporting(false);
+        assert!(exporting());
+        drop(first);
+        assert!(exporting());
+        drop(second);
+        assert!(!exporting());
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = export_guard();
+            panic!("export interrupted");
+        });
+        assert!(!exporting());
+    }
 
     fn dir() -> PathBuf {
         static NEXT: AtomicUsize = AtomicUsize::new(0);

@@ -184,6 +184,7 @@ pub fn rows(s: &State) -> Vec<Row> {
 }
 
 fn tree(s: &State) -> Vec<Row> {
+    if s.browser_tab == 3 { return crate::browser_assets::favorite_rows(s); }
     let mut out = Vec::new();
     let tab = s.browser_tab;
     let mut roots: Vec<Result<usize, usize>> = match tab {
@@ -322,7 +323,7 @@ pub fn file_icon(name: &str) -> Icon {
 }
 
 /// Rows of an opened disk folder: its subfolders (recursing into opened ones), then its files.
-fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
+pub(crate) fn disk_rows(s: &State, dir: &Path, key: &str, depth: u8, out: &mut Vec<Row>) {
     for e in list_dir(s, dir).iter() {
         let k = format!("{key}/{}", e.name);
         if e.dir {
@@ -525,11 +526,14 @@ pub fn list_h(s: &State) -> f32 {
 /// The selected disk entry, shown in the info panel (spec §6).
 fn info_path(rows: &[Row], s: &State) -> Option<PathBuf> {
     let k = s.browser_sel.as_deref()?;
-    rows.iter().find(|r| r.key == k)?.path.clone()
+    let row = rows.iter().find(|r| r.key == k)?;
+    row.path.clone().or_else(|| if let Item::Sample(path) = &row.item { Some(PathBuf::from(path)) } else { None })
 }
 
 fn info_h(rows: &[Row], s: &State) -> f32 {
-    if info_path(rows, s).is_some() { INFO_H } else { 0.0 }
+    if info_path(rows, s).is_none() { return 0.0; }
+    let audio = s.browser_sel.as_ref().and_then(|key| rows.iter().find(|r| &r.key == key)).is_some_and(|r| matches!(r.item, Item::Sample(_)));
+    INFO_H + if audio { crate::browser_assets::WAVE_H } else { 0.0 }
 }
 
 /// `35 B`, `12.4 KB`, `2.29 MB` (spec §6).
@@ -679,17 +683,11 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     for (i, icon) in [Icon::Wave, Icon::Page, Icon::Speaker, Icon::Star].into_iter().enumerate() {
         let cx = 25.0 + 50.0 * i as f32;
         let rr = Rect::new(cx - 18.0, 108.0 + dy, 36.0, 30.0);
-        // Favorites: not available yet, greyed out.
-        let hov = if i >= OFF_TABS {
-            ui.off(rr, TIPS[i]);
-            false
-        } else {
-            ui.hit(rr, Action::BrowserTab(i), TIPS[i])
-        };
+        let hov = ui.hit(rr, Action::BrowserTab(i), TIPS[i]);
         if i == s.browser_tab {
             ui.c.stroke_rrect(rr, 4.0, 1.5, t.browser_tab_outline);
         }
-        let c = if i >= OFF_TABS { t.text_faint } else if hov || i == s.browser_tab { t.glyph } else { t.glyph.shade(-0.1) };
+        let c = if hov || i == s.browser_tab { t.glyph } else { t.glyph.shade(-0.1) };
         icons::draw(ui.c, icon, Rect::new(cx - 9.0, 114.0 + dy, 18.0, 18.0), c);
     }
     // List.
@@ -701,7 +699,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     }
     let rows = rows(s);
     let info = info_path(&rows, s);
-    let ih = if info.is_some() { INFO_H } else { 0.0 };
+    let ih = info_h(&rows, s);
     let list = Rect::span(13.0, bw - 1.0, top, r.bottom() - FOOTER_H - ih);
     ui.c.fill_rect(Rect::new(0.0, top, 13.0, list.h), t.browser_tabs.shade(0.02));
     ui.c.fill_rect(list, t.browser_list);
@@ -749,7 +747,15 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
             _ => c,
         };
         icons::draw(ui.c, row.icon, Rect::new(x + 6.0, y + 3.0, 17.0, 17.0), ic);
-        let (f, w) = (os_ui::Font::new(17), bw - 1.0 - x - 27.0);
+        let starred = crate::browser_assets::favoritable(row);
+        if starred {
+            let star = Rect::new(bw - 26.0, y, 24.0, ROW_H);
+            let active = crate::browser_assets::is_favorite(s, row);
+            let hovered = ui.hit(star, Action::BrowserFavorite(i), if active { "Remove from Favorites" } else { "Add to Favorites" });
+            let icon = os_ui::tabler::TablerIcon { filled: active, d: os_ui::tabler::STAR.d };
+            ui.c.icon(&icon, star.inset(4.0), if active || hovered { t.accent } else { t.text_dim });
+        }
+        let (f, w) = (os_ui::Font::new(17), (bw - 1.0 - x - 27.0 - if starred { 26.0 } else { 0.0 }).max(0.0));
         let over = ui.c.text_width(f, &row.label) - w;
         // Hovered, a label that does not fit scrolls (§9) rather than being cut.
         if hov && over > 0.0 {
@@ -773,7 +779,9 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
     }
     ui.c.pop_clip();
     if let Some(p) = &info {
-        paint_info(ui, s, p, Rect::new(0.0, list.bottom(), bw, ih));
+        let wave_h = (ih - INFO_H).max(0.0);
+        if wave_h > 0.0 { crate::browser_assets::paint_wave(ui, s, Rect::new(0.0, list.bottom(), bw, wave_h)); }
+        paint_info(ui, s, p, Rect::new(0.0, list.bottom() + wave_h, bw, INFO_H));
     }
     // Footer: the search field takes the width the splitter adds.
     let fy = r.bottom() - 27.0;
@@ -818,9 +826,6 @@ fn middle_cut(ui: &mut Ui, f: os_ui::Font, text: &str, w: f32) -> String {
     }
     String::new()
 }
-
-/// Tabs from this one on (favorites) are not available yet (spec §1).
-const OFF_TABS: usize = 3;
 
 /// Where the options menu opens (just below the title bar's ▸, spec §4).
 pub fn menu_at(s: &State) -> (f32, f32) {

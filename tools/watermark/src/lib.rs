@@ -64,7 +64,10 @@ mod tests {
         ("crates/os-ui/src/tabler.rs", "GPL-3.0-or-later AND MIT"),
     ];
 
-    const FORK_SOURCES: [&str; 28] = [
+    const FORK_SOURCES: [&str; 31] = [
+        "crates/os-app/src/browser_assets.rs",
+        "crates/os-app/src/stem_separator/job.rs",
+        "crates/os-engine/src/effects/legacy_delay.rs",
         "crates/os-app/src/assistant.rs",
         "crates/os-app/src/assistant_io.rs",
         "crates/os-engine/src/drums.rs",

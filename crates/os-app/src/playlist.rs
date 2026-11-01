@@ -382,6 +382,8 @@ pub enum Cmd {
     Param(crate::params::PCmd),
     /// "Type in value..." of a knob or parameter menu (spec: ui/type-in-value.md).
     TypeIn(crate::typein::Target),
+    /// "Reset" of a knob, fader or slider menu: back to its default (spec: ui/mixer.md §6.3).
+    Reset(crate::knobs::Control),
     /// Plugin presets (spec: plugins/presets.md).
     #[cfg_attr(not(windows), allow(dead_code))]
     Preset(crate::presets::PCmd),
@@ -2006,8 +2008,10 @@ pub fn create_automation(s: &mut State, tgt: u32, name: &str, value: f64) -> u16
         // Spec: ui/settings-choices.md "Light mode and clip note colours (2026-10-16)" (`clip_colors`).
         color: Some(s.clip_colors.new_channel(index)),
         enabled: true,
+        // The clip's range 0..1: stored pan 0 (minimum), volume 12800 (maximum), as FL stores a new clip's
+        // (spec: audio/automation.md "Range").
         volume: 1.0,
-        pan: 0.0,
+        pan: -1.0,
         pitch_cents: 0,
         mixer_track: 0,
         sample_path: None,
@@ -2069,7 +2073,8 @@ pub fn add_clip_channel(s: &mut State, kind: ChannelKind) -> usize {
         color: (!audio).then(|| Rgb::new(0x5a, 0x74, 0x4c)),
         enabled: true,
         volume: if audio { 0.78125 } else { 1.0 },
-        pan: 0.0,
+        // An automation clip's range 0..1: its pan knob is the minimum (spec: audio/automation.md "Range").
+        pan: if audio { 0.0 } else { -1.0 },
         pitch_cents: 0,
         mixer_track: 0,
         sample_path: None,
@@ -2472,14 +2477,14 @@ pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
         if s.project.channel(ch).is_some_and(|chan| chan.sample_path.is_some()) {
             use crate::stem_separator::StemMode;
             let stem_sub = vec![
-                PItem::new("8 Stems: Ultimate Deconstruction", Cmd::SeparateStems(i, StemMode::Stems8)),
-                PItem::new("6 Stems: Producer Suite", Cmd::SeparateStems(i, StemMode::Stems6)),
-                PItem::new("4 Stems: Standard DAW", Cmd::SeparateStems(i, StemMode::All4)),
+                PItem::new("8 spectral layers", Cmd::SeparateStems(i, StemMode::Stems8)),
+                PItem::new("6 spectral layers", Cmd::SeparateStems(i, StemMode::Stems6)),
+                PItem::new("4 spectral layers", Cmd::SeparateStems(i, StemMode::All4)),
                 PItem::sep(),
-                PItem::new("2 Stems: Vocals & Music", Cmd::SeparateStems(i, StemMode::VocalsAndMusic)),
-                PItem::new("2 Stems: Drums & Melodic", Cmd::SeparateStems(i, StemMode::DrumsAndMelody)),
+                PItem::new("Vocal-range & music layers", Cmd::SeparateStems(i, StemMode::VocalsAndMusic)),
+                PItem::new("Transient & melodic layers", Cmd::SeparateStems(i, StemMode::DrumsAndMelody)),
             ];
-            items.push(PItem::sub("Extract Stems", stem_sub));
+            items.push(PItem::sub("Spectral split (experimental)", stem_sub));
         }
     }
     items.push(PItem::sep());
@@ -2687,11 +2692,17 @@ pub fn marker_menu(s: &State, i: usize, tick: u32, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-/// The short right-click menu of the toolbar's and the mixer's knobs, faders and the tempo: "Create automation clip"
-/// (§8) and the initial value's items (`crate::init::items`) when the control can be automated, "Type in value..." when
-/// it takes one (spec: ui/type-in-value.md §8).
+/// The short right-click menu of the toolbar's and the mixer's knobs, faders and the tempo: "Reset" for a knob or fader,
+/// "Create automation clip" (§8) and the initial value's items (`crate::init::items`) when the control can be automated,
+/// "Type in value..." when it takes one (spec: ui/type-in-value.md §8).
 pub fn knob_menu(s: &State, auto: Option<(u32, String, f64)>, typein: Option<crate::typein::Target>, x: f32, y: f32) -> Popup {
-    let mut items = Vec::new();
+    // Reset first, as on the rack's and the mixer's knobs (spec: ui/mixer.md §6.3, ui/channel-rack.md §19).
+    let reset = match typein {
+        Some(crate::typein::Target::Knob(k)) => Some(crate::knobs::Control::Knob(k)),
+        Some(crate::typein::Target::Fader(t)) => Some(crate::knobs::Control::Fader(t)),
+        _ => None,
+    };
+    let mut items: Vec<PItem> = reset.map(|c| PItem::new("Reset", Cmd::Reset(c))).into_iter().collect();
     if let Some((tgt, name, value)) = auto {
         let [init, delete] = crate::init::items(s, Some((tgt, value)));
         items.extend([
@@ -3954,6 +3965,10 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             return None;
         }
         Cmd::MidiExt(d) => return app.set_ext_sync(d),
+        Cmd::Reset(c) => {
+            app.reset_control(c);
+            return None;
+        }
         Cmd::TypeIn(t) => {
             let at = app.mouse;
             crate::typein::open(&mut app.state, t, at);
@@ -4187,11 +4202,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             return Some(format!("Stutter chopped into {n} slices ({repeats}x)"));
         }
         Cmd::SeparateStems(i, mode) => {
-            let res = crate::stem_separator::separate_clip_stems(&mut app.state, i, mode);
+            let res = crate::stem_separator::start(app, Some(i), mode);
             app.invalidate();
             return Some(match res {
-                Ok(clips) => format!("Extracted {} stems ({})", clips.len(), mode.label()),
-                Err(e) => format!("Stem separation failed: {e}"),
+                Ok(()) => format!("Started {}", mode.label()),
+                Err(e) => format!("Spectral split: {e}"),
             });
         }
         _ => {}
@@ -4312,7 +4327,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             snapshot(s);
             (!delete_space(s)).then(|| "Delete space: make a time selection first (right-drag the ruler)".into())
         }
-        Cmd::Consolidate | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::TypeIn(_) | Cmd::Remote(_) | Cmd::MidiExt(_) => None,
+        Cmd::Consolidate | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::TypeIn(_) | Cmd::Reset(_) | Cmd::Remote(_) | Cmd::MidiExt(_) => None,
         Cmd::StretchMode => {
             s.playlist.stretch = !s.playlist.stretch;
             Some(if s.playlist.stretch { "Stretch mode on: resizing an audio clip stretches it".into() } else { "Stretch mode off".into() })

@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::codecs::registry::CodecRegistry;
@@ -292,6 +293,38 @@ fn mp3_info_frame(b: &[u8]) -> Option<usize> {
 }
 
 fn decode(bytes: Vec<u8>, ext: Option<&str>) -> Result<Sample, String> {
+    decode_limited(bytes, ext, usize::MAX, &AtomicBool::new(false))
+}
+
+pub fn load_bounded(path: &Path, max_bytes: usize, max_frames: usize, cancel: &AtomicBool) -> Result<Sample, String> {
+    let check = || {
+        if cancel.load(Ordering::Relaxed) { Err("Spectral split cancelled".to_string()) } else { Ok(()) }
+    };
+    check()?;
+    if let Some(sample) = load_builtin(path) {
+        if sample.frames() > max_frames { return Err("Source exceeds the spectral split frame limit; use a shorter audio file".into()); }
+        return Ok((*sample).clone());
+    }
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    if file.metadata().map_err(|e| e.to_string())?.len() > max_bytes as u64 {
+        return Err("Source exceeds the spectral split file limit; use a shorter audio file".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1) as u64).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    check()?;
+    if bytes.len() > max_bytes { return Err("Source exceeds the spectral split file limit".into()); }
+    if let Some(vw) = vorbis_in_wav(&bytes) {
+        let mut sample = decode_limited(vw.ogg.to_vec(), Some("ogg"), max_frames, cancel)?;
+        if let Some(frames) = vw.fact_frames {
+            sample.left.truncate(frames);
+            sample.right.truncate(frames);
+        }
+        return Ok(sample);
+    }
+    decode_limited(bytes, path.extension().and_then(|e| e.to_str()), max_frames, cancel)
+}
+
+fn decode_limited(bytes: Vec<u8>, ext: Option<&str>, max_frames: usize, cancel: &AtomicBool) -> Result<Sample, String> {
     // MP3 plays every decoded frame, the encoder's info frame as silence in front (spec: audio/sampler.md, the table
     // of formats; audio/sample-formats.md).
     let info_frame = mp3_info_frame(&bytes);
@@ -317,9 +350,11 @@ fn decode(bytes: Vec<u8>, ext: Option<&str>) -> Result<Sample, String> {
 
     let mut rate = 0;
     let silence = if mp3 { info_frame.unwrap_or(0) } else { 0 };
+    if silence > max_frames { return Err("Source exceeds the spectral split frame limit".into()); }
     let (mut left, mut right) = (vec![0.0; silence], vec![0.0; silence]);
     let mut buf: Vec<f32> = Vec::new();
     loop {
+        if cancel.load(Ordering::Relaxed) { return Err("Spectral split cancelled".into()); }
         let packet = match format.next_packet() {
             Ok(Some(p)) => p,
             Ok(None) => break,
@@ -336,6 +371,9 @@ fn decode(bytes: Vec<u8>, ext: Option<&str>) -> Result<Sample, String> {
         };
         rate = audio.spec().rate();
         let ch = audio.spec().channels().count().max(1);
+        if audio.samples_interleaved() / ch > max_frames.saturating_sub(left.len()) {
+            return Err("Source exceeds the spectral split frame limit; use a shorter audio file".into());
+        }
         buf.resize(audio.samples_interleaved(), 0.0);
         audio.copy_to_slice_interleaved(&mut buf);
         for frame in buf.chunks_exact(ch) {
@@ -715,6 +753,19 @@ impl SampleLibrary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_decode_preserves_audio_and_rejects_frame_byte_and_cancel_limits() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/click_sine.mp3");
+        let expected = load(&path).unwrap();
+        let bytes = std::fs::metadata(&path).unwrap().len() as usize;
+        let cancel = AtomicBool::new(false);
+        assert_eq!(load_bounded(&path, bytes, expected.frames(), &cancel).unwrap(), expected);
+        assert!(load_bounded(&path, bytes - 1, expected.frames(), &cancel).unwrap_err().contains("file limit"));
+        assert!(load_bounded(&path, bytes, expected.frames() - 1, &cancel).unwrap_err().contains("frame limit"));
+        cancel.store(true, Ordering::Relaxed);
+        assert!(load_bounded(&path, bytes, expected.frames(), &cancel).unwrap_err().contains("cancelled"));
+    }
 
     /// `tests/data/click_sine.mp3` (made with ffmpeg + LAME, 64 kbit/s mono, ID3v2 tag, LAME info frame): 0.3 s at
     /// 44.1 kHz, a 10-frame click of 0.9 at frame 4410, then a 440 Hz sine of 0.25 from frame 8820.

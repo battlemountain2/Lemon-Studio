@@ -286,6 +286,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
         remote_box::paint(ui, s, b);
     }
     // Message boxes and file dialogs go over everything (spec: ui/dialogs.md).
+    crate::stem_separator::paint(ui, s);
     dialog::paint(ui, s);
     if over_dialog {
         playlist::paint_overlays(ui, s);
