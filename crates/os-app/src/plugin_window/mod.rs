@@ -36,14 +36,28 @@ mod x11;
 mod hyprland;
 #[cfg(target_os = "linux")]
 pub use x11::{
-    busy, default_position, exposed, focus_main, lift_hide, lift_show, main_focused, paint_dirty, pointer, pointer_in_docked, pump, screen_to_main, stack, take_exposed, take_lift_input, unpinned,
-    FrameWindow, Unpinned,
+    busy, default_position, exposed, focus_main, lift_hide, lift_show, main_focused, paint_dirty, pointer, pointer_in_docked, pump, screen_to_main, set_transient, stack, take_exposed,
+    take_lift_input, unpinned, FrameWindow, Unpinned,
 };
 
 #[cfg(target_os = "macos")]
 mod cocoa;
 #[cfg(target_os = "macos")]
 pub use cocoa::{default_position, lift_hide, lift_show, pointer, row_window_at, screen_to_main, stack, take_exposed, take_keys, take_lift_input, FrameWindow};
+
+/// TOOLS > Set keyboard focus of all plugins to ▸ (Lemon Studio's design; spec: ui/channel-switches.md §6): whether
+/// plugin editors take the computer keyboard (Enabled, the default) or never get it (Disabled), the keys then going to
+/// Lemon Studio as those pressed in an editor already do (`take_keys`: the typing keyboard, Space). Saved in `.lemon` files (`lemon_state`).
+static EDITOR_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether plugin editors take the keyboard.
+pub fn editor_keys() -> bool {
+    EDITOR_KEYS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_editor_keys(on: bool) {
+    EDITOR_KEYS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Where a detached window opening for the first time goes: where a new window opens. Only Windows places it by
 /// monitor (Settings "Open detached plugins with the main window"; spec: ui/settings-choices.md "Miscellaneous:
@@ -73,6 +87,8 @@ pub enum LinkMsg {
     /// A sample sent to the host (Tesla's Send): to the selected channel (true) or the playlist; the files wait in
     /// `os_hostlink::take_audio`.
     Audio(bool),
+    /// Notes for the plugin's channel (Lemon Slicer's dump), waiting in `os_hostlink::take_notes` under this token.
+    Notes(isize),
 }
 
 /// Mouse input on the lifted popup (see `lift_show`); positions in the main window (physical px).
@@ -99,6 +115,7 @@ pub fn take_link() -> Vec<(isize, LinkMsg)> {
                 }
                 os_hostlink::Cmd::Automate => LinkMsg::Automate(arg.max(0) as usize),
                 os_hostlink::Cmd::Audio => LinkMsg::Audio(arg != 0),
+                os_hostlink::Cmd::Notes => LinkMsg::Notes(arg),
                 _ => LinkMsg::Changed,
             };
             (area as isize, m)
@@ -165,7 +182,9 @@ fn c_caption() -> Color {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelInfo {
     pub name: String,
-    /// "Insert 3" / "Master".
+    /// The icon chosen with Change icon... (Lemon Studio's design, `crate::playlist::ICONS`), drawn before the name.
+    pub icon: Option<crate::icons::Icon>,
+    /// "Bus 3" / "Master".
     pub target: String,
     pub enabled: bool,
     /// 0..1, -1..1, cents.
@@ -442,9 +461,9 @@ impl State {
     }
 }
 
-/// "Insert 3" / "Master", as the title bar names the target.
+/// "Bus 3" / "Master", as the title bar names the target.
 fn track_name(t: u16) -> String {
-    if t == 0 { "Master".into() } else { format!("Insert {t}") }
+    if t == 0 { "Master".into() } else { format!("Bus {t}") }
 }
 
 /// The RANGE box's live part and the TRACK box (window coordinates). Classic: FL's measured places, the PITCH knob
@@ -624,7 +643,11 @@ fn title_bar(c: &mut Canvas, st: &State, w: f32) {
     let p = presets_rect(st);
     let f = title_font();
     let ty = (19.0 - c.ascent(f)).round();
-    let nx = 48.0;
+    let mut nx = 48.0;
+    if let Some(i) = st.info.icon {
+        crate::icons::draw(c, i, Rect::new(nx, 8.0, 15.0, 15.0), c_text());
+        nx += 21.0;
+    }
     let room = (p.x - 8.0 - nx).max(0.0);
     let nw = c.text_width(f, &st.info.name).min(room);
     c.text_clip(f, nx, ty, room, c_text(), &st.info.name);
@@ -1233,7 +1256,7 @@ fn misc_hint(st: &mut State, h: Option<crate::misc_page::Hit>) {
         (Some(Hit::Value(m) | Hit::Step(m, _)), Some(v)) => format!("{}: {}", m.label(), value_text(m, v.get(m))),
         (Some(Hit::ArpDir(i)), _) => format!("Arpeggio direction: {}", value_text(M::ArpDir, f32::from(i))),
         (Some(Hit::Key(k)), _) => format!("{} (right click sets the root note)", note_name(i32::from(k))),
-        (Some(Hit::CutSelf), _) => "Cut itself: a new note cuts the channel's playing notes".into(),
+        (Some(Hit::CutSelf), _) => "Chokes itself: a new note stops the channel's playing notes".into(),
         (Some(Hit::Reset), _) => "Reset the root note and fine tuning".into(),
         (Some(Hit::TrackTab(k)), _) => (if k { "Key tracking" } else { "Velocity tracking" }).into(),
         _ => String::new(),
@@ -1245,7 +1268,7 @@ mod tests {
     use super::*;
 
     fn state(strip: bool, target: &str) -> State {
-        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, max_track: 125, misc: Some(Default::default()) };
+        let info = ChannelInfo { name: "Keys".into(), target: target.into(), enabled: true, volume: 0.78, pan: 0.0, pitch_cents: 0, range: 2, track: 0, max_track: 125, misc: Some(Default::default()), icon: None };
         State { strip, ..State::new(info, (480.0, 270.0), false) }
     }
 
@@ -1369,14 +1392,14 @@ mod tests {
         let Some(dir) = std::env::var_os("OS_SHOT_DIR") else { return };
         let dir = std::path::PathBuf::from(dir);
         let misc = |sampler: bool| {
-            let mut st = state(true, "Insert 1");
+            let mut st = state(true, "Bus 1");
             st.misc = true;
             st.editor = (crate::misc_page::PAGE_W, crate::misc_page::PAGE_H);
             st.info.misc = Some(crate::misc_page::MiscVals { sampler, ..Default::default() });
             st
         };
         let effect = || {
-            let mut st = state(true, "Insert 1");
+            let mut st = state(true, "Bus 1");
             st.info.misc = None;
             st
         };
@@ -1395,7 +1418,7 @@ mod tests {
         // The Misc page again in the Lemon design.
         os_theme::set_current(&os_theme::design::palette(os_theme::Design::Lemon, None));
         let boxes = |range: i32, track: u16| {
-            let mut st = state(true, "Insert 1");
+            let mut st = state(true, "Bus 1");
             (st.info.range, st.info.track) = (range, track);
             st
         };
@@ -1473,7 +1496,7 @@ mod tests {
         st.left_down(tx, y, false, &screen);
         st.motion(tx, y - 30.0, false);
         st.left_up(tx, y - 30.0);
-        assert_eq!((st.info.track, st.info.target.as_str()), (3, "Insert 3"));
+        assert_eq!((st.info.track, st.info.target.as_str()), (3, "Bus 3"));
         st.wheel(tx, y, 100.0);
         assert_eq!(st.info.track, 4, "one per notch");
         st.left_down(tx, y, false, &screen);
@@ -1483,7 +1506,7 @@ mod tests {
         st.wheel(tx, y, 1.0);
         assert_eq!(st.events.last(), Some(&FrameEvent::Track(20)), "no event at the limit");
         st.motion(tx, y, false);
-        assert!(st.box_text(Knob::Track).starts_with("Target mixer track: Insert 20"));
+        assert!(st.box_text(Knob::Track).starts_with("Target mixer track: Bus 20"));
         st.left_down(tx, y, true, &screen);
         assert_eq!(st.events.last(), Some(&FrameEvent::ShowTrack));
         assert!(st.drag.is_none());
@@ -1496,7 +1519,7 @@ mod tests {
         use crate::misc_page::{PAGE_H, PAGE_W};
         let screen = |_: f32, _: f32| (0, 0);
         for editor in [(850.0, 450.0), (300.0, 200.0)] {
-            let mut st = state(true, "Insert 1");
+            let mut st = state(true, "Bus 1");
             st.editor = editor;
             st.resize_min = Some((200.0, 100.0));
             let at = |st: &State, i: usize| (tab_rect(i).cx(), tab_rect(i).cy());
@@ -1517,7 +1540,7 @@ mod tests {
     fn knobs_have_a_menu_and_reset() {
         use crate::misc_page::{self as mp, Hit};
         let screen = |x: f32, y: f32| (x as i32, y as i32);
-        let mut st = state(true, "Insert 1");
+        let mut st = state(true, "Bus 1");
         let (w, _) = st.size();
         let dx = w - STRIP_RIGHT;
         for (k, x, reset) in [(Knob::Pan, 383.0, FrameEvent::Pan(0.0)), (Knob::Vol, 417.0, FrameEvent::Volume(0.78125)), (Knob::Pitch, 455.0, FrameEvent::PitchCents(0))] {
@@ -1534,7 +1557,7 @@ mod tests {
         st.events.clear();
         st.right_down(417.0 + dx, 47.0, &screen);
         assert!(st.events.is_empty());
-        let mut st = state(true, "Insert 1");
+        let mut st = state(true, "Bus 1");
         st.misc = true;
         st.editor = (mp::PAGE_W, mp::PAGE_H);
         let (w, h) = st.size();
@@ -1565,7 +1588,7 @@ mod tests {
     #[test]
     fn misc_keys_sound_while_held() {
         use crate::misc_page::Hit;
-        let mut st = state(true, "Insert 1");
+        let mut st = state(true, "Bus 1");
         st.misc = true;
         st.editor = (crate::misc_page::PAGE_W, crate::misc_page::PAGE_H);
         let (w, h) = st.size();

@@ -70,7 +70,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     window_body(ui, r);
     let outer = r;
     let arr = pl::arrangement_name(s);
-    let title = format!("Playlist - {arr}  \u{203a}  {}  \u{203a}", pl::source_name(s, pl::source(s)));
+    let title = format!("Arranger - {arr}  \u{203a}  {}  \u{203a}", pl::source_name(s, pl::source(s)));
     // The grid covers most of the window and is painted all over (rows and gaps): the frame skips it.
     let (fr, fc) = super::frame_rects(s, Win::Playlist, r);
     let cover = grid_rect(s, fr, fc);
@@ -80,10 +80,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     // The arrangement name opens the arrangement menu; hovered it turns orange with a down arrow (§12, as FL).
     {
         let f = Font::new(17);
-        let x0 = r.x + 281.0 + ui.c.text_width(f, "Playlist - ");
+        let x0 = r.x + 281.0 + ui.c.text_width(f, "Arranger - ");
         let w = ui.c.text_width(f, &arr);
         let arrow_w = ui.c.text_width(f, "  \u{203a}  ");
-        let hit = Rect::new(x0 - 2.0, r.y, w + arrow_w * 0.7, 22.0);
+        // Short of the window buttons, as the title (a narrow window cuts it).
+        let room = Rect::new(r.x, r.y, super::title_room(r, true).max(0.0), 23.0);
+        let hit = Rect::new(x0 - 2.0, r.y, w + arrow_w * 0.7, 22.0).intersect(&room);
+        ui.c.push_clip(room);
         if ui.hit(hit, Action::PlArrangement, "Arrangements (switch, add, clone, rename, delete)") {
             let bg = ui.t.window_title;
             ui.c.fill_rect(Rect::new(x0 - 1.0, r.y + 1.0, w + arrow_w * 0.7, 20.0), bg);
@@ -92,12 +95,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             let ax = x0 + w + arrow_w * 0.35;
             ui.c.fill_polygon(&[(ax - 4.0, r.y + 9.0), (ax + 4.0, r.y + 9.0), (ax, r.y + 14.0)], hot);
         }
+        ui.c.pop_clip();
     }
 
     // Title-bar tools: ▸ options, snap magnet, then the nine tools (§1, §3).
     let ty = r.y + 2.0;
     let b = Rect::new(r.x + 13.0 - 9.0, ty, 18.0, 18.0);
-    let hov = ui.hit(b, Action::PlOptions, "Playlist options");
+    let hov = ui.hit(b, Action::PlOptions, "Arranger options");
     icons::draw(ui.c, Icon::ArrowRight, b, if hov { t.glyph } else { t.text });
     let b = Rect::new(r.x + 33.0 - 9.0, ty, 18.0, 18.0);
     let hov = ui.hit(b, Action::PlSnap, format!("Snap: {}", s.playlist.snap.label()));
@@ -185,7 +189,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     }
 
     // Grid background and lines; rows follow the track layout (collapsed groups' members are strips, §6a).
-    ui.hit(grid, Action::PlaylistArea, "Playlist");
+    ui.hit(grid, Action::PlaylistArea, "Arranger");
     let mut visible = Vec::new();
     let mut row = g.track_at(grid.y);
     while row < TRACKS && g.y_of(row) < grid.bottom() {
@@ -233,6 +237,20 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
             clip_paint(ui, s, &g, i, c);
         }
     }
+    // Performance mode: the part of the zone the MIDI channel's notes reach (spec: ui/performance-mode.md §3).
+    if let Some((tr, n, a, b)) = crate::perform::grid_area(s) {
+        let (y0, y1) = (g.y_of(tr), g.y_of(tr + n));
+        ui.c.stroke_rrect(Rect::span(g.x_of(a as f32), g.x_of(b as f32), y0, y1), 0.0, 1.0, t.playhead.with_alpha(140));
+    }
+    // Performance mode: a launched clip's zone clip is outlined and filled as far as its pass has played (spec:
+    // ui/performance-mode.md §3).
+    if f.playing && f.song && s.playlist.perf_clip_progress {
+        for (i, k) in crate::perform::progress(s, f.tick.max(0.0) as u32) {
+            let r = g.clip_rect(&pl::clips(s)[i]);
+            ui.c.fill_rect(Rect::new(r.x, r.y, r.w * k, r.h), t.playhead.with_alpha(60));
+            ui.c.stroke_rrect(r, 0.0, 1.0, t.playhead);
+        }
+    }
     // Overlays.
     match s.playlist.overlay {
         Some(Overlay::Marquee(m)) => {
@@ -266,6 +284,15 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     ui.c.push_clip(heads);
     for &row in &visible {
         header(ui, s, &g, row, head_x, head_w);
+    }
+    // Performance track progress (spec: ui/performance-mode.md §3): a bar along the bottom of a launched track's header.
+    if f.playing && f.song && s.playlist.perf_track_progress {
+        for (row, k) in crate::perform::track_progress(s, f.tick.max(0.0) as u32) {
+            if visible.contains(&row) {
+                let y = g.y_of(row) + g.rows.height(row) - 6.0;
+                ui.c.fill_rect(Rect::new(head_x + 2.0, y, (head_w - 4.0) * k, 3.0), ui.t.playhead);
+            }
+        }
     }
     ui.c.pop_clip();
     resize_zones(ui, s, Win::Playlist, outer);
@@ -336,6 +363,15 @@ fn kind_icon(kind: PickKind) -> Icon {
         PickKind::Audio => Icon::Wave,
         PickKind::Automation => Icon::Slide,
     }
+}
+
+/// The icon of clip source `src` (of kind `kind`): its channel's Change icon... choice, else its kind's.
+fn source_icon(s: &State, src: ClipSource, kind: PickKind) -> Icon {
+    let row = match src {
+        ClipSource::Channel(ch) => s.project.channels.iter().position(|c| c.index == ch),
+        ClipSource::Pattern(_) => None,
+    };
+    row.and_then(|r| pl::window_icon(&s.project, &s.playlist.icons, r)).unwrap_or_else(|| kind_icon(kind))
 }
 
 /// Picker panel: kind tabs, then the list of clip sources of that kind (§1).
@@ -420,7 +456,7 @@ fn picker(ui: &mut Ui, s: &State, p: Rect) {
             ui.c.stroke_rrect(row.inset(0.5), if lemon { lk::r_btn(ui.t) } else { 0.0 }, 1.0, ui.t.a(0xa8e44a));
         }
         let ic = Color::rgb(if filled { TITLE_TEXT } else { 0xa6aaab });
-        icons::draw(ui.c, kind_icon(pl::source_kind(s, src)), Rect::new(row.x + 4.0, title.cy() - 6.0, 12.0, 12.0), ic);
+        icons::draw(ui.c, source_icon(s, src, pl::source_kind(s, src)), Rect::new(row.x + 4.0, title.cy() - 6.0, 12.0, 12.0), ic);
         ui.c.text_clip(Font::new(14), row.x + 20.0, title.cy() - 8.0, row.w - 23.0, ic, &pl::source_name(s, src));
         if src == cur {
             let ax = list.x - 1.0;
@@ -667,7 +703,7 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
     for m in pl::markers(s) {
         let x64 = g.x64(f64::from(m.position));
         let x = x64 as f32;
-        let w = pl::marker_w(m);
+        let w = pl::marker_w(s, m);
         if x > lane.right() || x + w < lane.x {
             continue;
         }
@@ -687,7 +723,8 @@ fn markers_paint(ui: &mut Ui, s: &State, g: &PGeom, lane: Rect) {
         ui.c.fill_polygon(&tab, t.ruler.mix(t.track_header, 0.55));
         marker_glyph(ui, m.kind, x, top + 8.0);
         let tx = x + 3.0 + pl::marker_icon(m.kind).0;
-        ui.c.text_clip(Font::new(12), tx, lane.y + 1.0, right - tx, t.text, &marker_label(m));
+        let label = crate::perform::pad_name(s, m).unwrap_or_else(|| marker_label(m));
+        ui.c.text_clip(Font::new(12), tx, lane.y + 1.0, right - tx, t.text, &label);
     }
     ui.c.pop_clip();
 }
@@ -896,7 +933,7 @@ fn clip_paint(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip) {
             ui.c.line(ix + 7.0, iy + 1.0, ix, iy + 8.0, 1.2, ic);
         } else {
             // On whole pixels: a partial repaint draws it exactly as a full one (smooth scrolling stops between them).
-            icons::draw(ui.c, kind_icon(kind), Rect::new((ix - 0.5).round(), iy.round(), 10.0, 10.0), ic);
+            icons::draw(ui.c, source_icon(s, c.source, kind), Rect::new((ix - 0.5).round(), iy.round(), 10.0, 10.0), ic);
         }
     }
     if r.w > 16.0 {
@@ -1356,6 +1393,14 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
         ui.c.text(Font::new(14), hr.x + 14.0, led.y - 6.0, text.shade(-0.2), "...");
     }
     let info = pl::track_info(s, row);
+    if info.is_some_and(|i| i.clip_lock.is_some()) {
+        // Locked to its clips (Lemon Studio's design, ui/playlist.md "Locking tracks to their clips"): a lock left of
+        // the LED, and of the group arrow on a group's lead.
+        let x = if lead { led.x - 34.0 } else { led.x - 16.0 };
+        let b = Rect::new(x, led.y + 1.0, 12.0, 12.0);
+        ui.hit(b, Action::PlHeader(row), "Locked to its clips: Draw and Paint place this source (TOOLS: Unlock all tracks)");
+        icons::draw(ui.c, Icon::Lock, b, text);
+    }
     if lead {
         // Collapse arrow left of the LED: up while open, down while collapsed.
         let a = Rect::new(led.x - 18.0, led.y, 14.0, 14.0);
@@ -1434,7 +1479,13 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
     } else if let Some(e) = &s.playlist.edit {
         let t = ui.t;
         let r = Rect::new(e.at.0, e.at.1, 150.0, 20.0);
-        ui.hit(r, Action::Swallow, "Type, Enter accepts, Esc cancels");
+        let hint = match e.target {
+            pl::EditTarget::MixerInsert(_) => "How many mixer tracks to insert: type a number, Enter inserts, Esc cancels",
+            pl::EditTarget::MixerGroup(_) => "Group name: type, Enter creates the group, Esc cancels",
+            pl::EditTarget::Chords => "Chords, one a bar (C G Am F, or I V vi IV; \"Am:\" first sets the key): Enter writes them into the piano roll, Esc cancels",
+            _ => "Type, Enter accepts, Esc cancels",
+        };
+        ui.hit(r, Action::Swallow, hint);
         ui.c.fill_rect(r, ui.t.s(0x0e1214));
         ui.c.stroke_rrect(r, 0.0, 1.0, t.glyph);
         ui.c.text_clip(Font::new(14), r.x + 4.0, r.y + 2.0, r.w - 8.0, t.text, &e.text);

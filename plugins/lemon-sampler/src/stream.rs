@@ -42,31 +42,43 @@ const OVERLAP: usize = 2 * N_MAX + 2;
 /// Frames a voice keeps behind its reads: a rising pitch reaches further back.
 const KEEP: usize = 2 * N_MAX;
 
-static EXPORTING: AtomicBool = AtomicBool::new(false);
-static ACTIVE_EXPORTS: AtomicUsize = AtomicUsize::new(0);
+/// Exports rendering now, in every host of the process.
+static EXPORTING: AtomicUsize = AtomicUsize::new(0);
 
 #[must_use]
 pub struct ExportGuard(());
 
 pub fn export_guard() -> ExportGuard {
-    ACTIVE_EXPORTS.fetch_add(1, Ordering::AcqRel);
+    export_started();
     ExportGuard(())
 }
 
 impl Drop for ExportGuard {
     fn drop(&mut self) {
-        ACTIVE_EXPORTS.fetch_sub(1, Ordering::AcqRel);
+        export_finished();
     }
 }
 
-/// The host renders an export (Lemon Studio sets it for every export, high quality or not): voices wait for their
-/// frames as in an offline render.
-pub fn set_exporting(on: bool) {
-    EXPORTING.store(on, Ordering::Release);
+/// An export starts (Lemon Studio calls it for every export, high quality or not): until it finishes, voices wait for
+/// their frames as in an offline render. Exports are counted, so one that finishes does not end another's wait.
+pub fn export_started() {
+    EXPORTING.fetch_add(1, Ordering::AcqRel);
 }
 
+/// The export `export_started` began has finished (never below none).
+pub fn export_finished() {
+    let mut n = EXPORTING.load(Ordering::Acquire);
+    while n > 0 {
+        match EXPORTING.compare_exchange_weak(n, n - 1, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return,
+            Err(now) => n = now,
+        }
+    }
+}
+
+/// Whether an export is rendering.
 pub fn exporting() -> bool {
-    EXPORTING.load(Ordering::Acquire) || ACTIVE_EXPORTS.load(Ordering::Acquire) > 0
+    EXPORTING.load(Ordering::Acquire) > 0
 }
 
 static OPEN: AtomicUsize = AtomicUsize::new(0);
@@ -876,7 +888,6 @@ mod tests {
         assert!(!exporting());
         let first = export_guard();
         let second = export_guard();
-        set_exporting(false);
         assert!(exporting());
         drop(first);
         assert!(exporting());

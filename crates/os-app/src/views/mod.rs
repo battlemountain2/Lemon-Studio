@@ -8,6 +8,7 @@
 pub mod browser;
 pub mod cabledebug;
 pub mod channel_win;
+pub mod container;
 pub mod data_folder;
 pub mod device_strip;
 pub mod factory_folder;
@@ -33,6 +34,7 @@ pub mod strum;
 pub mod piano_dlg;
 pub mod tapper;
 pub mod touch;
+pub mod events;
 pub mod theme_preview;
 pub mod toolbar;
 pub mod typein;
@@ -199,7 +201,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     }
     let _ = work;
     for (i, &win) in s.z.iter().enumerate() {
-        if docked_at.is_some_and(|d| i < d) {
+        // A detached window paints in its own native window (`paint_detached`).
+        if docked_at.is_some_and(|d| i < d) || s.is_detached(win) {
             continue;
         }
         ui.win = Some(win);
@@ -228,6 +231,8 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
             Win::Strum => ui.part(Seg::Win(win), a, |ui| strum::paint(ui, s, f)),
             Win::Arp => ui.part(Seg::Win(win), a, |ui| arpeggiate::paint(ui, s, f)),
             Win::PianoDlg => ui.part(Seg::Win(win), a, |ui| piano_dlg::paint(ui, s, f)),
+            Win::Events => ui.part(Seg::Win(win), a, |ui| events::paint(ui, s, f)),
+            Win::Container => ui.part(Seg::Win(win), a, |ui| container::paint(ui, s, f)),
             _ => {}
         }
         ui.c.pop_clip();
@@ -261,18 +266,23 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     // A menu opened from the settings window (Audio page combos) goes over it; a dropdown's submenu over the dropdown;
     // the time signature dialog's value lists over the dialog.
     let over_dialog = crate::timesig::form_open(s);
-    if !s.settings.open && !over_dialog {
+    // The popups and boxes opened from a detached window are in that window (`paint_detached`).
+    let here = !s.overlay_on.is_some_and(|w| s.is_detached(w) && s.shown(w));
+    if !s.settings.open && !over_dialog && here {
         playlist::paint_overlays(ui, s);
     }
     rack::paint_fill(ui, s);
     patterns::paint(ui, s);
     if s.settings.open {
         settings::paint(ui, s);
-        if !over_dialog {
+        if !over_dialog && here {
             playlist::paint_overlays(ui, s);
         }
     }
-    browser::paint_ghost(ui, s);
+    // A browser drag over a detached window draws its ghost there (`paint_detached`).
+    if s.drag_on.is_none_or(|w| !s.is_detached(w)) {
+        browser::paint_ghost(ui, s);
+    }
     if s.monitor.debug {
         mondebug::paint(ui, s);
     }
@@ -288,7 +298,7 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     // Message boxes and file dialogs go over everything (spec: ui/dialogs.md).
     crate::stem_separator::paint(ui, s);
     dialog::paint(ui, s);
-    if over_dialog {
+    if over_dialog && here {
         playlist::paint_overlays(ui, s);
     }
     // Omni Command Palette modal overlay (Ctrl+K).
@@ -296,20 +306,39 @@ pub fn paint(ui: &mut Ui, s: &State, f: &FrameInfo) -> usize {
     overlays
 }
 
+/// Detached window `w` (Options ▸ Detached, Lemon Studio's design: spec ui/mixer.md §6.2), painted whole into its own
+/// native window's canvas: the window, then the popups and boxes opened from it (`State::overlay_on`). Returns where
+/// the overlays' hits start, as `paint` does.
+pub fn paint_detached(ui: &mut Ui, s: &State, f: &FrameInfo, w: Win) -> usize {
+    ui.c.clear(ui.t.workspace);
+    let r = s.win_rect(w);
+    let a = paint_area(s, w);
+    ui.win = Some(w);
+    ui.c.push_clip(a);
+    match w {
+        Win::Mixer => mixer::paint(ui, s, r, f),
+        Win::ChannelRack => rack::paint(ui, s, f),
+        _ => {}
+    }
+    ui.c.pop_clip();
+    ui.win = None;
+    let overlays = ui.hit_count();
+    if s.overlay_on == Some(w) {
+        if w == Win::ChannelRack {
+            rack::paint_fill(ui, s);
+        }
+        playlist::paint_overlays(ui, s);
+    }
+    if s.drag_on == Some(w) {
+        browser::paint_ghost(ui, s);
+    }
+    overlays
+}
+
 /// Where window `w` paints: its rect (and the channel rack's graph editor hanging below it). The resize zones past
 /// its edges are hits only. A repaint that misses this skips the window; a playlist scroll paints around it.
 pub fn paint_area(s: &State, w: Win) -> Rect {
-    match w {
-        Win::ChannelRack => rack::paint_area(s),
-        Win::Plugin => channel_win::rect(s),
-        Win::Perf => perf::bounds(s),
-        Win::Tapper => tapper::bounds(s),
-        Win::Touch => touch::bounds(s),
-        Win::Strum => strum::bounds(s),
-        Win::Arp => arpeggiate::bounds(s),
-        Win::PianoDlg => piano_dlg::bounds(s),
-        w => s.win_rect(w),
-    }
+    crate::floating::placed(w).map_or_else(|| s.win_rect(w), |p| (p.paint)(s))
 }
 
 /// Start of a Playlist / Mixer / Piano roll window: blocks clicks through it, and (once the
@@ -381,13 +410,19 @@ pub fn window_frame_ex(ui: &mut Ui, win: Win, r: Rect, title: &str, title_x: f32
         ui.c.fill_rect_gradient(bar, t.window_title.shade(0.04), t.window_title.shade(-0.03), 0.0);
         ui.c.fill_rect(Rect::new(r.x, r.y + 22.0, r.w, 1.0), t.splitter_dark);
     }
-    ui.c.text(os_ui::Font::new(17), r.x + title_x, r.y + 1.0, t.text, title);
+    // The title stops short of the window buttons (a narrow window cuts it).
+    ui.c.text_clip(os_ui::Font::new(17), r.x + title_x, r.y + 1.0, (title_room(r, buttons) - title_x).max(0.0), t.text, title);
     ui.hit(bar, Action::WinDrag(win), "Drag to move");
     // Minimize / maximize / close glyphs at the right (1862, 1881, 1901 at full width).
     if buttons {
         window_buttons(ui, win, r.right() - 64.0, r.y, t.text_dim.mix(t.glyph, 0.6), t.glyph);
     }
     Rect::new(r.x, r.y + 23.0, r.w, r.h - 23.0)
+}
+
+/// How far from a title bar's left (at `r`) its text may reach: short of the window buttons when there are any.
+pub fn title_room(r: Rect, buttons: bool) -> f32 {
+    if buttons { r.w - 68.0 } else { r.w }
 }
 
 /// Floating window frame (spec ui/piano-roll.md §1a, same for Playlist / Mixer / Piano roll):

@@ -296,7 +296,7 @@ fn hint_panel(ui: &mut Ui, c: &Ctx) {
     let (t, a, s, f) = (ui.t, c.a, c.s, c.f);
     let hp = a.span(72.0, 376.0, 4.0, 36.0);
     sunken(ui, hp, t.sunken);
-    ui.hit(hp, Action::DragWindow, "Hint bar");
+    ui.hit(hp, Action::DragWindow, "Status bar");
     ui.c.text_clip(Font::new(13), a.x(76.0), a.y(6.0), 280.0, t.text_dim.shade(-0.05), &f.title);
     let hint: &str = if !f.hint.is_empty() { &f.hint } else { s.message.as_deref().unwrap_or("") };
     ui.c.text_clip(Font::new(14), a.x(77.0), a.y(19.0), 280.0, t.text, hint);
@@ -320,8 +320,8 @@ fn transport(ui: &mut Ui, c: &Ctx) {
     // PAT / SONG fill the whole top / bottom half of the capsule's left section.
     let pat = a.span(384.0, 418.0, 5.0, 20.0);
     let song = a.span(384.0, 418.0, 20.0, 35.0);
-    ui.hit(pat, Action::PatSong(false), "Pattern mode: play the current pattern");
-    ui.hit(song, Action::PatSong(true), "Song mode: play the playlist");
+    ui.hit(pat, Action::PatSong(false), "Pattern: play the current pattern");
+    ui.hit(song, Action::PatSong(true), "Song: play the arrangement");
     for (r, label, active) in [(pat, "PAT", !s.song_mode), (song, "SONG", s.song_mode)] {
         if active && lemon {
             os_ui::kit::lemon::lit_in(ui.c, ui.t, Rect::new(r.x + 2.0, r.y + 1.0, r.w - 3.0, r.h - 1.5), 4.0, false);
@@ -469,7 +469,16 @@ fn time(ui: &mut Ui, c: &Ctx) {
     // A bar that makes no signature (3 steps per beat) counts its beats as quarters.
     let sig = s.project.signature().unwrap_or((s.project.bar().0, 4));
     let secs = f.tick / ppq * 60.0 / s.project.tick_tempo(s.tempo.max(1.0));
-    let (bar, step, tick) = s.clock.reading(secs, f.tick * 96.0 / ppq, sig);
+    let ticks96 = f.tick * 96.0 / ppq;
+    // The bars count from the Start marker's bar (spec: ui/playlist.md §7a, ui/performance-mode.md §1).
+    let start = crate::playlist::start_marker(s).filter(|_| f.song && s.clock.mode == crate::clock::Mode::Bar);
+    let (bar, step, tick) = match start {
+        Some(z) => s.clock.bars_from(ticks96, (f64::from(z) * 96.0 / ppq / 384.0).floor() * 384.0, sig),
+        None => {
+            let (b, st, t) = s.clock.reading(secs, ticks96, sig);
+            (i64::from(b), st, t)
+        }
+    };
     // Light digits drawn piece by piece (measured: big 36 px condensed to 14, small 24 to 9),
     // right-aligned so long bar numbers grow to the left and never leave the panel.
     let (big, small) = (Font::light(32, 13), Font::light(22, 8));
@@ -642,7 +651,7 @@ fn utilities(ui: &mut Ui, c: &Ctx) -> bool {
     let utils = [
         (Icon::Undo, "Undo / Undo history (Ctrl+Z)"),
         (Icon::Cut, "Open audio editor / New audio editor"),
-        (Icon::Mic, "One-click audio recording"),
+        (Icon::Mic, "Quick record"),
         (Icon::Help, "Help index / About..."),
         (Icon::Save, "Save as... / Save new version (Shift+Ctrl+S)"),
         (Icon::SaveRender, "Export audio... (Ctrl+R)"),
@@ -732,7 +741,7 @@ fn song_pos(ui: &mut Ui, c: &Ctx) {
         }
         // An empty playlist in SONG mode: nothing to move through.
         None => {
-            ui.hit(sp, Action::Swallow, "Song position: the playlist is empty");
+            ui.hit(sp, Action::Swallow, "Song position: the arranger is empty");
         }
     }
     let hx = range.map(|len| a.x(crate::song_pos::handle_x(pos, len).round()));
@@ -872,14 +881,14 @@ fn pattern(ui: &mut Ui, c: &Ctx) {
 fn window_buttons(ui: &mut Ui, c: &Ctx, which: Range<usize>) -> bool {
     let a = c.a;
     let wins = [
-        (Icon::Playlist, Action::ToggleWin(Win::Playlist), "Playlist / Maximize Play list (F5)"),
+        (Icon::Playlist, Action::ToggleWin(Win::Playlist), "Arranger / Maximize arranger (F5)"),
         (Icon::PianoRoll, Action::ToggleWin(Win::PianoRoll), "Piano roll / Maximize Piano roll (F7)"),
-        (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), "Channel rack (F6)"),
+        (Icon::ChannelRack, Action::ToggleWin(Win::ChannelRack), "Instrument rack (F6)"),
         (Icon::Mixer, Action::ToggleWin(Win::Mixer), "Mixer (F9)"),
-        (Icon::Browser, Action::ToggleWin(Win::Browser), "Browser / Plugin picker (Alt+F8)"),
-        (Icon::Project, Action::ProjectPicker, "Project picker / Plugin picker (Ctrl+F8)"),
-        (Icon::Plug, Action::PickerOpen, "Plugin picker (F8)"),
-        (Icon::Kick, Action::ToggleWin(Win::Tapper), "Tempo tapper (Ctrl+F5)"),
+        (Icon::Browser, Action::ToggleWin(Win::Browser), "Browser / Plugin palette (Alt+F8)"),
+        (Icon::Project, Action::ProjectPicker, "Clip palette / Plugin palette (Ctrl+F8)"),
+        (Icon::Plug, Action::PickerOpen, "Plugin palette (F8)"),
+        (Icon::Kick, Action::ToggleWin(Win::Tapper), "Tap tempo (Ctrl+F5)"),
         (Icon::Touch, Action::ToggleWin(Win::Touch), "Touch controller (Alt+F7)"),
         // FL's store button is hidden: its stand-in, a repository of free and open-source plugins (spec:
         // ui/main-window.md §3), had the plugin picker's icon. It is to come back with a shop icon.

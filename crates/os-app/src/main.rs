@@ -8,9 +8,16 @@
 // Plugin windows exist on Windows, Linux and macOS (`plugin_window`): elsewhere what only they reach (the Misc tab, the
 // window and preset menus, their requests) is built but unused. Those builds still report real dead code.
 #![cfg_attr(not(plugin_windows), allow(dead_code))]
+// Windows: a GUI program, so started from Explorer, the Start menu or a shortcut it opens no console window beside its
+// own. Started from a terminal it still writes there (`attach_console`).
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod app;
 mod assistant;
+mod arrange;
+mod audio_clipboard;
+mod help_links;
+mod diagnostics;
 mod audio_cfg;
 mod auto_close;
 mod autoscroll;
@@ -21,18 +28,25 @@ mod audio_bench;
 mod open_bench;
 mod browser;
 mod browser_assets;
+mod browser_index;
 mod cable;
 mod capture;
+#[cfg(target_os = "linux")]
+mod rt;
 mod one_click;
+mod track_rec;
+mod audio_log;
 mod score_log;
 mod clip_colors;
 mod clock;
+mod control;
 mod cpu;
 mod data_folder;
 mod device;
 mod drum_chop;
 mod stem_separator;
 mod dialog;
+mod floating;
 mod filedlg;
 mod enable_groups;
 mod export;
@@ -46,8 +60,10 @@ mod icons;
 mod init;
 mod knobs;
 mod layout;
+mod lemon_state;
 mod loading;
 mod missing;
+mod mix_threads;
 mod zipped;
 mod logo;
 #[cfg(target_os = "macos")]
@@ -61,10 +77,16 @@ mod midi_cfg;
 mod midi_file;
 mod midi_in;
 mod midi_out;
+mod lemon_midi_out;
 mod midi_play;
+mod container;
 mod mixer;
+mod mixer_state;
 mod osc3;
 mod citrus;
+mod chord_tool;
+mod slicer;
+mod drums;
 mod monitor;
 mod palette;
 mod params;
@@ -78,6 +100,7 @@ mod render;
 mod pattern_render;
 mod patterns;
 mod perf;
+mod perform;
 mod playlist;
 mod plugin_db;
 mod plugin_manager;
@@ -116,6 +139,7 @@ mod strum;
 mod flam;
 mod flip;
 mod levels;
+mod channel_states;
 mod chords;
 mod claw;
 mod limit;
@@ -127,6 +151,7 @@ mod piano_dlg;
 mod arpeggiate;
 mod tapper;
 mod touch;
+mod events;
 mod record;
 mod recent;
 mod theme_adjust;
@@ -136,6 +161,7 @@ mod timesig;
 mod transport;
 mod typein;
 mod views;
+mod detached_win;
 mod wallpaper;
 mod waves;
 mod win_clamp;
@@ -171,6 +197,8 @@ struct Shell {
     /// The held cursor is locked by the window system (Wayland's pointer lock): it stays put by itself and cannot be
     /// warped. Otherwise (Windows, X11) it is warped back to the anchor after each move.
     pointer_locked: bool,
+    /// The held cursor's window: a detached window's (`detached_win`), or the main window's (`None`).
+    lock_on: Option<app::Win>,
     cursor: app::Cursor,
     /// Main-window border in device pixels (left, top, right, bottom); zero when maximized.
     inset: (u32, u32, u32, u32),
@@ -204,6 +232,10 @@ struct Shell {
     /// The main window's restored frame and whether it is maximized, kept for the next start as the app closes
     /// (`layout`): the last run's at first, then followed as the window moves and resizes (`follow_frame`).
     main_win: Option<layout::MainWin>,
+    /// The detached windows' native windows (Options ▸ Detached, `detached_win`).
+    detached: Vec<detached_win::DetWin>,
+    /// The key event being handled came to this detached window: it goes to the app on that window's surface.
+    key_on: Option<app::Win>,
 }
 
 /// Frame timing for tuning (`OS_FRAMES=<file>`): per frame the time, what was repainted (`full` or the number of
@@ -462,12 +494,25 @@ impl Shell {
     /// with raw motion driving the virtual position `virt` (`device_event`).
     fn lock_cursor(&mut self, window: &Window, anchor: (f64, f64), virt: (f32, f32)) {
         self.lock = Some((anchor, virt));
+        self.lock_on = None;
         self.pointer_locked = window.set_cursor_grab(CursorGrabMode::Locked).is_ok();
         window.set_cursor_visible(false);
     }
 
+    /// The window holding the cursor (`lock_on`).
+    fn lock_window(&self) -> Option<Rc<Window>> {
+        match self.lock_on {
+            Some(w) => self.detached.iter().find(|d| d.win == w).map(|d| d.window.clone()),
+            None => self.window.clone(),
+        }
+    }
+
     /// Ends a held drag: the cursor shows again where the drag started, as if it never moved.
-    fn unlock_cursor(&mut self, window: &Window) {
+    fn unlock_cursor(&mut self) {
+        let Some(window) = self.lock_window() else {
+            self.lock = None;
+            return;
+        };
         let Some((anchor, _)) = self.lock.take() else { return };
         // Under a pointer lock this is where the cursor reappears once unlocked.
         let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
@@ -575,6 +620,11 @@ impl Shell {
         if self.app.want_exit {
             el.exit();
         }
+        // Ctrl+C in the terminal, or a kill: closes without asking (`exiting` keeps unsaved changes as a backup).
+        #[cfg(unix)]
+        if stop_signal::asked() {
+            el.exit();
+        }
         // macOS: Quit from the menu bar or the Dock asks about unsaved changes as closing the window does; AppKit waits
         // for the answer. A Quit while a dialog is open is turned down (the dialog is answered first).
         #[cfg(target_os = "macos")]
@@ -607,6 +657,7 @@ impl Shell {
         #[cfg(unix)]
         if let Some(assistant) = self.assistant.as_mut() { assistant.poll(&mut self.app); }
         self.pending |= self.app.tick();
+        self.sync_detached(el);
         // The startup splash: the opened project's loading moves its gauge on; once the main window has shown and
         // nothing is loading, it finishes. It is dropped when it has faded away.
         if let Some(s) = &self.splash {
@@ -785,6 +836,11 @@ impl ApplicationHandler for Shell {
             layout::save_main(m);
         }
         layout::save(&self.app.state);
+        // Stopped by a signal with changes unsaved: nobody was asked, so they go to a backup.
+        #[cfg(unix)]
+        if stop_signal::asked() && self.app.unsaved() {
+            let _ = self.app.write_backup(chrono::Local::now().naive_local());
+        }
         #[cfg(target_os = "macos")]
         {
             if os_host::guard::tripped() {
@@ -795,20 +851,32 @@ impl ApplicationHandler for Shell {
         }
     }
 
-    /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor.
+    /// Raw mouse motion drives a locked scroll-bar drag; the hidden cursor is held at the anchor. Held in a detached
+    /// window, the motion goes to that window's surface.
     fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
-        let (DeviceEvent::MouseMotion { delta }, Some((anchor, virt)), Some(window)) = (event, self.lock, self.window.clone()) else { return };
+        let (DeviceEvent::MouseMotion { delta }, Some((anchor, virt)), Some(window)) = (event, self.lock, self.lock_window()) else { return };
         let scale = ui_scale(&window);
         let v = (virt.0 + (delta.0 / scale) as f32, virt.1 + (delta.1 / scale) as f32);
         self.lock = Some((anchor, v));
-        self.app.mouse_move(v.0, v.1);
+        self.app.on(self.lock_on, |a| a.mouse_move(v.0, v.1));
         if !self.pointer_locked {
             let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(anchor.0, anchor.1));
+        }
+        if self.lock_on.is_some_and(|w| self.app.detached_dirty(w)) {
+            window.request_redraw();
         }
         self.pending = true;
     }
 
-    fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // A detached window's native window: its own handling, but for its keys, which go where the main window's do.
+        let det = self.detached_of(id);
+        self.key_on = det.map(|i| self.detached[i].win);
+        if let Some(i) = det {
+            if !matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_)) {
+                return self.detached_event(i, event);
+            }
+        }
         let Some(window) = self.window.clone() else { return };
         let scale = ui_scale(&window) as f32;
         // The monitor's own scale, for General ▸ Display's PPI ruler (`crate::ppi`).
@@ -875,6 +943,11 @@ impl ApplicationHandler for Shell {
                 // Locked: movement comes from raw motion (`device_event`); positions are ignored,
                 // since hiding the cursor makes Windows report a jump to the window centre.
                 if self.lock.is_some() {
+                    return;
+                }
+                // A browser item dragged over a detached window goes to that window (`cross_move`).
+                if self.app.cross_drag() && self.cross_move(None, (position.x, position.y)) {
+                    self.sync_cursor(&window);
                     return;
                 }
                 if let (Some((at, grab_y)), Some((cursor, (l, _, r, _)))) = (self.unmax, screen_state(&window)) {
@@ -953,8 +1026,8 @@ impl ApplicationHandler for Shell {
                 } else {
                     self.grab = None;
                     self.unmax = None;
-                    self.unlock_cursor(&window);
-                    self.app.mouse_up();
+                    self.unlock_cursor();
+                    self.app.mouse_up_from(None);
                     if self.app.resize_cursor && self.app.drag.is_none() {
                         self.app.resize_cursor = false;
                     }
@@ -993,9 +1066,9 @@ impl ApplicationHandler for Shell {
                 self.pending = true;
                 window.request_redraw();
             }
-            WindowEvent::MouseInput { state: ElementState::Released, .. } => {
-                self.unlock_cursor(&window);
-                self.app.mouse_up();
+            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Right | MouseButton::Middle, .. } => {
+                self.unlock_cursor();
+                self.app.mouse_up_from(None);
                 self.pending = true;
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1065,7 +1138,10 @@ impl ApplicationHandler for Shell {
                         event
                     };
                     self.app.repeat = event.repeat;
-                    self.app.key(&event.logical_key, ctrl(self.mods), self.mods.alt_key());
+                    // The key acts in the window that has the keyboard (the one it came to), and a popup or box it
+                    // opens shows there.
+                    let (key, c, alt) = (&event.logical_key, ctrl(self.mods), self.mods.alt_key());
+                    self.app.key_on(self.key_on, key, c, alt);
                     self.app.repeat = false;
                     window.request_redraw();
                 }
@@ -1386,7 +1462,7 @@ fn screenshot(args: &[String]) {
                 }
             }
             // The wheel turned `dy` notches at x,y after the first paint, before the clicks (scrolls a page, e.g.
-            // `--settings 5 --wheel 960,500,-40` shows the Theme page's buttons); may be given more than once.
+            // `--settings 6 --wheel 960,500,-40` shows the Theme page's buttons); may be given more than once.
             "--wheel" => {
                 let v: Vec<f32> = it.next().map(|v| v.split(',').filter_map(|n| n.parse().ok()).collect()).unwrap_or_default();
                 if let [x, y, dy] = v[..] {
@@ -1396,7 +1472,7 @@ fn screenshot(args: &[String]) {
             "--lane" => lane = it.next().and_then(|v| v.parse().ok()),
             "--pans" => pans = it.next().map(|v| v.split(',').filter_map(|p| p.parse().ok()).collect()),
             "--settings" => settings = it.next().and_then(|v| v.parse().ok()),
-            // With --settings 7: that Info box (0 title .. 4 web link) being edited.
+            // With --settings 8: that Info box (0 title .. 4 web link) being edited.
             "--info-edit" => info_edit = it.next().and_then(|v| v.parse().ok()),
             "--lane-menu" => lane_menu = true,
             "--menu" => menu = it.next().and_then(|v| v.parse().ok()),
@@ -1740,6 +1816,37 @@ fn use_x11() -> bool {
     std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) && x11rb::rust_connection::RustConnection::connect(None).is_ok()
 }
 
+/// SIGINT (Ctrl+C in the terminal) and SIGTERM: the program closes as it does with its window, within a tick. A second
+/// one ends it at once, should the first not get through.
+#[cfg(unix)]
+mod stop_signal {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static ASKED: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn on_signal(_: libc::c_int) {
+        if ASKED.swap(true, Ordering::AcqRel) {
+            // SAFETY: ends the process; safe in a signal handler.
+            unsafe { libc::_exit(130) };
+        }
+    }
+
+    pub fn install() {
+        // SAFETY: installs a handler that only touches an atomic and may call `_exit`.
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as usize;
+            libc::sigemptyset(&mut sa.sa_mask);
+            libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+            libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        }
+    }
+
+    pub fn asked() -> bool {
+        ASKED.load(Ordering::Acquire)
+    }
+}
+
 fn wake_ui() {
     if !WAKE_PENDING.swap(true, std::sync::atomic::Ordering::AcqRel) {
         if let Ok(p) = PROXY.lock() {
@@ -1750,7 +1857,22 @@ fn wake_ui() {
     }
 }
 
+/// Windows: a GUI program gets a console only through handles its parent passes it (`cargo run`, a pipe, the plugin
+/// scanner's parent). Without them, the terminal it was started from (if any) takes its output, so `--render` and the
+/// errors printed before the window opens still show there.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    unsafe {
+        if GetStdHandle(STD_OUTPUT_HANDLE).is_null() && GetStdHandle(STD_ERROR_HANDLE).is_null() {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    attach_console();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(unix)]
     if args.first().map(String::as_str) == Some("--assistant-headless") {
@@ -1783,6 +1905,8 @@ fn main() {
         std::process::exit(plugins::window_check::run(&args[1..]));
     }
     app::move_old_settings();
+    // The mixing threads every engine renders on, from here on (spec: audio/multicore.md).
+    mix_threads::start();
     // A render without a window (FILE > Export audio from the command line, `render`).
     if args.first().map(String::as_str) == Some("--render") {
         std::process::exit(render::cli(&args[1..]));
@@ -1790,6 +1914,15 @@ fn main() {
     if args.iter().any(|a| a == "--screenshot") {
         screenshot(&args);
         return;
+    }
+    // The control plane's socket (spec: roadmap/control-plane.md): beside the window, or without one.
+    let control = control::server::Flags::take(&mut args).unwrap_or_else(|e| {
+        eprintln!("Lemon Studio: {e}");
+        std::process::exit(2);
+    });
+    let level = control.level.unwrap_or(control::Level::Edit);
+    if let Some(at) = &control.serve {
+        control::server::serve_headless(at, level, control.token.clone(), args.first().map(std::path::PathBuf::from));
     }
     // Run from source: Lemon Studio's own plugins are rebuilt and installed before the plugin scan looks for them.
     plugin_rebuild::run();
@@ -1812,6 +1945,8 @@ fn main() {
         *p = Some(event_loop.create_proxy());
     }
     os_clap::set_waker(wake_ui);
+    // CLAP plugins asking which thread they are on (`thread-check`): this one is the main thread.
+    os_clap::set_main_thread();
     // Lemon plugins' editors run on threads of their own off Windows and wake the app when they send something.
     #[cfg(not(windows))]
     os_hostlink::set_host_waker(wake_ui);
@@ -1829,6 +1964,20 @@ fn main() {
         app.startup_project();
         // Ask for data folder "On startup": the New project form over it (spec: ui/data-folder.md §7).
         app.startup_form();
+    }
+    if let Some(at) = &control.control {
+        app.state.message = Some(match control::server::start(at, level, wake_ui) {
+            Ok(mut server) => {
+                if control.token.is_some() {
+                    server.token = control.token.clone();
+                }
+                let m = format!("Control plane: {}", server.describe());
+                eprintln!("Lemon Studio: {m}");
+                app.listen(server);
+                m
+            }
+            Err(e) => format!("Control plane: could not listen at {at}: {e}"),
+        });
     }
     // The windows where the last run left them.
     layout::restore(&mut app.state);
@@ -1862,6 +2011,7 @@ fn main() {
         last_click: Instant::now() - Duration::from_secs(10),
         lock: None,
         pointer_locked: false,
+        lock_on: None,
         cursor: app::Cursor::Default,
         inset: (0, 0, 0, 0),
         edge: None,
@@ -1878,7 +2028,11 @@ fn main() {
         watchdog,
         ctrl_click: false,
         main_win: layout::main_win(),
+        detached: Vec::new(),
+        key_on: None,
     };
+    #[cfg(unix)]
+    stop_signal::install();
     event_loop.run_app(&mut shell).expect("run");
     // After a contained plugin crash the process ends here, before plugin files are unloaded (a stopped plugin's code
     // must not run again).

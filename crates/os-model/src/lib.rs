@@ -1,4 +1,5 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 thacer13
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
@@ -11,6 +12,33 @@
 pub mod clip_lfo;
 pub mod crossfade;
 pub mod curve;
+
+/// A stable identity for a channel, pattern, mixer track, arrangement, playlist clip or mixer slot's plugin: it stays
+/// with the thing through moves, renumbering and the deletion of others, so commands can name it (the control plane,
+/// `os-app`'s `control`). [`Id::NONE`] until the app assigns one; project files don't store ids, so an opened project
+/// gets new ones.
+///
+/// An id is who a thing is, not what it holds: two things compare equal whatever their ids (`==` on a project, a
+/// channel, a clip compares their contents, as it did before ids). Compare ids by their numbers (`id.0`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Id(pub u32);
+
+impl Id {
+    /// Not assigned yet.
+    pub const NONE: Id = Id(0);
+
+    pub fn is_none(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl PartialEq for Id {
+    fn eq(&self, _: &Id) -> bool {
+        true
+    }
+}
+
+impl Eq for Id {}
 
 /// An RGB color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -71,6 +99,8 @@ pub struct Project {
     pub panning_law: Option<u8>,
     pub fast_declick: Option<bool>,
     pub auto_crossfades: Option<bool>,
+    /// Performance mode (event 31: 1 = on; spec: ui/performance-mode.md §5). `None` = not in the file (off).
+    pub performance: Option<bool>,
     /// Playlist scroll, time zoom and track height (event 242). `None` = not in the file.
     pub playlist_view: Option<PlaylistView>,
     /// Main volume 0..=16000, 12800 = unity (mixer record id 0 at place 0x4000; spec: audio/mixer.md "Main volume").
@@ -90,6 +120,78 @@ pub struct Project {
     /// The project's initial values, in file order (event 216; spec: ui/settings-choices.md "Advanced: Initialize
     /// controls automatically"): controls that take a value when the song starts.
     pub init_controls: Vec<InitControl>,
+    /// Internal controller links, in file order (event 227 with 0x8000 and up in its first field; spec:
+    /// flp/events/automation.md "Controller links"): a controller plugin's output driving a target.
+    pub controller_links: Vec<ControllerLink>,
+    /// Mixer options ▸ Plugin delay compensation ▸ Automatic unticked: the plugins' delays are not compensated, only
+    /// the tracks' latency settings are (spec: audio/delay-compensation.md "Automatic"). Not in the FLP (where the
+    /// original keeps it was not found): a `.lemon` file keeps it in its own events (os-app `lemon_state`).
+    pub pdc_off: bool,
+}
+
+/// One internal controller link (spec: flp/events/automation.md "Controller links"): output `output` of the controller
+/// plugin at `source` drives `target`. The record's 20 bytes are kept as read, so the fields not understood are written
+/// back as they were.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerLink {
+    pub bytes: [u8; ControllerLink::LEN],
+    /// The link's mapping formula (event 230 right after the link, e.g. "1-Input"); `None` = the value as it is.
+    pub formula: Option<String>,
+}
+
+impl ControllerLink {
+    /// The record's size (event 227).
+    pub const LEN: usize = 20;
+    /// Bit set in the first field of every controller link (an automation clip's link has 0 there).
+    pub const FLAG: u16 = 0x8000;
+
+    /// A record read from event 227's bytes, if it is a controller link.
+    pub fn from_bytes(b: &[u8]) -> Option<ControllerLink> {
+        let bytes: [u8; Self::LEN] = b.get(..Self::LEN)?.try_into().ok()?;
+        (u16::from_le_bytes([bytes[0], bytes[1]]) & Self::FLAG != 0).then_some(ControllerLink { bytes, formula: None })
+    }
+
+    /// A new link from output `output` of the controller at place `source` to `target`, with the fields the original
+    /// writes for a plain link (bytes 12..15 = 8, 16..19 = 0x1D5).
+    pub fn new(source: u16, output: u16, target: u32) -> ControllerLink {
+        let mut bytes = [0u8; Self::LEN];
+        bytes[0..2].copy_from_slice(&(Self::FLAG | (output & 0x7FFF)).to_le_bytes());
+        bytes[2..4].copy_from_slice(&source.to_le_bytes());
+        bytes[8..12].copy_from_slice(&target.to_le_bytes());
+        bytes[12..16].copy_from_slice(&8u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&0x1D5u32.to_le_bytes());
+        ControllerLink { bytes, formula: None }
+    }
+
+    /// The link's Smoothing option (bit 0x02 of bytes 12..15).
+    pub fn smoothing(&self) -> bool {
+        self.bytes[12] & 0x02 != 0
+    }
+
+    /// The controller's output (the first field without its flag bit).
+    pub fn output(&self) -> u16 {
+        u16::from_le_bytes([self.bytes[0], self.bytes[1]]) & 0x7FFF
+    }
+
+    /// The controller's place: a mixer place (`0x7000 + track * 64 + slot`) or a rack channel's index.
+    pub fn source(&self) -> u16 {
+        u16::from_le_bytes([self.bytes[2], self.bytes[3]])
+    }
+
+    /// The controller's mixer track and slot, when it sits in a mixer slot (FL 24.2 places).
+    pub fn source_slot(&self) -> Option<(u16, u8)> {
+        let s = self.source();
+        (0x7000..0x7000 + 128 * 64).contains(&s).then(|| ((s - 0x7000) / 64, ((s - 0x7000) % 64) as u8)).filter(|&(_, k)| k < 10)
+    }
+
+    /// The driven target, as an automation target id ([`target`]).
+    pub fn target(&self) -> u32 {
+        u32::from_le_bytes([self.bytes[8], self.bytes[9], self.bytes[10], self.bytes[11]])
+    }
+
+    pub fn set_target(&mut self, t: u32) {
+        self.bytes[8..12].copy_from_slice(&t.to_le_bytes());
+    }
 }
 
 /// One of the project's initial values: a control and the value it takes when the song starts (spec:
@@ -136,6 +238,11 @@ impl InitControl {
     pub fn from_unit(t: u32, v: f64) -> Option<InitControl> {
         use target::Target;
         let v = v.clamp(0.0, 1.0);
+        // The main swing's start value, in event 11's unit (the rack's swing knob: 0..128). Lemon Studio's design: what
+        // the original writes for it was not measured, and no automation clip drives it yet (`unit` gives `None`).
+        if t == Self::MAIN_SWING {
+            return Some(InitControl { head: 0, target: t, value: (128.0 * v).round() as i32 });
+        }
         let value = match target::decode(t) {
             Target::ChannelVolume(_) | Target::ChannelPan(_) | Target::SlotMix(..) => 12800.0 * v,
             Target::ChannelPitch(_) => 9600.0 * v - 4800.0,
@@ -561,6 +668,8 @@ impl ChannelKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Channel {
+    /// The channel's stable identity ([`Id`]).
+    pub id: Id,
     /// Position in the Channel rack, 0-based.
     pub index: u16,
     pub kind: ChannelKind,
@@ -891,6 +1000,9 @@ pub struct ChannelMisc {
     pub gate: f32,
     pub shift: f32,
     pub swing: f32,
+    /// Truncate swing notes: a swung note keeps its end, so it gets shorter (channel event 48; the rule is Lemon
+    /// Studio's design, spec: audio/swing.md "Truncate swing notes").
+    pub truncate_swing: bool,
     /// Full portamento. Not saved: where the file keeps it is an open question (OpenStudio-specs REQUESTS.md #5).
     pub full_porta: bool,
     /// Tracking by volume (0) and by key (1) (spec: audio/channel-misc.md "Tracking").
@@ -915,6 +1027,24 @@ pub struct ChannelMisc {
     /// The pitch knob's range, semitones either way (1..=48; the plugin window's RANGE box). Not saved: where the file
     /// keeps it is not mapped yet (flp/events/channels.md).
     pub pitch_range: u8,
+    /// The channel plugin's CPU switches (its window menu's CPU entries).
+    pub cpu: PluginCpu,
+}
+
+/// A hosted plugin's CPU switches, its window menu's Allow threaded processing (on for a new plugin) and Smart disable
+/// (off), as event 212 stores them (flags 0x40 and 0x20; spec: flp/events/plugins.md §3, ui/plugin-window.md "CPU").
+/// Saved with the plugin. The engine passes a silent mixer slot by when its Smart disable is on (spec:
+/// audio/auto-bypass.md); what is heard is the same either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PluginCpu {
+    pub threaded: bool,
+    pub smart_disable: bool,
+}
+
+impl Default for PluginCpu {
+    fn default() -> Self {
+        PluginCpu { threaded: true, smart_disable: false }
+    }
 }
 
 /// A layer channel's settings besides its children (spec: audio/note-rules.md "Settings", "Layer channels").
@@ -947,6 +1077,7 @@ impl Default for ChannelMisc {
             gate: 1.0,
             shift: 0.0,
             swing: 1.0,
+            truncate_swing: false,
             full_porta: true,
             tracking: [Tracking { mid: 100, ..Tracking::default() }, Tracking::default()],
             cut: 0,
@@ -960,6 +1091,7 @@ impl Default for ChannelMisc {
             key_range: [0, 256],
             layer: LayerSettings::default(),
             pitch_range: 2,
+            cpu: PluginCpu::default(),
         }
     }
 }
@@ -1055,6 +1187,9 @@ pub struct ChannelRack {
     /// The colour event 128 holds, whether or not it is a custom colour: the playlist draws audio and automation
     /// clips with it (spec: ui/playlist.md §2, "Channel-colour rule"). Display only; saving writes `Channel::color`.
     pub stored_color: Option<Rgb>,
+    /// The icon number event 155 holds, 0 = none (spec: flp/events/channels.md, flp/events/mixer.md "Icon numbers").
+    /// Read only: saving keeps the file's own event.
+    pub icon: u32,
 }
 
 /// One channel envelope record, values as stored (spec: audio/channel-envelopes.md). Times are knob
@@ -1121,6 +1256,8 @@ impl Default for Envelope {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Pattern {
+    /// The pattern's stable identity ([`Id`]).
+    pub id: Id,
     /// 1-based.
     pub number: u16,
     pub name: Option<String>,
@@ -1300,6 +1437,8 @@ impl Note {
 
 #[derive(Debug, Clone)]
 pub struct MixerTrack {
+    /// The track's stable identity ([`Id`]).
+    pub id: Id,
     /// 0 = Master.
     pub index: u16,
     pub name: Option<String>,
@@ -1323,6 +1462,13 @@ pub struct MixerTrack {
     pub swap: bool,
     /// The track's "effects enabled" switch (event 236 flag 0x04): when off no slot runs.
     pub slots_enabled: bool,
+    /// The track menu's Separator (event 236 flag 0x0400: a gap before the strip; tracks from one separator to the
+    /// next form a group), Dock to (flags 0x00C0: `DOCK_LEFT`, `DOCK_MIDDLE`, `DOCK_RIGHT`) and Allow threaded
+    /// processing (flag 0x0010 clear). Separator and docking only change where the strip is drawn; a track without
+    /// threading renders on the rendering thread (spec: ui/mixer.md §6.1, audio/multicore.md §5).
+    pub separator: bool,
+    pub dock: u8,
+    pub threaded: bool,
     /// Per slot: enabled (the slot LED) and mix level 0..=1 (spec: ui/mixer.md §7).
     pub slot_on: [bool; 10],
     pub slot_mix: [f64; 10],
@@ -1345,6 +1491,8 @@ pub struct MixerTrack {
     /// input is heard (event 166: `MONITOR_OFF`, `MONITOR_ARMED`, `MONITOR_ON`).
     pub rec_source: u8,
     pub monitor: u8,
+    /// Per slot: the slot plugin's CPU switches (event 212 flags; they follow the plugin when it moves).
+    pub slot_cpu: [PluginCpu; 10],
     /// Armed for disk recording (the strip's record button). Not saved, and not part of the track: tracks that differ
     /// only here are equal (spec: audio/track-io.md §1.5).
     pub armed: bool,
@@ -1357,8 +1505,9 @@ pub struct MixerTrack {
 
 impl PartialEq for MixerTrack {
     fn eq(&self, o: &Self) -> bool {
-        // Every field but `origin`, named so that a new field is not left out.
+        // Every field but `origin` (and `id`, which compares equal anyway), named so that a new field is not left out.
         let MixerTrack {
+            id: _,
             index,
             name,
             color,
@@ -1372,6 +1521,9 @@ impl PartialEq for MixerTrack {
             polarity,
             swap,
             slots_enabled,
+            separator,
+            dock,
+            threaded,
             slot_on,
             slot_mix,
             eq,
@@ -1382,6 +1534,7 @@ impl PartialEq for MixerTrack {
             audio_out,
             rec_source,
             monitor,
+            slot_cpu,
             armed: _,
             origin: _,
         } = self;
@@ -1398,6 +1551,9 @@ impl PartialEq for MixerTrack {
             && *polarity == o.polarity
             && *swap == o.swap
             && *slots_enabled == o.slots_enabled
+            && *separator == o.separator
+            && *dock == o.dock
+            && *threaded == o.threaded
             && *slot_on == o.slot_on
             && *slot_mix == o.slot_mix
             && *eq == o.eq
@@ -1408,6 +1564,7 @@ impl PartialEq for MixerTrack {
             && *audio_out == o.audio_out
             && *rec_source == o.rec_source
             && *monitor == o.monitor
+            && *slot_cpu == o.slot_cpu
     }
 }
 
@@ -1418,6 +1575,10 @@ pub const MONITOR_ON: u8 = 3;
 /// Record sources (event 165): External input only, and the default, Post EQ.
 pub const REC_EXTERNAL: u8 = 0;
 pub const REC_POST_EQ: u8 = 3;
+/// Where a track's strip is docked ([`MixerTrack::dock`]): the master is on the left, new tracks in the middle.
+pub const DOCK_LEFT: u8 = 0;
+pub const DOCK_MIDDLE: u8 = 1;
+pub const DOCK_RIGHT: u8 = 2;
 
 /// A new track's equaliser: flat, at the default frequencies and widths.
 pub const EQ_DEFAULT: [[i32; 3]; 3] = [[0, 5777, 17500], [0, 33145, 17500], [0, 55825, 17500]];
@@ -1426,6 +1587,7 @@ impl MixerTrack {
     /// A default track: unnamed, enabled, unity volume, centred, empty slots, routed to the master (except the master).
     pub fn new(index: u16) -> Self {
         MixerTrack {
+            id: Id::NONE,
             index,
             name: None,
             color: None,
@@ -1439,6 +1601,9 @@ impl MixerTrack {
             polarity: false,
             swap: false,
             slots_enabled: true,
+            separator: false,
+            dock: if index == 0 { DOCK_LEFT } else { DOCK_MIDDLE },
+            threaded: true,
             slot_on: [true; 10],
             slot_mix: [1.0; 10],
             eq: EQ_DEFAULT,
@@ -1449,6 +1614,7 @@ impl MixerTrack {
             audio_out: if index == 0 { 0 } else { -1 },
             rec_source: REC_POST_EQ,
             monitor: MONITOR_ARMED,
+            slot_cpu: [PluginCpu::default(); 10],
             armed: false,
             origin: None,
         }
@@ -1464,6 +1630,8 @@ impl MixerTrack {
 /// A plugin in a mixer slot: its name and its opaque saved state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotPlugin {
+    /// The plugin instance's stable identity ([`Id`]).
+    pub id: Id,
     pub name: String,
     pub state: Vec<u8>,
 }
@@ -1487,6 +1655,8 @@ pub struct PluginRef {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Arrangement {
+    /// The arrangement's stable identity ([`Id`]).
+    pub id: Id,
     pub number: u16,
     pub name: Option<String>,
     /// Sorted by position.
@@ -1512,6 +1682,8 @@ pub const CLIP_RECORD_LEN: usize = 88;
 /// source's start for the clip's length.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Clip {
+    /// The clip's stable identity ([`Id`]).
+    pub id: Id,
     pub position: u32,
     pub length: u32,
     /// 0-based playlist track.
@@ -1550,7 +1722,7 @@ impl Clip {
     };
 
     pub fn new(position: u32, length: u32, track: u16, source: ClipSource) -> Clip {
-        Clip { position, length, track, source, muted: false, window: None, raw: Clip::TEMPLATE }
+        Clip { id: Id::NONE, position, length, track, source, muted: false, window: None, raw: Clip::TEMPLATE }
     }
 
     pub fn end(&self) -> u32 {
@@ -1714,9 +1886,61 @@ pub struct TimeMarker {
     pub name: String,
     pub numerator: u8,
     pub denominator: u8,
-    /// Event 101: a key marker's scale, kept as read (0 for the other kinds).
+    /// Event 101: a key marker's scale as the notes it leaves out, bit 11 − pitch class (C = bit 11); 0 for the
+    /// other kinds (spec: flp/events/playlist.md "Key markers").
     pub scale: u16,
+    /// Event 46: a key marker's root note, 0 = C … 11 = B.
+    pub root: u8,
+    /// Event 45: 1 on a "Default" key marker, else 0 (meaning not known; kept as read).
+    pub flag: u8,
+    /// Event 168: a key marker's place in [`SCALES`]; −1 Default, −2 Black notes.
+    pub scale_index: i32,
 }
+
+/// The Add key marker list's scales in its order, each with the notes it leaves out at root C in event 101's bits
+/// (bit 11 − pitch class; spec: flp/events/playlist.md "Key markers", read from the original's saves).
+pub const SCALES: [(&str, u16); 37] = [
+    ("Major (Ionian)", 0x52A),
+    ("Major Bebop", 0x522),
+    ("Major Bulgarian", 0x592),
+    ("Major Hexatonic", 0x52B),
+    ("Major Pentatonic", 0x56B),
+    ("Major Persian", 0x316),
+    ("Major Polymode", 0x494),
+    ("Minor Harmonic", 0x4A6),
+    ("Minor Hungarian", 0x4C6),
+    ("Minor Melodic", 0x4AA),
+    ("Minor Natural (Aeolian)", 0x4A5),
+    ("Minor Neapolitan", 0x2A6),
+    ("Minor Pentatonic", 0x6AD),
+    ("Minor Polymode", 0x125),
+    ("Minor Romanian", 0x4C9),
+    ("Other Arabic", 0x326),
+    ("Other Bebop Dominant", 0x528),
+    ("Other Blues", 0x68D),
+    ("Other Blues Nonatonic", 0x409),
+    ("Other Diminished", 0x492),
+    ("Other Dorian", 0x4A9),
+    ("Other Eastern", 0x4A4),
+    ("Other Egyptian", 0x5AD),
+    ("Other Enigmatic", 0x354),
+    ("Other Hirajoshi", 0x4E7),
+    ("Other Iwato", 0x39D),
+    ("Other Japanese Insen", 0x3AD),
+    ("Other Locrian", 0x295),
+    ("Other Locrian Super", 0x255),
+    ("Other Lydian", 0x54A),
+    ("Other Mixolydian", 0x529),
+    ("Other Neapolitan", 0x2AA),
+    ("Other Phrygian", 0x2A5),
+    ("Other Phrygian Dominant", 0x325),
+    ("Other Piongio", 0x5A9),
+    ("Other Prometheus", 0x559),
+    ("Other Whole Tone", 0x555),
+];
+
+/// Root note names as the key markers write them.
+pub const NOTE_NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 impl TimeMarker {
     /// None: a plain marker.
@@ -1733,7 +1957,26 @@ impl TimeMarker {
     pub const KEY: u8 = 12;
 
     pub fn new(position: u32, name: &str) -> Self {
-        TimeMarker { position, kind: Self::PLAIN, name: name.into(), numerator: 4, denominator: 4, scale: 0 }
+        TimeMarker { position, kind: Self::PLAIN, name: name.into(), numerator: 4, denominator: 4, scale: 0, root: 0, flag: 0, scale_index: 0 }
+    }
+
+    /// The key marker Add key marker ▸ adds (spec: ui/playlist.md §7a): `scale` is a place in [`SCALES`], −1 for
+    /// Default, −2 for Black notes. The name and events are the original's: "D Major (Ionian)" with the scale's notes
+    /// turned to D; Default keeps the root, leaves out every note and sets event 45; Black notes is always C's major.
+    pub fn key(position: u32, root: u8, scale: i32) -> Self {
+        let root = root % 12;
+        let (name, root, mask, flag) = match scale {
+            -1 => ("Default".to_string(), root, 0xFFF, 1),
+            -2 => ("Black notes".to_string(), 0, SCALES[0].1, 0),
+            i => {
+                let (label, m) = SCALES[i.clamp(0, SCALES.len() as i32 - 1) as usize];
+                // A note n semitones up is bit 11 − n: turning the scale up rotates the bits down.
+                let m = u32::from(m);
+                let r = u32::from(root);
+                (format!("{} {label}", NOTE_NAMES[usize::from(root)]), root, ((m >> r | m << (12 - r)) & 0xFFF) as u16, 0)
+            }
+        };
+        TimeMarker { kind: Self::KEY, scale: mask, root, flag, scale_index: scale, ..TimeMarker::new(position, &name) }
     }
 
     /// The marker at timebase `to` instead of `from` ([`Project::set_ppq`]).
@@ -1756,12 +1999,64 @@ pub struct PlaylistTrack {
     pub collapsed: bool,
     /// Byte 47: FL draws a lock on such a group (meaning not measured; kept and drawn).
     pub locked: bool,
+    /// Performance settings (bytes 22..46; spec: ui/performance-mode.md §4).
+    pub perf: PerfSettings,
+    /// The source this track is locked to: Draw and Paint place it here whatever the picker's current source is
+    /// (TOOLS ▸ Lock all tracks to their clips). Lemon Studio's design: no FLP field stores it, a `.lemon`
+    /// file's own events do (os-app `lemon_state`; spec: ui/playlist.md "Locking tracks to their clips").
+    pub clip_lock: Option<ClipSource>,
 }
 
 impl PlaylistTrack {
     /// Track `number` as a new project has it: unnamed, default colour, on, not grouped.
     pub fn new(number: u32) -> Self {
-        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false }
+        PlaylistTrack { number, name: None, color: None, enabled: true, grouped: false, collapsed: false, locked: false, perf: PerfSettings::default(), clip_lock: None }
+    }
+}
+
+/// A playlist track's Performance settings (spec: ui/performance-mode.md §4, §5), as the track record stores them:
+/// each an index into its list below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerfSettings {
+    /// [`PerfSettings::MOTIONS`].
+    pub motion: u8,
+    /// [`PerfSettings::PRESSES`].
+    pub press: u8,
+    /// [`PerfSettings::SYNCS`].
+    pub trigger_sync: u8,
+    pub queue: bool,
+    pub tolerant: bool,
+    /// [`PerfSettings::SYNCS`].
+    pub position_sync: u8,
+}
+
+impl Default for PerfSettings {
+    /// A new project's tracks: Retrigger, Stay, Trigger sync 4 beats, Tolerant, Position sync Off.
+    fn default() -> Self {
+        PerfSettings { motion: 0, press: 0, trigger_sync: 5, queue: false, tolerant: true, position_sync: 0 }
+    }
+}
+
+impl PerfSettings {
+    pub const MOTIONS: [&str; 7] = ["Stay", "One shot", "March & wrap", "March & stay", "March & stop", "Random", "Exclusive random"];
+    pub const PRESSES: [&str; 4] = ["Retrigger", "Hold & stop", "Hold & motion", "Latch"];
+    pub const SYNCS: [&str; 7] = ["Off", "1/4 beat", "1/2 beat", "1 beat", "2 beats", "4 beats", "Auto"];
+    pub const ONE_SHOT: u8 = 1;
+    pub const AUTO: u8 = 6;
+
+    /// A sync setting's length in ticks at `ppq`: `None` for Off, the clip's `len` capped at 4 beats for Auto (Trigger
+    /// sync) or the clip's length (Position sync, `cap` false).
+    pub fn sync_ticks(sync: u8, ppq: u32, len: u32, cap: bool) -> Option<u32> {
+        match sync {
+            1 => Some(ppq / 4),
+            2 => Some(ppq / 2),
+            3 => Some(ppq),
+            4 => Some(2 * ppq),
+            5 => Some(4 * ppq),
+            Self::AUTO if cap => Some(len.clamp(1, 4 * ppq)),
+            Self::AUTO => Some(len.max(1)),
+            _ => None,
+        }
     }
 }
 
@@ -1967,6 +2262,63 @@ pub mod target {
         u32::from(0x7000 + track * 64 + u16::from(slot)) << 16 | u32::from(PLUGIN_PARAM | (k & 0x7FFF))
     }
 
+    /// Lemon Studio's targets inside a container (spec: plugins/patcher/README.md §4.2): parameter `k` of a container
+    /// slot packs the member's id (1..=[`MEMBER_IDS`]) times [`MEMBER_ITEMS`] plus an item, which is the member's
+    /// parameter index (below [`MEMBER_WET`]), its wet level ([`MEMBER_WET`]) or its dry level ([`MEMBER_DRY`]).
+    pub const MEMBER_ITEMS: u16 = 2048;
+    pub const MEMBER_WET: u16 = 2046;
+    pub const MEMBER_DRY: u16 = 2047;
+    pub const MEMBER_IDS: u32 = 15;
+
+    /// The container slot parameter of item `item` of member `id` (`None`: an id or item out of range).
+    pub fn member_item(id: u32, item: u16) -> Option<u16> {
+        ((1..=MEMBER_IDS).contains(&id) && item < MEMBER_ITEMS).then(|| id as u16 * MEMBER_ITEMS + item)
+    }
+
+    /// The member's id and the item that container slot parameter `k` names (`None` below the first member's).
+    pub fn member_of(k: u16) -> Option<(u32, u16)> {
+        let id = u32::from(k / MEMBER_ITEMS);
+        (1..=MEMBER_IDS).contains(&id).then_some((id, k % MEMBER_ITEMS))
+    }
+
+    /// A plugin parameter's control point holds the plain value as the plugin states its range when that range runs
+    /// between whole numbers at least 2 apart (FL's own plugins, and Lemon Studio's recreations of them, keep whole
+    /// values in their own unit), else the normalized value times 65536 (a Lemon Studio choice: the unit FL keeps for
+    /// other plugins is not measured). This is the level 0..1 such a value stands for.
+    pub fn plugin_point_level(min: f64, max: f64, value: i32) -> f64 {
+        let v = f64::from(value);
+        let level = if whole_range(min, max) { (v - min) / (max - min) } else { v / 65536.0 };
+        level.clamp(0.0, 1.0)
+    }
+
+    /// The control point value for normalized `level` of a parameter whose range is `min..max` (`plugin_point_level`).
+    pub fn plugin_point_value(min: f64, max: f64, level: f64) -> i32 {
+        let level = level.clamp(0.0, 1.0);
+        if whole_range(min, max) { (min + level * (max - min)).round() as i32 } else { (level * 65536.0).round() as i32 }
+    }
+
+    /// The stored values a control point of `t` holds for automation levels 0 and 1, in the setting's own unit (spec:
+    /// audio/automation.md "Pattern control points"); a level maps to them linearly, as a clip's value does. `None` for
+    /// plugin parameters (their range is the plugin's: `plugin_point_value`) and the targets no point drives.
+    pub fn point_range(t: Target) -> Option<(f64, f64)> {
+        Some(match t {
+            Target::ChannelVolume(_) | Target::ChannelPan(_) | Target::SlotMix(..) => (0.0, 12800.0),
+            Target::ChannelPitch(_) => (-4800.0, 4800.0),
+            Target::MixerVolume(_) => (0.0, 16000.0),
+            Target::MixerPan(_) => (-6400.0, 6400.0),
+            Target::MixerSeparation(_) => (-64.0, 64.0),
+            Target::MixerEq(_, _, 0) => (-1800.0, 1800.0),
+            Target::MixerEq(..) => (0.0, 65536.0),
+            Target::SlotOn(..) => (0.0, 1.0),
+            Target::Tempo => (10000.0, 522000.0),
+            _ => return None,
+        })
+    }
+
+    fn whole_range(min: f64, max: f64) -> bool {
+        min.fract() == 0.0 && max.fract() == 0.0 && max - min >= 2.0 && max.abs() < 1e9 && min.abs() < 1e9
+    }
+
     /// What a target id names.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Target {
@@ -2073,6 +2425,15 @@ pub mod target {
             assert_eq!(decode(0x7040_800D), Target::SlotParam(1, 0, 13));
             assert_eq!(decode(slot_param(0, 9, 0)), Target::SlotParam(0, 9, 0));
             assert_eq!(decode(slot_param(125, 3, 0x7FFF)), Target::SlotParam(125, 3, 0x7FFF));
+            // A container's members (Lemon Studio's): id times 2048 plus the item.
+            assert_eq!(member_item(1, 0), Some(2048));
+            assert_eq!(member_item(15, MEMBER_DRY), Some(0x7FFF));
+            assert_eq!(member_item(16, 0), None);
+            assert_eq!(member_item(0, 3), None);
+            assert_eq!(member_item(2, MEMBER_ITEMS), None);
+            assert_eq!(member_of(2 * 2048 + 7), Some((2, 7)));
+            assert_eq!(member_of(2047), None);
+            assert_eq!(decode(slot_param(3, 1, member_item(15, MEMBER_WET).unwrap())), Target::SlotParam(3, 1, 15 * 2048 + MEMBER_WET));
             // The mixer track's own controls are not slot parameters.
             assert_eq!(decode(mixer(1, MIXER_VOLUME)), Target::MixerVolume(1));
             assert_eq!(decode(channel(3, CHANNEL_PAN)), Target::ChannelPan(3));
@@ -2133,6 +2494,8 @@ pub mod target {
                 let v = c.unit().unwrap();
                 assert_eq!(InitControl::from_unit(t, v), Some(c), "{t:#010x}");
             }
+            // The main swing's start value: 0..128, as event 11 keeps it.
+            assert_eq!(InitControl::from_unit(InitControl::MAIN_SWING, 0.5), Some(InitControl { head: 0, target: InitControl::MAIN_SWING, value: 64 }));
             // Units not known: kept, not converted.
             for t in [channel_param(0, 4), slot_param(1, 0, 2), InitControl::MAIN_VOLUME, channel(0, CHANNEL_CUTOFF)] {
                 assert_eq!(InitControl::from_unit(t, 0.5), None);

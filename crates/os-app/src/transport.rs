@@ -85,6 +85,8 @@ pub struct Shared {
     song: AtomicBool,
     /// The song's loop points, start << 32 | end in ticks (0 = the whole song): the playlist's time selection.
     loop_range: AtomicU64,
+    /// A quantized song jump for the playing song: unit << 32 | target in ticks (0 = none; `jump_on`).
+    jump: AtomicU64,
     /// Paused by a Marker pause: its tick + 1 (0 = not); after Resume, the same for the app to take as the playback's
     /// start (spec: audio/transport.md "Time markers in SONG mode").
     marker_hold: AtomicU64,
@@ -122,11 +124,15 @@ pub struct Shared {
     block: AtomicU32,
     /// The output device the playback or live stream opened.
     opened: Mutex<Option<DeviceInfo>>,
+    /// The last playback's use of the workers: the next one, after a jump, starts from it (`Engine::set_load_gate`).
+    gate: Mutex<Option<os_engine::LoadGate>>,
     /// An instrument's editor is open (`Transport::listen`).
     listening: AtomicBool,
     /// Each running stream's engine voices (its feeder writes them after every fill; a stream that closed drops its
     /// counter). Spec: audio/voices.md §5.
     engine_voices: Mutex<Vec<Weak<AtomicU32>>>,
+    /// Disk recording into mixer tracks: where the playback's armed tracks hand their takes (`Transport::record_tracks`).
+    record: Mutex<Option<Arc<dyn os_engine::RecordTap>>>,
 }
 
 /// The frames queued when the device asked for a block, since they were last taken (`AheadStats::take`): what the
@@ -383,6 +389,8 @@ enum Cmd {
     Resume,
     /// The newest edited project is in `Transport::latest` (older ones are skipped).
     Update,
+    /// Levels changed, and nothing else (`Transport::update`).
+    LiveEdits(Vec<os_engine::LiveEdit>),
     Preview(Box<Project>),
     /// Play a project's playlist once on the preview stream (clip preview).
     PreviewSong(Box<Project>),
@@ -391,7 +399,8 @@ enum Cmd {
     /// The hosted instruments changed (in `Transport::instruments`): rebuild the engines.
     Instruments,
     /// Live note (typing keyboard): channel (rack position), key, velocity; `NoteOff` releases.
-    NoteOn(usize, u16, u8),
+    /// A live note: channel, key, velocity, MIDI channel (`Engine::note_on_midi`).
+    NoteOn(usize, u16, u8, u8),
     NoteOff(usize, u16),
     /// A controller message for a channel (rack position): message, pitch bend range in cents (`Engine::midi`).
     Midi(usize, [u8; 3], f64),
@@ -412,6 +421,8 @@ enum Cmd {
     AsioPanel,
     /// The FL Studio factory content folder changed (`Transport::set_factory`).
     Factory(Option<PathBuf>),
+    /// Disk recording started or ended (`Transport::record_tracks`): the playback's engine takes it at once.
+    Record,
     /// Tests: the open device fails as if it went away.
     #[cfg(test)]
     FailDevice,
@@ -474,6 +485,8 @@ pub fn headless() {
 pub struct Transport {
     tx: Sender<Cmd>,
     latest: Arc<Mutex<Option<Project>>>,
+    /// The project `update` last sent, with its edits; `None` once a playback starts from a project of its own.
+    sent: Mutex<Option<Project>>,
     instruments: Instruments,
     shared: Arc<Shared>,
     /// The audio thread: joined when the transport goes (see `Drop`).
@@ -498,7 +511,7 @@ impl Transport {
                 }
             })
             .expect("spawn audio thread");
-        Transport { tx, latest, instruments, shared, thread: Some(thread) }
+        Transport { tx, latest, sent: Mutex::new(None), instruments, shared, thread: Some(thread) }
     }
 
     /// Hosted generator plugins by rack row; playing engines pick them up at once.
@@ -564,6 +577,7 @@ impl Transport {
     /// the audio thread: playback, previews and live notes stop at once and nothing else processes the plugins
     /// meanwhile. Follow it with `export_status`.
     pub fn export(&self, project: &Project, mode: PlayMode, rate: u32, job: crate::export::Job) {
+        self.forget_sent();
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
         self.shared.state.store(STOPPED, Ordering::Release);
         self.shared.export_permille.store(0, Ordering::Relaxed);
@@ -591,11 +605,13 @@ impl Transport {
     /// `play`, after a recording count-in of `bars` bars (spec: ui/recording.md §3): the position holds at
     /// `start_tick` while the metronome counts in.
     pub fn play_counted(&self, project: &Project, mode: PlayMode, start_tick: f64, bars: u32) {
+        self.forget_sent();
         if let Ok(mut slot) = self.latest.lock() {
             *slot = None;
         }
         let generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.shared.marker_hold.store(0, Ordering::Relaxed);
+        self.shared.jump.store(0, Ordering::Relaxed);
         self.shared.song.store(matches!(mode, PlayMode::Song), Ordering::Relaxed);
         self.shared.rewind(start_tick);
         self.shared.state.store(PLAYING, Ordering::Release);
@@ -610,8 +626,52 @@ impl Transport {
         self.shared.loop_range.store(packed, Ordering::Relaxed);
     }
 
+    /// The playing song jumps to tick `to` when it reaches the next multiple of `unit` ticks (the playlist's Quantize
+    /// song jumps); a later call replaces one still waiting.
+    pub fn jump_on(&self, unit: u32, to: u32) {
+        self.shared.jump.store(u64::from(unit.max(1)) << 32 | u64::from(to), Ordering::Relaxed);
+    }
+
     /// Replace the playing project, continuing from the current position.
+    /// Disk recording into mixer tracks (spec: audio/track-io.md §2.5): the playback's armed tracks hand their takes to
+    /// `tap` from now on (and any playback started later), or no longer (`None`).
+    pub fn record_tracks(&self, tap: Option<Arc<dyn os_engine::RecordTap>>) {
+        if let Ok(mut slot) = self.shared.record.lock() {
+            *slot = tap;
+        }
+        let _ = self.tx.send(Cmd::Record);
+    }
+
+    /// Roughly how much later than the song it went with a device input reaches the engine, in frames at the device's
+    /// rate, for a tick of `tick` frames: the device's two latencies (an ASIO driver's; 0 for others), the time the
+    /// engine reads behind the newest input (two blocks, the longest margin and a tick), and the render-ahead (a block
+    /// and the margin) (spec: audio/track-io.md §2.2, §2.5).
+    pub fn input_delay(&self, tick: u64) -> u64 {
+        let info = self.opened();
+        let rate = info.as_ref().map_or(48000, |d| d.rate);
+        let block = u64::from(self.block().max(64));
+        let margin = (f64::from(rate) * MARGIN_MAX) as u64;
+        let device = info.filter(|d| d.host == crate::device::ASIO).map_or(0, |d| u64::from(d.latency.unwrap_or(0)) + u64::from(d.input_latency.unwrap_or(0)));
+        device + 2 * block + margin + tick + block + margin
+    }
+
+    /// What plays next may not be what `update` last sent: its next project goes whole.
+    fn forget_sent(&self) {
+        if let Ok(mut sent) = self.sent.lock() {
+            *sent = None;
+        }
+    }
+
     pub fn update(&self, project: &Project) {
+        // Levels alone reach the playing engines in place: a new engine at every move of a knob takes milliseconds of
+        // building each time (up to some 70 in a large project). What was last sent says what changed.
+        if let Ok(mut sent) = self.sent.lock() {
+            if let Some(edits) = sent.as_mut().and_then(|s| os_engine::live_edits(s, project)) {
+                let _ = self.tx.send(Cmd::LiveEdits(edits));
+                return;
+            }
+            *sent = Some(project.clone());
+        }
         // Edits can come faster than engines are built: keep only the newest.
         if let Ok(mut slot) = self.latest.lock() {
             *slot = Some(project.clone());
@@ -639,7 +699,13 @@ impl Transport {
     /// only the first note pays for opening the device). The live stream uses the project from the
     /// last `play` / `update`.
     pub fn note_on(&self, channel: usize, key: u16, velocity: u8) {
-        let _ = self.tx.send(Cmd::NoteOn(channel, key, velocity));
+        self.note_on_midi(channel, key, velocity, 0);
+    }
+
+    /// `note_on` on MIDI channel `midi` (0..15) for a hosted instrument (MIDI channel through, spec:
+    /// ui/channel-rack.md §18).
+    pub fn note_on_midi(&self, channel: usize, key: u16, velocity: u8, midi: u8) {
+        let _ = self.tx.send(Cmd::NoteOn(channel, key, velocity, midi));
     }
 
     pub fn note_off(&self, channel: usize, key: u16) {
@@ -699,8 +765,10 @@ impl Transport {
     /// Stop everything: playback rewinds, hosted instruments fall silent, live notes and previews end. Also works
     /// when already stopped (it silences notes still ringing from the typing keyboard or a preview).
     pub fn stop(&self) {
+        self.forget_sent();
         self.shared.generation.fetch_add(1, Ordering::AcqRel);
         self.shared.marker_hold.store(0, Ordering::Relaxed);
+        self.shared.jump.store(0, Ordering::Relaxed);
         self.shared.marker_resumed.store(0, Ordering::Relaxed);
         self.shared.state.store(STOPPED, Ordering::Release);
         self.shared.rewind(0.0);
@@ -1011,6 +1079,10 @@ impl Feeder {
         if self.ctl.report.load(Ordering::Relaxed) {
             let r = self.shared.loop_range.load(Ordering::Relaxed);
             e.set_loop_range((r != 0).then(|| (r >> 32, r & 0xffff_ffff)));
+            match self.shared.jump.swap(0, Ordering::Relaxed) {
+                0 => {}
+                j => e.jump_on(j >> 32, j & 0xffff_ffff),
+            }
         }
         // A paused (or stopped) stream renders no more: its fade plays from what is queued, and the engine starts no
         // note that another stream (live notes, an open editor) would then hear ringing at the instruments.
@@ -1147,7 +1219,7 @@ impl Drop for FeedThread {
 
 /// The feeder renders for the device: it runs above the UI.
 #[cfg(windows)]
-fn raise_priority() {
+pub(crate) fn raise_priority() {
     use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL};
     unsafe {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
@@ -1156,15 +1228,24 @@ fn raise_priority() {
 
 /// macOS: the user-interactive class keeps the feeder on the performance cores.
 #[cfg(target_os = "macos")]
-fn raise_priority() {
+pub(crate) fn raise_priority() {
     // SAFETY: changes the calling thread's own QoS class.
     unsafe {
         libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
     }
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
-fn raise_priority() {}
+/// Linux: real-time priority, by itself or through rtkit (`crate::rt`); at normal priority when neither allows it. The
+/// mixing threads (`crate::mix_threads`) take it too.
+#[cfg(target_os = "linux")]
+pub(crate) fn raise_priority() {
+    if let Err(e) = crate::rt::promote(crate::rt::tid()) {
+        eprintln!("Audio: a rendering thread runs at normal priority ({e})");
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+pub(crate) fn raise_priority() {}
 
 /// The sample library for engines whose sampler channels Lemon Sampler instances play. They stretch for themselves
 /// (spec: audio/time-stretch.md), and of a sample one of them plays the engine keeps only the length and rate Lemon
@@ -1337,6 +1418,17 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             // The output is closed by Auto close: previews and live notes find no stream and open none.
             // So is a device that failed, until it opens again.
             Ok(Cmd::Preview(_) | Cmd::PreviewFor(..) | Cmd::PreviewSong(_) | Cmd::NoteOn(..) | Cmd::Midi(..) | Cmd::TapClick(..)) if closed || lost.is_some() => {}
+            Ok(Cmd::LiveEdits(edits)) => {
+                for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
+                    if let Ok(mut e) = s.engine.lock() {
+                        edits.iter().for_each(|&x| e.apply_edit(x));
+                    }
+                    edits.iter().for_each(|x| x.apply_to(&mut s.project));
+                }
+                for p in [held.as_mut().map(|h| &mut h.0), live_project.as_mut()].into_iter().flatten() {
+                    edits.iter().for_each(|x| x.apply_to(p));
+                }
+            }
             Ok(Cmd::Update) => {
                 if let Some(project) = latest.lock().ok().and_then(|mut l| l.take()) {
                     for s in [session.as_mut(), live.as_mut()].into_iter().flatten() {
@@ -1347,6 +1439,14 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                         h.0 = project.clone();
                     }
                     live_project = Some(project);
+                }
+            }
+            Ok(Cmd::Record) => {
+                let tap = shared.record.lock().ok().and_then(|t| t.clone());
+                if let Some(s) = session.as_ref().filter(|s| s.kind == Kind::Song) {
+                    if let Ok(mut e) = s.engine.lock() {
+                        e.set_record_tap(tap);
+                    }
                 }
             }
             Ok(Cmd::Instruments) => {
@@ -1386,7 +1486,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 if let Some(s) = target {
                     if let Ok(mut e) = s.engine.lock() {
                         match cmd {
-                            Cmd::NoteOn(ch, key, vel) => e.note_on(ch, key, vel),
+                            Cmd::NoteOn(ch, key, vel, midi) => e.note_on_midi(ch, key, vel, midi),
                             Cmd::Midi(ch, bytes, bend) => e.midi(ch, bytes, bend),
                             Cmd::TapClick(accent, db) => e.tap_click(accent, db),
                             _ => {}
@@ -1468,12 +1568,20 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
                 closed = false;
                 held = None;
                 lost = None;
-                // The old playback is replaced, not faded; of what it leaves ringing only the hosted effects' tails
-                // go on, with "Reset plugins on transport" off (`reset_hosts`). A live stream left open would process
-                // the same plugin instances a second time (each stream would only hear every other chunk of a ringing
-                // sample): typed notes go into the playing engine instead.
-                session = None;
-                live = None;
+                // The old playback fades out from what it has queued and goes before the new one starts; of what it
+                // leaves ringing only the hosted effects' tails go on, with "Reset plugins on transport" off
+                // (`reset_hosts`). A live stream left open would process the same plugin instances a second time (each
+                // stream would only hear every other chunk of a ringing sample): typed notes go into the playing
+                // engine instead.
+                keep_gate(&shared, &session);
+                for s in [session.take(), live.take()].into_iter().flatten() {
+                    retire(s, &mut closing);
+                }
+                let fade = fade_time(&shared);
+                while closing.iter().any(|(_, since)| since.elapsed() < fade) {
+                    crate::device::pump();
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 closing.clear();
                 // A jump while playing arrives as a Stop and this Play: the Stop's pending reset gives way to this one.
                 reset_hosts(&inst, starts.reset);
@@ -1555,6 +1663,7 @@ fn audio_thread(rx: Receiver<Cmd>, shared: Arc<Shared>, latest: Arc<Mutex<Option
             Ok(Cmd::Stop) => {
                 // Everything fades out and goes; then the instruments and the effects are reset, so no tail rings on
                 // into the next Play (pause is where tails ring out, `Engine::pause`).
+                keep_gate(&shared, &session);
                 for s in [session.take(), live.take(), preview.take()].into_iter().flatten() {
                     retire(s, &mut closing);
                 }
@@ -1946,9 +2055,17 @@ impl Session {
         if song {
             e.set_run_on(crate::record::run_on_flag());
             e.set_nudge(crate::tapper::nudge_flag());
+            e.set_record_tap(shared.record.lock().ok().and_then(|t| t.clone()));
         }
         let engine = Arc::new(Mutex::new(e));
         let done = Arc::new(AtomicBool::new(false));
+        if song {
+            if let Some(gate) = shared.gate.lock().ok().and_then(|g| *g) {
+                if let Ok(mut e) = engine.lock() {
+                    e.set_load_gate(gate);
+                }
+            }
+        }
         let ctl = Arc::new(Ctl { paused: AtomicBool::new(at.paused), held: AtomicBool::new(false), report: AtomicBool::new(song) });
         if kind != Kind::Preview {
             publish(&shared, &info);
@@ -1962,6 +2079,10 @@ impl Session {
         let mut r = Renderer::new(queue, ctl.clone(), done.clone(), shared.clone(), rate);
         r.tap = kind != Kind::Preview;
         r.wake = feed.thread();
+        // Started in the middle of the song, it comes in from silence.
+        if song && at.tick > 0.0 && !at.paused {
+            r.gain = 0.0;
+        }
         let detach = Detach(r.detach.clone());
         device.add(Box::new(r))?;
         Ok(Session { _detach: detach, feed, kind, engine, done, ctl, generation, project: project.clone(), mode, rate, truncated: at.truncated })
@@ -1977,6 +2098,21 @@ impl Feeder {
         }
         Feeder { engine, queue, shared, ctl, meters: true, rate, busy: Duration::ZERO, rendered: 0, voices }
     }
+}
+
+/// Remembers how playback `session` uses the workers for the one that follows.
+fn keep_gate(shared: &Shared, session: &Option<Session>) {
+    let Some(s) = session else { return };
+    if let (Ok(e), Ok(mut g)) = (s.engine.lock(), shared.gate.lock()) {
+        *g = Some(e.load_gate());
+    }
+}
+
+/// How long a stream that fades out needs: the fade, in blocks of the device's.
+fn fade_time(shared: &Shared) -> Duration {
+    let rate = f64::from(shared.sample_rate.load(Ordering::Relaxed).max(1));
+    let block = f64::from(shared.block.load(Ordering::Relaxed)) / rate;
+    Duration::from_secs_f64(FADE_SECONDS + 2.0 * block).min(CLOSE_AFTER)
 }
 
 /// What one output stream does per block: copy the queued ticks, fade them for pause / stop, publish the position.
@@ -2326,6 +2462,24 @@ mod tests {
         assert!(samples.fold(0.0f32, f32::max) > 0.01, "the notes are heard");
     }
 
+    /// Playback started in the middle of the song comes in from silence over the fade, then at full level.
+    #[test]
+    fn a_stream_that_starts_from_silence_fades_in() {
+        let (e, _) = looping_engine();
+        let (mut full, _, _) = renderer(e);
+        let (e, _) = looping_engine();
+        let (mut r, _, _) = renderer(e);
+        r.gain = 0.0;
+        let (mut a, mut b) = (vec![0.0f32; 512 * 2], vec![0.0f32; 512 * 2]);
+        full.render(&mut a);
+        r.render(&mut b);
+        assert!(b[0].abs() <= a[0].abs() * r.step * 2.0 + 1e-6, "from silence: {} against {}", b[0], a[0]);
+        full.render(&mut a);
+        r.render(&mut b);
+        assert_eq!(r.gain, 1.0, "over within two blocks");
+        assert_eq!(a, b, "then as it plays");
+    }
+
     /// Pause fades out and then holds the engine exactly; resume continues from that frame (no restart, no jump).
     #[test]
     fn pause_holds_and_resume_continues() {
@@ -2478,6 +2632,40 @@ mod tests {
         t.note_off(4, 67);
         std::thread::sleep(Duration::from_millis(100));
         assert!(t.sounding().is_empty() && t.peaks() == (0.0, 0.0), "released: {:?}", t.peaks());
+    }
+
+    /// Linux: while a project plays, the feeder and the device callback run at real-time priority (`crate::rt`; needs an
+    /// audio device and rtkit or an rtprio limit): `hidden-tests cargo test -p os-app --bin lemonstudio
+    /// transport::tests::audio_threads_run_realtime -- --ignored --exact --nocapture`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn audio_threads_run_realtime() {
+        crate::rt::enable_in_tests();
+        let mut project = crate::app::test_project();
+        let ch = project.channels[0].index;
+        project.patterns = vec![os_model::Pattern { number: 1, notes: vec![os_model::Note { length: 24, key: 60, ..os_model::Note::step(ch, 0) }], ..Default::default() }];
+        let t = Transport::new(None);
+        t.play(&project, PlayMode::Pattern(1), 0.0);
+        wait_for(|| t.seconds() >= 0.5);
+        std::thread::sleep(Duration::from_millis(300));
+        let threads: Vec<(i32, String, bool)> = std::fs::read_dir("/proc/self/task")
+            .unwrap()
+            .flatten()
+            .filter_map(|e| {
+                let tid: i32 = e.file_name().to_str()?.parse().ok()?;
+                let name = std::fs::read_to_string(e.path().join("comm")).ok()?.trim().to_string();
+                Some((tid, name, crate::rt::is_realtime(tid)))
+            })
+            .collect();
+        t.stop();
+        let rt: Vec<&str> = threads.iter().filter(|t| t.2).map(|t| t.1.as_str()).collect();
+        let (promoted, demoted) = crate::rt::counts();
+        println!("real-time threads now: {rt:?}; promoted {promoted}, demoted by the safety cap {demoted}");
+        // A device that paces playback keeps both real-time; one that does not (the null device) lets them spin, and the
+        // safety cap puts them back to normal priority instead of the kernel killing the program.
+        assert!(promoted >= 2, "the feeder and the device callback were promoted: {threads:?}");
+        assert!(rt.len() + demoted >= 2, "each is real-time still, or was demoted: {rt:?}");
     }
 
     /// Pause holds the position silently; resume continues from it; Stop rewinds (needs an audio device).

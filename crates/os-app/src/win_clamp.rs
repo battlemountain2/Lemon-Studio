@@ -106,36 +106,21 @@ fn covered(r: [i32; 4], screens: &[[i32; 4]]) -> bool {
 /// Window `w`'s rectangle while it floats (the Playlist, Mixer and Piano roll as `State::float_rect` keeps them);
 /// `None` for the browser panel and docked plugin windows.
 pub fn rect_of(s: &State, w: Win) -> Option<Rect> {
-    Some(match w {
-        Win::ChannelRack => views::rack::rect(s),
-        Win::Plugin => views::channel_win::rect(s),
-        Win::Perf => views::perf::rect(s),
-        Win::Tapper => views::tapper::rect(s),
-        Win::Touch => views::touch::rect(s),
-        Win::Strum => views::strum::rect(s),
-        Win::Arp => views::arpeggiate::rect(s),
-        Win::PianoDlg => views::piano_dlg::rect(s),
-        w if w.slot().is_some() => s.float_rect(w),
-        _ => return None,
-    })
+    match crate::floating::placed(w) {
+        Some(p) => Some((p.rect)(s)),
+        None => w.slot().map(|_| s.float_rect(w)),
+    }
 }
 
+/// Windows sit on whole px: a mouse at a fractional display scale (125 %) moves in fractions of one, and parts of a
+/// window worked out two ways then disagree by a rounding (the playlist's scroll parts, a debug assertion).
 fn set_pos(s: &mut State, w: Win, pos: (f32, f32)) {
-    match w {
-        Win::ChannelRack => s.rack_pos = pos,
-        Win::Plugin => s.plugin_pos = pos,
-        Win::Perf => s.perf.pos = pos,
-        Win::Tapper => s.tapper.pos = pos,
-        Win::Touch => s.touch.pos = pos,
-        Win::Strum => s.strum.pos = pos,
-        Win::Arp => s.arp.pos = pos,
-        Win::PianoDlg => s.piano_dlg.pos[s.piano_dlg.tool.index()] = pos,
-        w => {
-            if let Some(i) = w.slot() {
-                s.wins[i].rect.x = pos.0;
-                s.wins[i].rect.y = pos.1;
-            }
-        }
+    let pos = (pos.0.round(), pos.1.round());
+    if let Some(p) = crate::floating::placed(w) {
+        (p.set_pos)(s, pos);
+    } else if let Some(i) = w.slot() {
+        s.wins[i].rect.x = pos.0;
+        s.wins[i].rect.y = pos.1;
     }
 }
 
@@ -155,7 +140,7 @@ pub fn keep_all(s: &mut State) -> bool {
         return false;
     }
     let mut moved = false;
-    for w in [Win::ChannelRack, Win::Plugin, Win::Perf, Win::Tapper, Win::Touch, Win::Strum, Win::Arp, Win::PianoDlg] {
+    for w in crate::floating::PLACED.iter().map(|p| p.win) {
         let Some(r) = rect_of(s, w) else { continue };
         let pos = keep(r.x, r.y, r.w, work);
         if pos != (r.x, r.y) {
@@ -189,7 +174,7 @@ impl App {
         if r.h > work.h {
             s.rack_size.1 = fit.1;
         }
-        for w in [Win::ChannelRack, Win::Plugin, Win::Perf, Win::Tapper, Win::Touch, Win::Strum, Win::Arp, Win::PianoDlg] {
+        for w in crate::floating::PLACED.iter().map(|p| p.win) {
             if let Some(r) = rect_of(s, w) {
                 let to = inside(r, work, (r.w, r.h));
                 set_pos(s, w, (to.x, to.y));
@@ -206,6 +191,31 @@ mod tests {
     use super::*;
     use crate::app::Action;
     use os_ui::Canvas;
+
+    /// A window dragged by its title bar at a fractional display scale (the mouse in steps of 0.8 px at 125 %) lands on
+    /// whole px: the floating playlist painted at a fractional place tripped its scroll parts' debug assertion.
+    #[test]
+    fn dragged_windows_land_on_whole_px() {
+        let Ok(mut c) = Canvas::new(1400, 800, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.screen = (1400.0, 800.0);
+        app.state.raise(Win::Playlist);
+        let i = Win::Playlist.slot().unwrap();
+        app.state.wins[i].maxed = false;
+        app.state.wins[i].rect = Rect::new(230.0, 110.0, 820.0, 430.0);
+        app.paint(&mut c, None);
+        app.mouse_move(500.0, 120.0);
+        app.mouse_down();
+        for k in 1..30 {
+            app.mouse_move(500.0 + k as f32 * 0.8, 120.0 + k as f32 * 0.8);
+            let _ = app.take_damage();
+            app.paint(&mut c, None);
+            let r = app.state.wins[i].rect;
+            assert_eq!((r.x.fract(), r.y.fract()), (0.0, 0.0), "{r:?}");
+        }
+        app.mouse_up();
+        assert_ne!(app.state.wins[i].rect.x, 230.0, "it moved");
+    }
 
     const WORK: Rect = Rect { x: 209.0, y: 83.0, w: 1711.0, h: 997.0 };
 

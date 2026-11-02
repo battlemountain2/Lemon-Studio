@@ -1,9 +1,10 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 Samrat Dutta
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
 //! Settings window (OPTIONS > MIDI / Audio / General / File / Theme settings, Project settings, Project info,
-//! Debugging log; F10 / F11): ten tabs of grouped controls. The controls that work today are listed in `LIVE` and
+//! Debugging log; F10 / F11): eleven tabs of grouped controls. The controls that work today are listed in `LIVE` and
 //! handled in `App::settings_act`, or are program settings declared in `crate::prefs`; every other control is drawn
 //! greyed out and only says it is not available yet.
 //! The Plugins tab is the plugin manager (search folders, scanning, the plugin table).
@@ -165,6 +166,9 @@ pub struct SettingsUi {
     pub devices: Vec<String>,
     pub asio_drivers: Vec<String>,
     pub device: String,
+    /// The input devices, and the Input device box's text.
+    pub inputs: Vec<String>,
+    pub input: String,
     /// Audio page: the audio settings, the rate streams open at, and the status lines (kept up to date while shown).
     pub audio: crate::audio_cfg::AudioCfg,
     pub rate: Option<u32>,
@@ -214,9 +218,10 @@ pub struct SettingsUi {
 
 /// Tabs: label, page title, group (0 system / 1 project / 2 info) (spec §2). Plugins takes the place of FL's Account
 /// tab (spec: ui/plugin-manager.md §2); tabs are laid out from their text widths (`tab_rects`).
-pub const TABS: [(&str, &str, u8); 10] = [
+pub const TABS: [(&str, &str, u8); 11] = [
     ("MIDI", "MIDI input / output devices", 0),
     ("Audio", "Audio devices / mixer", 0),
+    ("Recording", "Recording options", 0),
     ("General", "System / miscellaneous", 0),
     ("File", "Files & folders", 0),
     ("Plugins", "Plugin manager", 0),
@@ -228,9 +233,11 @@ pub const TABS: [(&str, &str, u8); 10] = [
 ];
 pub const MIDI: usize = 0;
 pub const AUDIO: usize = 1;
-pub const GENERAL: usize = 2;
-pub const FILE: usize = 3;
-pub const PLUGINS: usize = 4;
+/// Lemon Studio's own page (FL has none): the recording settings, spec ui/settings.md "Recording".
+pub const RECORDING: usize = 2;
+pub const GENERAL: usize = 3;
+pub const FILE: usize = 4;
+pub const PLUGINS: usize = 5;
 
 /// Opt in to the experimental FL native plugin host (spec plugins/fruity-abi.md), on the Plugins page only with
 /// `OPENSTUDIO_NATIVE_SETTINGS` (`SettingsUi::native`). Labels are the keys for `SAct::Check`; `App::settings_act`
@@ -240,7 +247,7 @@ pub const NATIVE_HOST_CHECK: &str = "Experimental: host installed native plugins
 /// never by the built-in Lemon recreations (spec plugins/fruity-abi.md "Opened projects").
 pub const NATIVE_FIRST_CHECK: &str = "Experimental: real native plugins instead of Lemon recreations";
 /// Plugin manager checks (spec: ui/plugin-manager.md §2).
-pub const STARTUP_CHECK: &str = "Find new plugins at startup";
+pub const STARTUP_CHECK: &str = "Scan for new plugins at startup";
 pub const ERRORS_CHECK: &str = "Rescan plugins with errors";
 pub const COMBINE_CHECK: &str = "Combine formats of the same plugin";
 
@@ -282,7 +289,7 @@ pub const LIVE: &[&str] = &[
     "Manage messages",
     REFRESH_MIDI,
     "Add folder...",
-    "Find new plugins",
+    "Scan for new plugins",
     "Rescan all",
     "Refresh device list",
     "Load theme...",
@@ -296,8 +303,6 @@ pub const REFRESH_MIDI: &str = "Refresh device list";
 pub const UPDATE_SCRIPTS: &str = "Update MIDI scripts";
 const NO_SCRIPTS: &str = "Lemon Studio has no MIDI scripts";
 /// MIDI: Performance mode MIDI channel stays greyed with its reason.
-pub const PERFORMANCE_CHANNEL: &str = "Performance mode MIDI channel";
-const NO_PERFORMANCE: &str = "Lemon Studio has no playlist performance mode";
 
 /// `LIVE`, and the checks declared in `crate::prefs`.
 fn live(key: &str) -> bool {
@@ -305,10 +310,13 @@ fn live(key: &str) -> bool {
 }
 
 /// The combos that work (they open a menu of choices, `App::audio_menu`).
-pub const LIVE_COMBOS: [&str; 5] = [OUTPUT_DEVICE, MODE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS];
-/// General ▸ Display: "Entertain me" simulates the mixer's cables, "Off" hangs them still (crate::cable).
+pub const LIVE_COMBOS: [&str; 6] = [OUTPUT_DEVICE, INPUT_DEVICE, MODE, SAMPLE_RATE, BUFFER_LENGTH, ANIMATIONS];
+/// General ▸ Display: "Playful" simulates the mixer's cables, "Off" hangs them still (crate::cable).
 pub const ANIMATIONS: &str = "Animations";
 pub const OUTPUT_DEVICE: &str = "Output device";
+/// The device the mixer tracks' inputs and one-click recording take in from (not under an ASIO driver, whose inputs
+/// are its own).
+pub const INPUT_DEVICE: &str = "Input device";
 pub const SAMPLE_RATE: &str = "Sample rate (Hz)";
 pub const BUFFER_LENGTH: &str = "Buffer length";
 /// Windows devices: shared mode, or exclusive mode with the device to Lemon Studio alone (spec:
@@ -321,6 +329,8 @@ pub const MODE_SHARED: &str = "Shared (other programs play too)";
 pub const MODE_EXCLUSIVE: &str = "Exclusive (Lemon Studio alone, smaller buffers)";
 #[cfg(target_os = "linux")]
 pub const MODE_EXCLUSIVE: &str = "Exclusive (ALSA directly, past the sound server)";
+/// Linux: as a client of the JACK server (`audio_cfg::AudioCfg::jack`).
+pub const MODE_JACK: &str = "JACK (the JACK server's rate and buffer length)";
 const MODE_ASIO: &str = "Mode: for Windows devices (an ASIO driver plays on its own terms)";
 /// With an ASIO driver: its own settings window, where its buffer length is set.
 pub const SHOW_ASIO_PANEL: &str = "Show ASIO panel";
@@ -382,7 +392,7 @@ pub const SAVE_PRESET: &str = "Save preset...";
 pub const THEME_UNDO: &str = "Undo";
 pub const THEME_REDO: &str = "Redo";
 pub const FIX_TEXT: &str = "Fix text";
-pub const RESET_WORK_TIME: &str = "Reset working time";
+pub const RESET_WORK_TIME: &str = "Reset time spent on project";
 /// General ▸ Input: opens the Manage shortcuts window (`App::open_shortcuts`).
 pub const MANAGE_SHORTCUTS: &str = "Manage shortcuts";
 
@@ -399,32 +409,16 @@ pub fn buffer_text(frames: u32, rate: u32) -> String {
     format!("{frames} frames ({:.1} ms)", f64::from(frames) * 1000.0 / f64::from(rate.max(1)))
 }
 
-pub const THEME: usize = 5;
-pub const PROJECT: usize = 6;
-pub const INFO: usize = 7;
-pub const DEBUG: usize = 8;
+pub const THEME: usize = 6;
+pub const PROJECT: usize = 7;
+pub const INFO: usize = 8;
+pub const DEBUG: usize = 9;
 
 /// Plugin table rows shown at once (spec: ui/plugin-manager.md §2).
 pub const TABLE_ROWS: usize = 18;
 pub const TABLE_ROW_H: f32 = 17.0;
 /// Table columns: x from the table's left edge, width.
 const COLS: [(f32, f32); 8] = [(0.0, 20.0), (20.0, 38.0), (58.0, 152.0), (210.0, 50.0), (260.0, 68.0), (328.0, 112.0), (440.0, 66.0), (506.0, 80.0)];
-
-/// OPTIONS menu label -> tab (spec §1).
-pub fn tab_for_menu(label: &str) -> Option<usize> {
-    Some(match label {
-        "MIDI settings" => MIDI,
-        "Audio settings" => AUDIO,
-        "General settings" => GENERAL,
-        "File settings" => FILE,
-        "Manage plugins" => PLUGINS,
-        "Theme settings" => THEME,
-        "Project general settings" => PROJECT,
-        "Project info" => INFO,
-        "Debugging log" => DEBUG,
-        _ => return None,
-    })
-}
 
 pub const W: f32 = 668.0;
 const LABEL: Font = Font::new(13);
@@ -575,7 +569,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     combo(p::choice(&p::CONTROLLER_TYPE), 250.0, p::CONTROLLER_TYPE.label),
                     pair(Midi(MRow::Link(CurveOf::Velocity)), ValueR(p::OMNI_CHANNEL.label, number_text(&p::OMNI_CHANNEL))),
                     pair(Midi(MRow::Link(CurveOf::Release)), ValueR(p::MARKER_CHANNEL.label, number_text(&p::MARKER_CHANNEL))),
-                    pair(Check(p::PICKUP.label, false), ValueR(PERFORMANCE_CHANNEL, "---".into())),
+                    pair(Check(p::PICKUP.label, false), ValueR(p::PERFORMANCE_CHANNEL.label, number_text(&p::PERFORMANCE_CHANNEL))),
                     pair(Check(p::AUTO_ACCEPT.label, true), ValueR(p::MUTING_CHANNEL.label, number_text(&p::MUTING_CHANNEL))),
                     pair(Check(p::FOOT_PEDAL.label, true), Check(p::TOGGLE_ON_RELEASE.label, false)),
                 ]),
@@ -616,10 +610,11 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             vec![
                 g("Input / output", [
                     vec![combo(&st.device, 360.0, OUTPUT_DEVICE)],
+                    if asio { Vec::new() } else { vec![combo(&st.input, 360.0, INPUT_DEVICE)] },
                     // Windows devices play shared or exclusive (greyed under an ASIO driver, `MODE_ASIO`); so do Linux
                     // ones, through the sound server or ALSA.
                     if cfg!(windows) || cfg!(target_os = "linux") {
-                        let mode = combo(if st.audio.exclusive { "Exclusive" } else { "Shared" }, 120.0, MODE);
+                        let mode = combo(if st.audio.jack() { "JACK" } else if st.audio.exclusive { "Exclusive" } else { "Shared" }, 120.0, MODE);
                         let device = st.audio.device.as_deref().unwrap_or("the default device");
                         let alone = exclusive.then(|| {
                             let line = if cfg!(windows) {
@@ -629,7 +624,11 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                             };
                             Text(line, true)
                         });
-                        std::iter::once(mode).chain(alone).collect()
+                        // JACK: its server sets the rate and buffer length; the ports connect to the system's own.
+                        let jack = st.audio.jack().then(|| {
+                            Text("Lemon Studio plays as a JACK client at the server's rate and buffer length (set them in the server, e.g. qjackctl); its ports connect to the system playback and capture ports. With no JACK server running it plays as in shared mode.".into(), true)
+                        });
+                        std::iter::once(mode).chain(alone).chain(jack).collect()
                     } else {
                         Vec::new()
                     },
@@ -651,9 +650,9 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     },
                     vec![
                         List(vec![("Output devices", 0.0)], listed.map(|d| vec![d]).collect(), 4),
-                        Check2("Mix in buffer switch", false, "Triple buffer", false),
+                        Check2("Mix at buffer boundaries", false, "Triple buffer", false),
                         combo("Highest", 96.0, "Priority"),
-                        Check("Safe overloads", true),
+                        Check("Avoid dropouts under load", true),
                         combo("Mixer", 96.0, "Playback tracking"),
                     ],
                 ]
@@ -661,8 +660,9 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 .flatten()
                 .collect()),
                 g("CPU", vec![
-                    Check2("Multithreaded generator processing", true, "Smart disable", true),
+                    Check2("Multithreaded instrument processing", true, "Auto-bypass when silent", true),
                     Check2("Multithreaded mixer processing", true, "Align tick lengths", false),
+                    Check("Extra cores only when needed", true),
                 ]),
                 g("Mixer", vec![
                     combo("24-point sinc", 122.0, "Resampling quality"),
@@ -670,6 +670,31 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     Value(crate::prefs::number_text(&crate::prefs::METRONOME_TRACK), "Metronome track"),
                     Check("Play truncated notes on transport", true),
                     Check("Reset plugins on transport", false),
+                ]),
+            ]
+        }
+        // Lemon Studio's own page (spec: ui/settings.md "Recording"): every control is a `crate::prefs` declaration that
+        // the Record button's menus, the toolbar's option buttons and the mixer's Disk recording menu share.
+        RECORDING => {
+            use crate::prefs as p;
+            // Where takes go now: the project's data folder's Recorded folder, else the user folder's.
+            let folder = crate::track_rec::folder(s).display().to_string();
+            vec![
+                g("Recording filter", vec![Check2(p::REC_NOTES.label, true, p::REC_AUTOMATION.label, true), Check(p::REC_AUDIO.label, false)]),
+                g("Options", vec![
+                    Check2(p::REC_ASK.label, true, p::REC_LOOP.label, false),
+                    Check2(p::REC_STARTS_PLAYBACK.label, false, p::REC_BLEND.label, false),
+                    Check(p::REC_DISARM_ON_STOP.label, false),
+                ]),
+                g("Quantize", vec![Check2(p::REC_QUANTIZE_START.label, true, p::REC_QUANTIZE_END.label, true)]),
+                g("Start on input", vec![Check(p::REC_WAIT.label, false), Check2(p::REC_WAIT_FILTER.label, true, p::REC_WAIT_ARMED.label, false)]),
+                g("Count-in", vec![Check(p::REC_COUNT_IN.label, false), combo(p::choice(&p::COUNT_IN_LENGTH), 80.0, p::COUNT_IN_LENGTH.label)]),
+                g("Audio recording", vec![
+                    Check(p::AUTO_AUDIO_CLIPS.label, true),
+                    combo(p::choice(&p::EXTERNAL_INPUT), 230.0, p::EXTERNAL_INPUT.label),
+                    Text("Recordings go to the project's data folder's Recorded folder, else the user folder's:".into(), true),
+                    Text(folder, true),
+                    Text("The input device is chosen on the Audio page.".into(), true),
                 ]),
             ]
         }
@@ -686,7 +711,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 combo("Main", 64.0, "Pop-ups scaling"),
                 combo("Main", 64.0, "Toolbars scaling"),
                 combo("Off", 64.0, "Transparent windows"),
-                combo(if s.cables.borrow().animations() { "Entertain me" } else { "Off" }, 126.0, ANIMATIONS),
+                combo(if s.cables.borrow().animations() { "Playful" } else { "Off" }, 126.0, ANIMATIONS),
                 Slider("Smoothing", 0.2),
                 combo("Ultrasmooth", 126.0, "Animation refresh rate"),
                 Check2("Force refreshes", true, "Transparent menus", true),
@@ -703,18 +728,18 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             gf("Input", false, vec![
                 combo("Multi-button mouse", 136.0, "Optimize for"),
                 Buttons(vec![(MANAGE_SHORTCUTS, 212.0)]),
-                Check("Click-and-hold & special gesture functions", false),
-                Check("Use both mouse buttons in step sequencer", false),
+                Check("Click-and-hold gestures", false),
+                Check("Right button clears steps", false),
                 Slider("Vertical scrolling speed", 0.5),
                 Slider("Horizontal scrolling speed", 0.5),
-                Check("Invert pencil buttons", false),
+                Check("Swap mouse buttons for drawing", false),
             ]),
             // spec: ui/settings-choices.md "Undo history: the four checks (2026-10-16)" (`crate::history`).
             gf("Undo history", false, vec![
                 Value(crate::prefs::number(&crate::prefs::MAX_UNDO_LEVELS).to_string(), "Maximum undo levels"),
                 Check("Undo knob tweaks", true),
                 Check("Alternate undo mode", true),
-                Check("Put undone recordings in the recycle bin", true),
+                Check("Move undone recordings to the trash", true),
                 Check("Show undo history in the browser when undoing changes", false),
                 Check("Show recent changes at the top", false),
             ]),
@@ -731,18 +756,18 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Check("Automatically download program updates", true),
             ]),
             gf("Miscellaneous", false, vec![
-                Check("Auto name channels", true),
-                Check("Auto name effect slots", false),
-                Check("Auto zip empty channels", false),
-                Check("Auto select linked modules", true),
+                Check("Name channels after their sample or plugin", true),
+                Check("Name effect slots after their plugin", false),
+                Check("Auto-collapse empty channels", false),
+                Check("Select linked controls automatically", true),
                 Check("Auto zoom in piano roll", false),
                 Check("Small scrollbars in editors", false),
-                Check2("Detach all new plugins", false, "Open detached plugins with the main window", false),
-                Check("Disable typing keyboard priority by default", false),
+                Check2("Open new plugin windows floating", false, "Open detached plugins with the main window", false),
+                Check("Disable computer keyboard priority by default", false),
                 Check("Alternate meter scale", false),
                 Check("Show startup splash screen", true),
                 Check("Restore previous state after solo", false),
-                Check("Hide plugin window toolbar by default", true),
+                Check("Hide plugin window strip by default", true),
                 Check("Silent startup", false),
                 Check("Monophonic painting in piano roll", false),
                 Check("Create automation clips at the playback position", true),
@@ -756,8 +781,8 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                 Check("Fast sample preview", true),
                 Check("Auto keep long audio on disk", true),
                 Check2("Read sample tempo information", true, "Read sample root note", true),
-                Check("Initialize controls automatically", true),
-                Check("Force high performance power plan", true),
+                Check("Set start values automatically", true),
+                Check("Use the high-performance power plan", true),
                 Check("Threaded project sample loading", false),
                 combo("System", 64.0, "Cursors scaling"),
                 combo("Main", 64.0, "Legacy scaling"),
@@ -803,7 +828,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     scanning.push(Check(NATIVE_FIRST_CHECK, os_native::prefer_native()));
                 }
             }
-            scanning.push(Buttons(vec![("Find new plugins", 130.0), ("Rescan all", 100.0)]));
+            scanning.push(Buttons(vec![("Scan for new plugins", 130.0), ("Rescan all", 100.0)]));
             scanning.push(Text(d.status_line(), true));
             vec![
                 g("Search folders", vec![Folders(folders), Buttons(vec![("Add folder...", 110.0)])]),
@@ -864,11 +889,11 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
             gf("Advanced", true, vec![
                 combo(&panning_text(s.project.panning_law), 82.0, PANNING_LAW),
                 Check(TRUNCATED_CHECK, s.project.play_truncated),
-                Check("Fast declick for cut groups", s.project.fast_declick.unwrap_or(false)),
+                Check("Fast fade for choke groups", s.project.fast_declick.unwrap_or(false)),
             ]),
             // The project's automatic crossfades (event 44; off when the file has none) and the program setting new
             // projects take it from (`prefs::AUTO_CROSSFADES_NEW`, which the check shows).
-            gf("Playlist", false, vec![Check2(
+            gf("Arranger", false, vec![Check2(
                 CROSSFADES_CHECK,
                 s.project.auto_crossfades.unwrap_or(false),
                 crate::prefs::AUTO_CROSSFADES_NEW.label,
@@ -1242,18 +1267,31 @@ fn picker(ui: &mut Ui, s: &State, p: &crate::theme_adjust::Picker, win: Rect) {
     ui.c.text_center(Font::new(13), b, if hov { t.glyph } else { t.text }, "Revert");
 }
 
-/// Tab rects in window `r`: text width + 10 px each side, 4 px apart, 15 px more between groups.
+/// Tab rects in window `r`: text width + 10 px each side, 11 px apart, 15 px more between groups. When that is wider
+/// than the window (eleven tabs since Recording), the sides narrow first, to 4 px, then the gaps, to 8 px (Citrus's
+/// slanted edges need 7), so About stays inside.
 fn tab_rects(ui: &mut Ui, r: Rect) -> Vec<Rect> {
     let font = Font::new(13);
+    let texts: Vec<f32> = TABS.iter().map(|t| ui.c.text_width(font, t.0)).collect();
+    let n = TABS.len() as f32;
+    let groups = TABS.windows(2).filter(|w| w[0].2 != w[1].2).count() as f32;
+    // 3 px margins, and room for the last tab's slanted edge.
+    let room = r.w - 13.0 - texts.iter().sum::<f32>() - 15.0 * groups;
+    let (side, gap) = {
+        let over = (2.0 * 10.0 * n + 11.0 * (n - 1.0) - room).max(0.0);
+        let side = (10.0 - over / (2.0 * n)).max(4.0);
+        let over = (2.0 * side * n + 11.0 * (n - 1.0) - room).max(0.0);
+        (side, (11.0 - over / (n - 1.0)).max(8.0))
+    };
     let mut x = r.x + 3.0;
     let mut v = Vec::new();
-    for (i, &(label, _, grp)) in TABS.iter().enumerate() {
+    for (i, &(_, _, grp)) in TABS.iter().enumerate() {
         if i > 0 && TABS[i - 1].2 != grp {
             x += 15.0;
         }
-        let w = ui.c.text_width(font, label) + 20.0;
+        let w = texts[i] + 2.0 * side;
         v.push(Rect::new(x.round(), r.y + 34.0, w.round(), TABS_B - 34.0));
-        x += w + 11.0;
+        x += w + gap;
     }
     v
 }
@@ -1472,11 +1510,7 @@ fn paint_row_at(ui: &mut Ui, s: &State, group: &'static str, row: &Row, g: Rect,
         }
         Row::ValueR(label, v) => {
             let b = Rect::new(g.right() - 52.0, y + 3.0, 42.0, 21.0);
-            if *label == PERFORMANCE_CHANNEL {
-                ui.hit(b, Action::Settings(SAct::Body), NO_PERFORMANCE);
-            } else {
-                ui.off(b, name_of(label, group));
-            }
+            ui.off(b, name_of(label, group));
             value_red(ui, b, v);
             ui.c.text_right(f, b.x - 8.0, ty, t.text, label);
             let lw = ui.c.text_width(f, label);

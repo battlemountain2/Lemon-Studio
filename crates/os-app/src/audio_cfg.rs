@@ -1,15 +1,18 @@
 // Copyright (C) 2026 ItsAlphaNeon
+// Copyright (C) 2026 Samrat Dutta
 // SPDX-License-Identifier: GPL-3.0-or-later
 // This file is part of Lemon Studio: https://github.com/ItsAlphaNeon/Lemon-Studio
 
-//! Audio device settings (Settings > Audio): the output device, sample rate and buffer length. They are kept in the
+//! Audio device settings (Settings > Audio): the output device, the input device (`input`, for the mixer tracks'
+//! inputs when the output is not an ASIO driver), sample rate and buffer length. They are kept in the
 //! user folder (`audio.txt`) and every stream the transport opens uses them; a device that is gone, a rate it does not
 //! offer or a buffer length it refuses falls back to the system's default device and that device's own rate and buffer.
 //! The device is a Windows (ALSA, Core Audio) one or, on Windows, an ASIO driver (`asio`): for a driver, `None` and a
 //! rate or buffer length it does not take mean the driver's own (its buffer length is set in its own panel). A Windows
 //! device plays in shared mode, or in exclusive mode (`exclusive`, `device::wasapi`) with the device to itself. On
 //! Linux shared mode plays through the sound server (PulseAudio, or PipeWire through pipewire-pulse) as other programs
-//! do, and exclusive mode opens an ALSA device directly, the sound server's hold on it or not (`host`).
+//! do, exclusive mode opens an ALSA device directly, the sound server's hold on it or not, and JACK mode plays as a
+//! client of the JACK server (`jack`, `host`).
 // spec: ui/settings.md "Audio", audio/wasapi-low-latency.md
 
 use std::sync::Mutex;
@@ -31,6 +34,12 @@ pub struct AudioCfg {
     /// A Windows device in exclusive mode (Lemon Studio alone on it), on Linux an ALSA device opened directly; ignored
     /// for an ASIO driver and on macOS.
     pub exclusive: bool,
+    /// Input device by name (`None`: the system's default input, followed when it changes); ignored for an ASIO
+    /// driver, whose inputs are its own.
+    pub input: Option<String>,
+    /// Linux: play as a client of the JACK server, which sets the rate and buffer length (spec: audio/linux-output.md
+    /// "JACK"); ignored elsewhere.
+    pub jack: bool,
 }
 
 /// `AudioCfg::buffer` for "Smallest": the shortest period the device takes in exclusive mode, at whatever rate it opens
@@ -43,7 +52,7 @@ pub const DEFAULT_BUFFER: Option<u32> = if cfg!(target_os = "linux") { Some(512)
 
 impl Default for AudioCfg {
     fn default() -> AudioCfg {
-        AudioCfg { asio: false, device: None, rate: None, buffer: DEFAULT_BUFFER, exclusive: false }
+        AudioCfg { asio: false, device: None, rate: None, buffer: DEFAULT_BUFFER, exclusive: false, input: None, jack: false }
     }
 }
 
@@ -58,6 +67,10 @@ pub enum Set {
     Buffer(Option<u32>),
     /// Exclusive (`true`) or shared mode for Windows devices (Linux: ALSA, or the sound server).
     Mode(bool),
+    /// Linux: JACK mode (`Mode` leaves it).
+    Jack,
+    /// The input device (`None`: the system's default).
+    Input(Option<String>),
 }
 
 /// Sample rates the settings offer.
@@ -87,19 +100,31 @@ impl AudioCfg {
             Set::Rate(r) => self.rate = r,
             Set::Buffer(b) => self.buffer = b,
             Set::Mode(on) => {
-                // Linux: the sound server's devices are not ALSA's; the new mode starts on its default.
-                if cfg!(target_os = "linux") && on != self.exclusive {
-                    self.device = None;
+                // Linux: the sound server's devices are not ALSA's (nor JACK's); the new mode starts on its default.
+                if cfg!(target_os = "linux") && (on != self.exclusive || self.jack) {
+                    (self.device, self.input) = (None, None);
                 }
-                self.exclusive = on;
+                (self.exclusive, self.jack) = (on, false);
             }
+            Set::Jack => {
+                if !self.jack {
+                    (self.device, self.input) = (None, None);
+                }
+                (self.exclusive, self.jack) = (false, true);
+            }
+            Set::Input(d) => self.input = d,
         }
         self
     }
 
     /// A Windows device chosen in exclusive mode, or on Linux an ALSA device (not an ASIO driver; never on macOS).
     pub fn exclusive(&self) -> bool {
-        self.exclusive && !self.asio && (cfg!(windows) || cfg!(target_os = "linux"))
+        self.exclusive && !self.asio && !self.jack() && (cfg!(windows) || cfg!(target_os = "linux"))
+    }
+
+    /// JACK mode, on Linux.
+    pub fn jack(&self) -> bool {
+        self.jack && cfg!(target_os = "linux")
     }
 
     /// The ASIO driver chosen (Windows; elsewhere the name is looked for among the devices and not found).
@@ -107,17 +132,19 @@ impl AudioCfg {
         self.device.as_deref().filter(|_| self.asio && cfg!(windows))
     }
 
-    /// `key=value` lines: `host` (`asio`: the device is an ASIO driver), `mode` (`exclusive`; else shared), `device`,
-    /// `rate`, `buffer` (`device`: the device's own; `smallest`: `SMALLEST`); anything else is ignored.
+    /// `key=value` lines: `host` (`asio`: the device is an ASIO driver; `jack`: JACK mode), `mode` (`exclusive`; else
+    /// shared), `device`,
+    /// `input`, `rate`, `buffer` (`device`: the device's own; `smallest`: `SMALLEST`); anything else is ignored.
     pub fn parse(text: &str) -> AudioCfg {
         let mut c = AudioCfg::default();
         for line in text.lines() {
             let Some((k, v)) = line.split_once('=') else { continue };
             let v = v.trim();
             match k.trim() {
-                "host" => c.asio = v.eq_ignore_ascii_case("asio"),
+                "host" => (c.asio, c.jack) = (v.eq_ignore_ascii_case("asio"), v.eq_ignore_ascii_case("jack")),
                 "mode" => c.exclusive = v.eq_ignore_ascii_case("exclusive"),
                 "device" if !v.is_empty() => c.device = Some(v.to_string()),
+                "input" if !v.is_empty() => c.input = Some(v.to_string()),
                 "rate" => c.rate = v.parse().ok().filter(|&r| r >= 8000),
                 "buffer" if v == "device" => c.buffer = None,
                 "buffer" if v == "smallest" => c.buffer = Some(SMALLEST),
@@ -132,12 +159,17 @@ impl AudioCfg {
         let mut s = String::new();
         if self.asio {
             s += "host=asio\n";
+        } else if self.jack {
+            s += "host=jack\n";
         }
         if self.exclusive {
             s += "mode=exclusive\n";
         }
         if let Some(d) = &self.device {
             s += &format!("device={d}\n");
+        }
+        if let Some(d) = &self.input {
+            s += &format!("input={d}\n");
         }
         if let Some(r) = self.rate {
             s += &format!("rate={r}\n");
@@ -170,11 +202,19 @@ fn save(c: &AudioCfg) {
     }
 }
 
-/// The audio system `cfg` plays on. Linux: in shared mode the sound server (cpal's PulseAudio host, which PipeWire
-/// serves too), else ALSA (also when no sound server is running); elsewhere the system's own.
+/// The audio system `cfg` plays on. Linux: in JACK mode the JACK server while one runs (cpal's JACK host, which loads
+/// libjack when it starts), in shared mode the sound server (cpal's PulseAudio host, which PipeWire serves too), else
+/// ALSA (also when no sound server is running); elsewhere the system's own.
 pub fn host(cfg: &AudioCfg) -> cpal::Host {
     #[cfg(target_os = "linux")]
     {
+        // Without a JACK server cpal's JACK host has no devices: shared mode's then.
+        if cfg.jack()
+            && let Ok(h) = cpal::host_from_id(cpal::HostId::Jack)
+            && h.default_output_device().is_some()
+        {
+            return h;
+        }
         if server(cfg) {
             if let Ok(h) = cpal::host_from_id(cpal::HostId::PulseAudio) {
                 return h;
@@ -196,7 +236,13 @@ fn server(cfg: &AudioCfg) -> bool {
 /// The name of `host(cfg)`, without connecting to it.
 pub fn host_name(cfg: &AudioCfg) -> &'static str {
     #[cfg(target_os = "linux")]
-    return if server(cfg) { cpal::HostId::PulseAudio.name() } else { cpal::HostId::Alsa.name() };
+    return if cfg.jack() {
+        cpal::HostId::Jack.name()
+    } else if server(cfg) {
+        cpal::HostId::PulseAudio.name()
+    } else {
+        cpal::HostId::Alsa.name()
+    };
     #[cfg(not(target_os = "linux"))]
     {
         let _ = cfg;
@@ -252,6 +298,20 @@ pub fn devices(cfg: &AudioCfg) -> (Vec<String>, Option<String>) {
     let host = host(cfg);
     let list = host.output_devices().map(|ds| ds.filter(listed).map(|d| device_name(&d)).collect()).unwrap_or_default();
     (list, host.default_output_device().map(|d| device_name(&d)))
+}
+
+/// `cfg`'s host's input devices by name, and the default one's name.
+pub fn input_devices(cfg: &AudioCfg) -> (Vec<String>, Option<String>) {
+    let host = host(cfg);
+    let list = host.input_devices().map(|ds| ds.filter(listed).map(|d| device_name(&d)).collect()).unwrap_or_default();
+    (list, host.default_input_device().map(|d| device_name(&d)))
+}
+
+/// The input device `cfg` records from: the one chosen, else (none chosen, or it is gone) the system's default.
+pub fn input_device(cfg: &AudioCfg) -> Option<cpal::Device> {
+    let host = host(cfg);
+    let chosen = cfg.input.as_ref().and_then(|want| find(host.input_devices().ok()?, want));
+    chosen.or_else(|| host.default_input_device())
 }
 
 /// What a stream opens.
@@ -352,8 +412,13 @@ mod tests {
 
     #[test]
     fn settings_text_round_trips() {
-        let c = AudioCfg { asio: false, device: Some("Speakers (USB Audio)".into()), rate: Some(48000), buffer: Some(256), exclusive: false };
+        let c = AudioCfg { asio: false, device: Some("Speakers (USB Audio)".into()), rate: Some(48000), buffer: Some(256), exclusive: false, input: None, jack: false };
         assert_eq!(AudioCfg::parse(&c.text()), c);
+        // An input device chosen, and back to the default.
+        let i = c.clone().with(Set::Input(Some("Microphone (USB Audio)".into())));
+        assert!(i.text().contains("input=Microphone (USB Audio)\n"), "{}", i.text());
+        assert_eq!(AudioCfg::parse(&i.text()), i);
+        assert_eq!(i.with(Set::Input(None)), c);
         // Exclusive mode and its smallest period; a file without `mode` is shared.
         let x = c.clone().with(Set::Mode(true)).with(Set::Device(c.device.clone())).with(Set::Buffer(Some(SMALLEST)));
         assert_eq!(x.text(), "mode=exclusive\ndevice=Speakers (USB Audio)\nrate=48000\nbuffer=smallest\n");
@@ -390,6 +455,26 @@ mod tests {
         assert!(!AudioCfg::default().exclusive);
         #[cfg(target_os = "linux")]
         assert_eq!(host_name(&x), "ALSA");
+    }
+
+    /// JACK mode (Linux): kept as `host=jack`, never exclusive, its own devices (choosing it or leaving it starts on the
+    /// default device); an ASIO driver or a mode leaves it.
+    #[test]
+    fn jack_mode() {
+        let c = AudioCfg { device: Some("Speakers".into()), ..AudioCfg::default() }.with(Set::Mode(true));
+        let j = c.clone().with(Set::Jack);
+        assert!(j.jack && !j.exclusive && !j.exclusive() && j.device.is_none());
+        assert_eq!(j.jack(), cfg!(target_os = "linux"));
+        assert!(j.text().starts_with("host=jack\n"), "{}", j.text());
+        assert_eq!(AudioCfg::parse(&j.text()), j);
+        let k = j.clone().with(Set::Device(Some("cpal_client_out".into())));
+        assert_eq!(k.clone().with(Set::Jack).device, k.device, "JACK again keeps the device");
+        let s = k.with(Set::Mode(false));
+        assert!(!s.jack);
+        assert_eq!(s.device.is_none(), cfg!(target_os = "linux"));
+        assert!(!j.with(Set::Asio("FL Studio ASIO".into())).text().contains("jack"));
+        #[cfg(target_os = "linux")]
+        assert_eq!(host_name(&AudioCfg::default().with(Set::Jack)), "JACK");
     }
 
     /// ALSA's PCMs of one card are told apart by their PCM; converting plugins are not listed.

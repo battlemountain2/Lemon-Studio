@@ -48,6 +48,13 @@ pub enum KnobId {
     /// A control of the LFO of the automation clip on channel row `.0` (model `Automation::lfo`; spec:
     /// audio/automation.md "The LFO"). Its switch and mode are two-position controls that a click flips.
     AutoLfo(usize, LfoKnob),
+    /// A setting of the Lemon MIDI Out on channel row `.0` (its plugin state; spec: plugins/midi-out.md §6). The checks
+    /// are two-position controls that a click flips.
+    MidiOut(usize, crate::lemon_midi_out::MoKnob),
+    /// The wet (`.3`) or dry level of member `.2` of the container in slot `.1` of track `.0`, 0..1 (the container's
+    /// window, `crate::container`; Lemon Studio's design: spec plugins/patcher/README.md §4.3). It shows the level the
+    /// chain plays, an automated one included.
+    Member(u16, u8, u32, bool),
 }
 
 /// The controls of an automation clip's LFO, each over its stored range: switch (off, on), mode (multiply, add),
@@ -144,7 +151,16 @@ impl KnobId {
             KnobId::Strum(k) => k.notch(),
             KnobId::Arp(k) => k.notch(),
             KnobId::PianoDlg(k) => k.notch(),
+            KnobId::MidiOut(_, k) => k.notch(),
             _ => PER_NOTCH,
+        }
+    }
+
+    /// What the knob is as a target of the value box and of controller links: a container member's level is its own.
+    pub fn target(self) -> crate::typein::Target {
+        match self {
+            KnobId::Member(t, k, id, wet) => crate::typein::Target::Member(t, k, id, wet),
+            k => crate::typein::Target::Knob(k),
         }
     }
 
@@ -162,6 +178,8 @@ impl KnobId {
             KnobId::Arp(k @ (crate::arpeggiate::Knob::TimeMul | crate::arpeggiate::Knob::Range)) => k.notch() / 12.0,
             // The level faders' handles follow the mouse.
             KnobId::PianoDlg(k) => k.travel().map_or(PER_PX, |t| 1.0 / t),
+            // One value per 6 px, or the knobs' usual rate for the long ranges.
+            KnobId::MidiOut(_, k) => (k.notch() / 6.0).max(PER_PX),
             _ => PER_PX,
         }
     }
@@ -175,9 +193,12 @@ impl KnobId {
             KnobId::ChanRes(_) => 0.0,
             KnobId::SlotMix(..) => 1.0,
             KnobId::Swing => 0.0,
+            // A member's levels as Add effect starts them: wet only.
+            KnobId::Member(.., wet) => f32::from(u8::from(wet)),
             KnobId::Arp(k) => crate::arpeggiate::Settings::default().get(k),
             KnobId::PianoDlg(k) => k.default_pos(),
             KnobId::AutoLfo(_, k) => k.pos(&os_model::clip_lfo::ClipLfo::default()),
+            KnobId::MidiOut(_, k) => k.pos(&crate::lemon_midi_out::Settings::default()),
             KnobId::Eq(_, b, f) => eq_pos(f, os_model::EQ_DEFAULT[usize::from(b.min(2))][usize::from(f.min(2))]),
             _ => 0.5,
         }
@@ -262,6 +283,8 @@ impl State {
             KnobId::Arp(k) => self.arp.set.get(k),
             KnobId::PianoDlg(k) => self.piano_dlg.get(k),
             KnobId::AutoLfo(row, k) => k.pos(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
+            KnobId::MidiOut(row, k) => k.pos(&crate::lemon_midi_out::row_settings(&self.project, row).unwrap_or_default()),
+            KnobId::Member(t, k, id, wet) => crate::container::shown_level(self, t, k, id, wet),
         }
     }
 
@@ -282,6 +305,8 @@ impl State {
         match id {
             KnobId::ChanVol(row) if self.is_clip_row(row) => 1.0,
             KnobId::ChanPan(row) if self.is_clip_row(row) => 0.0,
+            // An instrument member's levels as Add starts them: wet and dry (a layer).
+            KnobId::Member(t, k, member, false) if crate::container::is_instrument(self, t, k, member) => 1.0,
             _ => id.default_value(),
         }
     }
@@ -391,6 +416,15 @@ impl State {
                     self.piano.dirty = true;
                 }
             }
+            KnobId::MidiOut(row, k) => {
+                let Some(mut st) = crate::lemon_midi_out::row_settings(&self.project, row) else { return };
+                k.store(&mut st, v);
+                if crate::lemon_midi_out::set_row_settings(&mut self.project, row, &st) {
+                    self.piano.dirty = true;
+                }
+            }
+            // No undo step here: a drag's is taken at the press (`history::knob`).
+            KnobId::Member(t, k, id, wet) => crate::container::put_level(self, t, k, id, wet, v),
         }
     }
 
@@ -402,9 +436,21 @@ impl State {
 
     /// The hint-bar text of a knob at its current value.
     pub fn knob_text(&self, id: KnobId) -> String {
-        let n = self.knob(id);
-        let bipolar = (n - 0.5) * 2.0;
         match id {
+            KnobId::Strum(k) => self.strum.set.text(k, u32::from(self.project.ppq.max(4))),
+            KnobId::Arp(k) => self.arp.set.text(k),
+            KnobId::PianoDlg(k) => self.piano_dlg.text(k, u32::from(self.project.ppq.max(4))),
+            KnobId::AutoLfo(row, k) => k.text(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
+            KnobId::MidiOut(row, k) => k.text(&crate::lemon_midi_out::row_settings(&self.project, row).unwrap_or_default()),
+            _ => self.knob_text_at(id, self.knob(id)).unwrap_or_default(),
+        }
+    }
+
+    /// The hint-bar text of knob `id` at position `n` (0..1), whatever it holds now; `None` for the dialog knobs, whose
+    /// text comes from their settings.
+    pub fn knob_text_at(&self, id: KnobId, n: f32) -> Option<String> {
+        let bipolar = (n - 0.5) * 2.0;
+        Some(match id {
             KnobId::MasterVol => {
                 // The gain is the level curve of stored / 12800 (spec: audio/mixer.md "Main volume").
                 let g = os_dsp::level::curve(n / 0.8);
@@ -433,6 +479,11 @@ impl State {
                 format!("Channel volume: {:.0}%  {db}  {g:.2}", n * 100.0)
             }
             KnobId::Swing => format!("Main swing: {:.0}%", n * 100.0),
+            // "Lemon Limiter wet: 60%".
+            KnobId::Member(t, k, id, wet) => {
+                let name = crate::container::members(self, t, k).and_then(|l| l.into_iter().find(|m| m.id == id)).map_or_else(|| "Effect".into(), |m| m.name);
+                crate::container::level_text(&name, wet, n)
+            }
             // "EQ band 1 (low shelf) level: 0.0dB", "... freq: 90Hz", "... width: 0.27" (spec: ui/mixer.md §8).
             KnobId::Eq(_, b, f) => {
                 let band = EQ_BANDS[usize::from(b.min(2))];
@@ -442,11 +493,8 @@ impl State {
                     _ => format!("{band} width: {n:.2}"),
                 }
             }
-            KnobId::Strum(k) => self.strum.set.text(k, u32::from(self.project.ppq.max(4))),
-            KnobId::Arp(k) => self.arp.set.text(k),
-            KnobId::PianoDlg(k) => self.piano_dlg.text(k, u32::from(self.project.ppq.max(4))),
-            KnobId::AutoLfo(row, k) => k.text(self.clip_lfo(row).unwrap_or(&os_model::clip_lfo::ClipLfo::default())),
-        }
+            KnobId::Strum(_) | KnobId::Arp(_) | KnobId::PianoDlg(_) | KnobId::AutoLfo(..) | KnobId::MidiOut(..) => return None,
+        })
     }
 }
 
@@ -461,19 +509,22 @@ impl crate::app::App {
                 self.hint = Cow::Owned(s.knob_text(id));
             }
             Control::Fader(t) => {
-                crate::history::fader(s, t, false);
                 let v = os_model::MixerTrack::new(t).volume.unwrap_or(0.8);
-                if let Some(m) = crate::mixer::track_mut(s, t) {
-                    m.volume = Some(v);
-                    s.piano.dirty = true;
-                }
+                crate::control::knob_edit(s, crate::history::MIXER_VOLUME, crate::control::command::Region::Track(t), |s| {
+                    if let Some(m) = crate::mixer::track_mut(s, t) {
+                        m.volume = Some(v);
+                        s.piano.dirty = true;
+                    }
+                });
                 self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
             }
             Control::ChanPitch(row) => {
-                if let Some(ch) = s.project.channels.get_mut(row) {
-                    ch.pitch_cents = 0;
-                    s.piano.dirty = true;
-                }
+                crate::control::edit(s, "Channel pitch", crate::control::command::Region::Channel(row), |s| {
+                    if let Some(ch) = s.project.channels.get_mut(row) {
+                        ch.pitch_cents = 0;
+                        s.piano.dirty = true;
+                    }
+                });
             }
             Control::Slider(label) => {
                 if let Some(sl) = crate::prefs::find_slider(label) {
