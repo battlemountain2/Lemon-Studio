@@ -73,8 +73,8 @@ pub enum NoteDisplay {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KeyLabels {
     #[default]
-    AllWhite,
     RootOnly,
+    AllWhite,
     None,
 }
 
@@ -906,7 +906,7 @@ pub fn open_tick(s: &mut State) -> bool {
 /// Zoom on the pattern and the channel's notes in a note grid `grid`: from bar 1, the pattern's length plus half a
 /// bar fills the width (FL: a 2-bar pattern shows 2.49 bars); the rows are the tallest that fit the channel's pitch
 /// range plus four spare rows, whole pixels between [`MIN_ROW`] and the default × 1.25, and the range is centred. A
-/// channel without notes: C5 centred at [`MIN_ROW`] rows.
+/// channel without notes: C5 centred at default [`ROW`] rows.
 pub fn auto_zoom(s: &mut State, grid: Rect) {
     let ppq = f32::from(s.project.ppq.max(4));
     let span = pattern_length(s, s.pattern) as f32 + s.project.bar_ticks() as f32 / 2.0;
@@ -916,7 +916,7 @@ pub fn auto_zoom(s: &mut State, grid: Rect) {
     let range = keys.clone().min().zip(keys.max());
     s.piano.row_h = match range {
         Some((lo, hi)) => (grid.h / (hi - lo + 1 + 4) as f32).floor().clamp(MIN_ROW, (ROW * 1.25).floor()),
-        None => MIN_ROW,
+        None => ROW,
     };
     s.piano.zoom_back = None;
     center_keys(s, grid.h);
@@ -1369,10 +1369,10 @@ mod tests {
             pattern_mut(&mut app.state).notes.truncate(1);
             let (_, g) = open(&mut app);
             assert_eq!(g.row, (ROW * 1.25).floor());
-            // No notes: C5 centred at the smallest rows.
+            // No notes: C5 centred at default rows.
             pattern_mut(&mut app.state).notes.clear();
             let (grid, g) = open(&mut app);
-            assert_eq!(g.row, MIN_ROW);
+            assert_eq!(g.row, ROW);
             assert!((g.y_of(60) + g.row / 2.0 - grid.cy()).abs() <= g.row, "C5 centred");
         }
         set_check(&AUTO_ZOOM_PIANO, false);

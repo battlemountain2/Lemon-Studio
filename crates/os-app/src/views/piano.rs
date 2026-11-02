@@ -422,6 +422,11 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
         };
         icons::draw(ui.c, icon, b, c);
     }
+    // Subtle FL Studio style group dividers
+    let sep_col = t.splitter_dark.with_alpha(160);
+    ui.c.fill_rect(Rect::new(ox + 317.0, r.y + 4.0, 1.0, 15.0), sep_col);
+    ui.c.fill_rect(Rect::new(ox + 344.0, r.y + 4.0, 1.0, 15.0), sep_col);
+    ui.c.fill_rect(Rect::new(ox + 539.0, r.y + 4.0, 1.0, 15.0), sep_col);
     icons::draw(ui.c, Icon::Speaker, Rect::new(ox + 547.0, r.y + 4.0, 15.0, 15.0), t.text);
 }
 
@@ -539,13 +544,13 @@ fn keyboard(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, lit: &[i32]) {
         let y = g.y_of(key);
         match key.rem_euclid(12) {
             0 => {
-                // C: darker key, extended half a row up on the right; octave label.
+                // C: darker key with clean octave label panel aligned to row.
                 if !lit.contains(&key) && lemon {
-                    ui.c.fill_rect(Rect::new(k.x, y - half, k.w - 1.0, row - 1.0 + half), t.key_c);
+                    ui.c.fill_rect(Rect::new(k.x, y, k.w - 1.0, row - 1.0), t.key_c);
                 } else if !lit.contains(&key) {
                     let left = t.key_white_left.shade(-0.16);
                     ui.c.fill_rect_gradient(Rect::new(k.x, y, 45.0, row - 1.0), left, left, 0.0);
-                    ui.c.fill_rect(Rect::new(k.x + 45.0, y - half, k.w - 46.0, row - 1.0 + half), t.key_c);
+                    ui.c.fill_rect(Rect::new(k.x + 45.0, y, k.w - 46.0, row - 1.0), t.key_c);
                 }
                 ui.c.fill_rect(Rect::new(k.x, y + row - 1.0, k.w - 1.0, 1.0), sep);
             }
@@ -585,18 +590,19 @@ fn keyboard(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, lit: &[i32]) {
             };
             if show && row >= 5.0 {
                 let y = g.y_of(key);
-                let (font, y_text) = if is_c {
-                    let f = if row >= 13.0 { Font::new(11) } else if row >= 9.0 { Font::new(10) } else if row >= 7.0 { Font::new(9) } else { Font::new(8) };
-                    let lh = ui.c.line_height(f);
-                    let y_mid = y + (row - half) / 2.0;
-                    (f, (y_mid - lh / 2.0).round())
+                let font = if row >= 14.0 {
+                    Font::new(11)
+                } else if row >= 10.0 {
+                    Font::new(10)
+                } else if row >= 7.0 {
+                    Font::new(9)
                 } else {
-                    let f = if row >= 13.0 { Font::new(10) } else if row >= 9.0 { Font::new(9) } else { Font::new(8) };
-                    let lh = ui.c.line_height(f);
-                    (f, (y + row / 2.0 - lh / 2.0).round())
+                    Font::new(8)
                 };
+                let lh = ui.c.line_height(font);
+                let y_text = (y + (row - lh) / 2.0).round();
                 let col = if is_c || is_root { t.key_label } else { t.key_label.with_alpha(190) };
-                ui.c.text_right(font, k.right() - 4.0, y_text, col, &key_name(key));
+                ui.c.text_right(font, k.right() - 5.0, y_text, col, &key_name(key));
             }
         }
     }

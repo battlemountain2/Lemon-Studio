@@ -91,7 +91,7 @@ fn section(s: &State, effect: bool, target: Target, nested: bool) -> Vec<PItem> 
         v.push(PItem::sep());
     }
     match s.plugdb.prefs.menu_view {
-        MenuView::Simple => v.extend(rest.iter().map(|e| item(e, target, effect))),
+        MenuView::Simple | MenuView::Favorites => v.extend(rest.iter().map(|e| item(e, target, effect))),
         MenuView::Categories => {
             for cat in db::categories(effect) {
                 let in_cat: Vec<&&Entry> = rest.iter().filter(|e| e.category == cat).collect();
@@ -114,11 +114,6 @@ fn section(s: &State, effect: bool, target: Target, nested: bool) -> Vec<PItem> 
                 } else {
                     v.push(PItem { children: items, ..PItem::new(vendor, Cmd::Nothing) });
                 }
-            }
-        }
-        MenuView::Favorites => {
-            if v.is_empty() {
-                v.push(PItem::new(if effect { "(no favorite effect plugins)" } else { "(no favorite instruments)" }, Cmd::Nothing).off());
             }
         }
     }
@@ -420,7 +415,7 @@ pub fn choices<'a>(s: &'a State, items: &'a [PItem]) -> Vec<Choice<'a>> {
         words.iter().all(|word| text.contains(word))
     });
     let view = s.plugdb.prefs.menu_view;
-    if view == MenuView::Favorites {
+    if view == MenuView::Favorites && s.plugin_search.text.trim().is_empty() {
         out.retain(|choice| choice.entry.is_some_and(|entry| entry.favorite));
     }
     out.sort_by_cached_key(|choice| (
@@ -1045,6 +1040,31 @@ mod tests {
         click(&mut app, Hit::Pick(PlugCmd::View(MenuView::Categories)));
         assert_eq!(app.state.plugdb.prefs.menu_view, MenuView::Categories);
         assert_eq!(choices(&app.state, active(&app.state).unwrap()).len(), all_count);
+    }
+
+    #[test]
+    fn menu_opened_in_favorites_mode_still_supports_a_z_and_searching_non_favorites() {
+        let mut app = app_with_library(10);
+        app.state.plugdb.prefs.menu_view = MenuView::Favorites;
+        app.open_plugin_menu(Target::Fx(Some(0)), (0.0, 0.0));
+        let fav_count = {
+            let fav_results = choices(&app.state, active(&app.state).unwrap());
+            assert!(fav_results.iter().all(|c| c.entry.is_some_and(|e| e.favorite)));
+            fav_results.len()
+        };
+
+        // Clicking A-Z immediately shows all plugins
+        click(&mut app, Hit::Pick(PlugCmd::View(MenuView::Simple)));
+        assert_eq!(app.state.plugdb.prefs.menu_view, MenuView::Simple);
+        let all_count = choices(&app.state, active(&app.state).unwrap()).len();
+        assert!(all_count > fav_count);
+
+        // Back in Favorites mode, searching finds non-favorite plugins
+        click(&mut app, Hit::Pick(PlugCmd::View(MenuView::Favorites)));
+        app.state.plugin_search.text = "Press".into();
+        let search_results = choices(&app.state, active(&app.state).unwrap());
+        assert!(!search_results.is_empty());
+        assert_eq!(search_results[0].item.label, "Press");
     }
 
     #[test]
