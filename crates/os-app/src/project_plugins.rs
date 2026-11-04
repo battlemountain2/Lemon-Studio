@@ -67,6 +67,7 @@ pub fn is_wrapped(d: &Descriptor) -> bool {
     matches!(d.format, Format::Clap | Format::Vst3 | Format::Vst2)
         && (!is_builtin(d)
             || crate::plugins::LINKED_EFFECTS.contains(&d.name.as_str())
+            || d.name == crate::plugins::ZEST_NAME
             || d.id == lemon_ray::CLAP_ID
             || d.id == lemon_wavetable::CLAP_ID)
 }
@@ -79,7 +80,7 @@ pub fn plugin_ref(d: &Descriptor, state: Vec<u8>) -> PluginRef {
         std::path::PathBuf::from("builtin/lemon-ray.clap")
     } else if is_builtin(d) && d.id == lemon_wavetable::CLAP_ID {
         std::path::PathBuf::from("builtin/lemon-wavetable.clap")
-    } else if is_builtin(d) && crate::plugins::LINKED_EFFECTS.contains(&d.name.as_str()) {
+    } else if is_builtin(d) && (crate::plugins::LINKED_EFFECTS.contains(&d.name.as_str()) || d.name == crate::plugins::ZEST_NAME) {
         let file = format!("{}.clap", d.name);
         os_clap::standard_dirs().into_iter().next().map_or_else(|| file.clone().into(), |dir| dir.join(&file))
     } else {
@@ -636,7 +637,9 @@ mod tests {
             assert!(is_builtin(&plugin.desc));
             assert_eq!(
                 is_wrapped(&plugin.desc),
-                plugin.desc.id == lemon_ray::CLAP_ID || plugin.desc.id == lemon_wavetable::CLAP_ID
+                plugin.desc.id == lemon_ray::CLAP_ID
+                    || plugin.desc.id == lemon_wavetable::CLAP_ID
+                    || plugin.desc.name == crate::plugins::ZEST_NAME
             );
         }
         for plugin in crate::plugins::builtin_effects() {
@@ -1366,5 +1369,40 @@ mod tests {
         assert_eq!(find(&list, &r), Some(0), "same name, moved file");
         r.name = "Something else".into();
         assert_eq!(find(&list, &r), None);
+    }
+
+    /// Zest saved in a project comes back built in, with a setting it was given.
+    #[test]
+    fn zest_saves_and_reopens() {
+        use crate::app::App;
+        let path = std::env::temp_dir().join(format!("lemon-zest-{}.flp", std::process::id()));
+        let mut a = App::new(None);
+        a.plugins.available = crate::plugins::builtin();
+        a.state.project = crate::app::test_project();
+        let row = 0;
+        a.state.project.channels[row].kind = os_model::ChannelKind::Plugin;
+        a.state.project.channels[row].plugin = Some("Zest".into());
+        a.plugins.create_with(row, a.plugins.index_of("Zest").unwrap(), None).unwrap();
+        let p = a.plugins.param_infos(row).into_iter().find(|p| !p.read_only && !p.bypass && p.max > p.min).unwrap();
+        let n = if (p.default - 0.3).abs() > 0.1 { 0.3 } else { 0.8 };
+        assert!(a.plugins.set_param_named(row, &p.name, p.min + n * (p.max - p.min)));
+        a.plugins.hosted[&row].plugin.lock().unwrap().idle();
+        let v = a.plugins.param_value(row, p.id).unwrap();
+        a.save_to(path.clone());
+        assert!(a.state.message.as_deref().is_some_and(|m| m.starts_with("Saved") && !m.contains("not stored")), "{:?}", a.state.message);
+
+        let mut b = App::new(None);
+        b.plugins.available = crate::plugins::builtin();
+        b.open(path.clone());
+        b.sync_wrapped();
+        let _ = std::fs::remove_file(&path);
+        assert!(b.plugins.descriptor(row).is_some_and(|d| d.name == "Zest" && is_builtin(&d)), "Zest hosted, built in");
+        assert_eq!(b.plugins.param_value(row, p.id), Some(v), "Zest kept its setting");
+    }
+
+    /// Zest is among the built-in plugins.
+    #[test]
+    fn zest_is_built_in() {
+        assert!(crate::plugins::builtin().into_iter().any(|a| a.desc.name == "Zest"));
     }
 }

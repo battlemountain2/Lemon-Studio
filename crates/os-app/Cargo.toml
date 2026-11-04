@@ -31,6 +31,7 @@ lemon-3x-osc = { path = "../../plugins/lemon-3x-osc", features = ["linked"] }
 lemon-ray = { path = "../../plugins/lemon-ray", features = ["linked"] }
 lemon-wavetable = { path = "../../plugins/lemon-wavetable", features = ["linked"] }
 citrus = { path = "../../plugins/citrus", features = ["linked"] }
+zest-plugin = { path = "../../plugins/zest/crates/zest-plugin", features = ["linked"] }
 lemon-drum-sampler = { path = "../../plugins/lemon-drum-sampler", features = ["linked"] }
 lemon-limiter = { path = "../../plugins/lemon-limiter", features = ["linked"] }
 lemon-reverb = { path = "../../plugins/lemon-reverb", features = ["linked"] }
