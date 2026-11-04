@@ -15,8 +15,8 @@ use crate::app::{Action, Live, Scroll, State, Ui, Win};
 use crate::icons::{self, Icon};
 use crate::piano::{self, Geom, Lane, Overlay, Tool};
 
-/// Default grid row pitch: 17 px of fill plus a 1 px separator (§3); the vertical zoom changes it (§3a).
-pub const ROW: f32 = 18.0;
+/// Default grid row pitch: 21 px of fill plus a 1 px separator (§3); the vertical zoom changes it (§3a).
+pub const ROW: f32 = 22.0;
 /// Highest key shown (B10); the lowest is 0 (C0) (§3).
 pub const TOP_KEY: i32 = 131;
 
@@ -112,11 +112,7 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let orange = t.h(0xfb9531);
     ui.c.text(font, nx, r.y + 1.0, if hov { orange } else { t.text }, &name);
     let (ax, ay) = (nx + nw + 11.0, r.y + 12.0);
-    if hov {
-        os_ui::kit::triangle(ui.c, ax, ay, 4.0, os_ui::kit::Dir::Down, orange);
-    } else {
-        os_ui::kit::triangle(ui.c, ax, ay, 4.0, os_ui::kit::Dir::Right, t.text_dim);
-    }
+    os_ui::kit::triangle(ui.c, ax, ay, 4.0, os_ui::kit::Dir::Down, if hov { orange } else { t.text_dim });
     ui.c.pop_clip();
     let shift = if floating { -4.0 } else { 0.0 };
     toolbar(ui, s, r, shift);
@@ -147,9 +143,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
     let ink = green.shade(-0.3);
     ui.c.polyline(&[(tab.right() - 15.0, tab.y + 16.0), (tab.right() - 10.0, tab.y + 16.0), (tab.right() - 7.0, tab.y + 7.0), (tab.right() - 3.0, tab.y + 7.0)], 1.6, ink);
     ui.c.fill_polygon(&[(tab.right() - 4.0, tab.bottom() - 18.0), (tab.right() - 4.0, tab.bottom() - 5.0), (tab.right() - 17.0, tab.bottom() - 5.0)], ink);
-    // Note colours: not available yet, greyed out.
+    // Note colours: not available yet, off.
     ui.off(tab, "Note color");
-    ui.veil(tab, t.window_title);
 
     overview(ui, s, &l, &g, notes, ch);
     // A time-signature marker shows its signature (spec: ui/pattern-time-signature.md §2).
@@ -397,7 +392,11 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
         let b = Rect::new(ox + x - 9.0, r.y + 2.0, 18.0, 18.0);
         let Some(action) = action else {
             ui.off(b, hint);
-            icons::draw(ui.c, icon, b, t.text_faint);
+            if x == 222.0 {
+                os_ui::kit::triangle(ui.c, b.cx(), b.cy(), 4.0, os_ui::kit::Dir::Down, t.glyph);
+            } else {
+                icons::draw(ui.c, icon, b, t.text_faint);
+            }
             continue;
         };
         let on = action == Action::PianoTool(active);
@@ -427,7 +426,6 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
     ui.c.fill_rect(Rect::new(ox + 317.0, r.y + 4.0, 1.0, 15.0), sep_col);
     ui.c.fill_rect(Rect::new(ox + 344.0, r.y + 4.0, 1.0, 15.0), sep_col);
     ui.c.fill_rect(Rect::new(ox + 539.0, r.y + 4.0, 1.0, 15.0), sep_col);
-    icons::draw(ui.c, Icon::Speaker, Rect::new(ox + 547.0, r.y + 4.0, 15.0, 15.0), t.text);
 }
 
 fn overview(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, notes: &[Note], ch: Option<u16>) {
@@ -588,21 +586,37 @@ fn keyboard(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, lit: &[i32]) {
             } else {
                 is_c || is_root
             };
-            if show && row >= 5.0 {
+            if show && row >= 6.0 {
                 let y = g.y_of(key);
-                let font = if row >= 14.0 {
+                let font = if row >= 16.0 {
                     Font::new(11)
-                } else if row >= 10.0 {
+                } else if row >= 11.0 {
                     Font::new(10)
-                } else if row >= 7.0 {
+                } else if row >= 8.0 {
                     Font::new(9)
                 } else {
                     Font::new(8)
                 };
                 let lh = ui.c.line_height(font);
                 let y_text = (y + (row - lh) / 2.0).round();
-                let col = if is_c || is_root { t.key_label } else { t.key_label.with_alpha(190) };
-                ui.c.text_right(font, k.right() - 5.0, y_text, col, &key_name(key));
+                if is_c {
+                    // FL Studio style octave badge on C keys
+                    let badge_w = 46.0f32.min(k.w - 14.0);
+                    let badge_x = k.x + 8.0;
+                    let badge_h = (row - 4.0).max(6.0);
+                    let badge_y = y + 2.0;
+                    let badge_rect = Rect::new(badge_x, badge_y, badge_w, badge_h);
+                    let badge_bg = if lemon { t.window_body.shade(0.12) } else { ui.t.s(0x9ca3a9) };
+                    ui.c.fill_rrect(badge_rect, 2.0, badge_bg);
+                    let text_color = if lemon { t.text } else { ui.t.s(0x23272c) };
+                    let name = key_name(key);
+                    let tw = ui.c.text_width(font, &name);
+                    let tx = (badge_x + (badge_w - tw) / 2.0).round();
+                    ui.c.text(font, tx, y_text, text_color, &name);
+                } else {
+                    let col = if is_root { t.key_label } else { t.key_label.with_alpha(170) };
+                    ui.c.text_right(font, k.right() - 6.0, y_text, col, &key_name(key));
+                }
             }
         }
     }
