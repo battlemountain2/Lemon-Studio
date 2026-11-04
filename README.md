@@ -243,8 +243,9 @@ Windows (or detach, from their window menu). A few things differ from Windows fo
   are required by this scaling fix. For an optional app-only size override, launch with
   `WINIT_X11_SCALE_FACTOR=1.25 lemonstudio`. This does not change Hyprland's monitor scaling or guarantee that compositor
   upscaling will be sharp; the app's X11 scale and the compositor's output scale are separate settings.
-- **Keys** pressed while a plugin's editor has the keyboard focus do not play the typing keyboard yet, and a sample
-  dragged from Lemon Studio's browser onto a plugin window does not reach the plugin yet.
+- **Keys** a plugin's editor takes play the typing keyboard too, as on Windows, but only with the main window on X11;
+  the editor still gets them with TOOLS > Set keyboard focus of all plugins to ▸ Disabled. A sample dragged from Lemon
+  Studio's browser onto a plugin window does not reach the plugin yet.
 - **Lemon Sampler** cannot copy or paste audio through the clipboard yet.
 - **Settings, themes and presets** live in `$XDG_CONFIG_HOME/Lemon Studio` (usually `~/.config/Lemon Studio`).
   `OPENSTUDIO_USER_DIR` overrides the folder.
