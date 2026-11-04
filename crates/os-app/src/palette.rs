@@ -768,7 +768,7 @@ pub fn filter_items<'a>(items: &'a [PaletteItem], query: &str) -> Vec<ScoredItem
 
 /// Executes the given item and closes the command palette.
 pub fn execute(app: &mut App, item: &PaletteItem) {
-    app.state.palette.open = false;
+    app.state.cmd_palette.open = false;
     match &item.action {
         PaletteAction::DawAction(act) => {
             app.act(act.clone());
@@ -919,61 +919,61 @@ pub fn execute(app: &mut App, item: &PaletteItem) {
 pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
     use winit::keyboard::{Key, NamedKey};
 
-    if !app.state.palette.open {
+    if !app.state.cmd_palette.open {
         return false;
     }
 
     // Toggle closed on Ctrl+K
     if let Key::Character(c) = key && ctrl && !alt && c.eq_ignore_ascii_case("k") {
-        app.state.palette.open = false;
+        app.state.cmd_palette.open = false;
         app.invalidate();
         return true;
     }
 
     let all_items = items(&app.state);
-    let filtered = filter_items(&all_items, &app.state.palette.query);
+    let filtered = filter_items(&all_items, &app.state.cmd_palette.query);
     let count = filtered.len();
 
     match key {
         Key::Named(NamedKey::Escape) => {
-            app.state.palette.open = false;
+            app.state.cmd_palette.open = false;
         }
         Key::Named(NamedKey::ArrowDown) => {
             if count > 0 {
-                app.state.palette.selected = (app.state.palette.selected + 1).min(count - 1);
-                update_scroll(&mut app.state.palette, count);
+                app.state.cmd_palette.selected = (app.state.cmd_palette.selected + 1).min(count - 1);
+                update_scroll(&mut app.state.cmd_palette, count);
             }
         }
         Key::Named(NamedKey::ArrowUp) => {
             if count > 0 {
-                app.state.palette.selected = app.state.palette.selected.saturating_sub(1);
-                update_scroll(&mut app.state.palette, count);
+                app.state.cmd_palette.selected = app.state.cmd_palette.selected.saturating_sub(1);
+                update_scroll(&mut app.state.cmd_palette, count);
             }
         }
         Key::Named(NamedKey::PageDown) => {
             if count > 0 {
-                app.state.palette.selected = (app.state.palette.selected + PAGE_SIZE).min(count - 1);
-                update_scroll(&mut app.state.palette, count);
+                app.state.cmd_palette.selected = (app.state.cmd_palette.selected + PAGE_SIZE).min(count - 1);
+                update_scroll(&mut app.state.cmd_palette, count);
             }
         }
         Key::Named(NamedKey::PageUp) => {
             if count > 0 {
-                app.state.palette.selected = app.state.palette.selected.saturating_sub(PAGE_SIZE);
-                update_scroll(&mut app.state.palette, count);
+                app.state.cmd_palette.selected = app.state.cmd_palette.selected.saturating_sub(PAGE_SIZE);
+                update_scroll(&mut app.state.cmd_palette, count);
             }
         }
         Key::Named(NamedKey::Home) => {
-            app.state.palette.selected = 0;
-            app.state.palette.scroll = 0;
+            app.state.cmd_palette.selected = 0;
+            app.state.cmd_palette.scroll = 0;
         }
         Key::Named(NamedKey::End) => {
             if count > 0 {
-                app.state.palette.selected = count - 1;
-                update_scroll(&mut app.state.palette, count);
+                app.state.cmd_palette.selected = count - 1;
+                update_scroll(&mut app.state.cmd_palette, count);
             }
         }
         Key::Named(NamedKey::Enter) => {
-            if let Some(target) = filtered.get(app.state.palette.selected) {
+            if let Some(target) = filtered.get(app.state.cmd_palette.selected) {
                 let item = target.item.clone();
                 execute(app, &item);
                 return true;
@@ -982,39 +982,39 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Named(NamedKey::Backspace | NamedKey::Delete) => {
             if ctrl {
                 // Delete previous word on Ctrl+Backspace
-                let trimmed = app.state.palette.query.trim_end();
+                let trimmed = app.state.cmd_palette.query.trim_end();
                 if let Some(idx) = trimmed.rfind(|c: char| c.is_whitespace() || c == ':') {
-                    app.state.palette.query.truncate(idx);
+                    app.state.cmd_palette.query.truncate(idx);
                 } else {
-                    app.state.palette.query.clear();
+                    app.state.cmd_palette.query.clear();
                 }
             } else {
-                app.state.palette.query.pop();
+                app.state.cmd_palette.query.pop();
             }
-            app.state.palette.selected = 0;
-            app.state.palette.scroll = 0;
+            app.state.cmd_palette.selected = 0;
+            app.state.cmd_palette.scroll = 0;
         }
         Key::Named(NamedKey::Space) if !alt => {
-            if app.state.palette.query.len() < 128 {
-                app.state.palette.query.push(' ');
-                app.state.palette.selected = 0;
-                app.state.palette.scroll = 0;
+            if app.state.cmd_palette.query.len() < 128 {
+                app.state.cmd_palette.query.push(' ');
+                app.state.cmd_palette.selected = 0;
+                app.state.cmd_palette.scroll = 0;
             }
         }
         Key::Character(text) if !alt => {
             // Allow typing even if Ctrl was momentarily held, unless it's a reserved shortcut
             if ctrl && (text.eq_ignore_ascii_case("k") || text.eq_ignore_ascii_case("u") || text.eq_ignore_ascii_case("a")) {
                 if text.eq_ignore_ascii_case("u") || text.eq_ignore_ascii_case("a") {
-                    app.state.palette.query.clear();
-                    app.state.palette.selected = 0;
-                    app.state.palette.scroll = 0;
+                    app.state.cmd_palette.query.clear();
+                    app.state.cmd_palette.selected = 0;
+                    app.state.cmd_palette.scroll = 0;
                 }
             } else {
                 let clean: String = text.chars().filter(|c| !c.is_control()).collect();
-                if app.state.palette.query.len() + clean.len() <= 128 {
-                    app.state.palette.query.push_str(&clean);
-                    app.state.palette.selected = 0;
-                    app.state.palette.scroll = 0;
+                if app.state.cmd_palette.query.len() + clean.len() <= 128 {
+                    app.state.cmd_palette.query.push_str(&clean);
+                    app.state.cmd_palette.selected = 0;
+                    app.state.cmd_palette.scroll = 0;
                 }
             }
         }

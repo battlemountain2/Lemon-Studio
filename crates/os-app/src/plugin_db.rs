@@ -45,7 +45,6 @@ pub enum MenuView {
     Categories,
     Simple,
     Vendor,
-    Favorites,
 }
 
 /// A search folder the user added (§2).

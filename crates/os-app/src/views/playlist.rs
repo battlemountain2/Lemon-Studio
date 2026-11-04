@@ -1382,12 +1382,27 @@ fn header(ui: &mut Ui, s: &State, g: &PGeom, row: u16, x: f32, w: f32) {
     let short = g.rows.row_h < pl::ROW_H - 8.0;
     let led = Rect::new(hr.right() - 19.0, (h - gap - 15.0).max(1.0) + hr.y, 14.0, 14.0);
     ui.hit(led, Action::PlLed(row), "Mute track (right-click / Ctrl+click: solo)");
-    let text = if colored.is_some() { ui.t.tx(0xdce8f0) } else { t.text_faint };
+    // An audio or instrument track (§6c): a light disc with "A" / "I" before its name, which is drawn bright.
+    let link = crate::track_links::link(s, row);
+    let badge = match link.kind {
+        os_model::TrackLink::AUDIO => Some(("A", "Audio track: its audio clips play through its mixer track (Track mode in the menu)")),
+        os_model::TrackLink::INSTRUMENT => Some(("I", "Instrument track: linked to a channel (Track mode in the menu)")),
+        _ => None,
+    };
+    let text = if colored.is_some() || badge.is_some() { ui.t.tx(0xdce8f0) } else { t.text_faint };
     let text = if on { text } else { text.shade(-0.35) };
     let editing = matches!(s.playlist.edit.as_ref().map(|e| e.target), Some(pl::EditTarget::TrackName(r)) if r == row);
+    let mut name_x = hr.x + 2.0;
+    if let Some((letter, hint)) = badge {
+        let b = Rect::new(hr.x + 3.0, hr.y + 4.0, 11.0, 11.0);
+        ui.c.fill_circle(b.cx(), b.cy(), 5.5, text);
+        ui.c.text_center(Font::new(10), b, base.shade(-0.25), letter);
+        ui.hit(b, Action::PlHeader(row), hint);
+        name_x += 14.0;
+    }
     if !editing {
-        let name_w = if short { hr.w - 26.0 } else { hr.w - 4.0 };
-        ui.c.text_clip(Font::new(16), hr.x + 2.0, hr.y + 1.0, name_w, text, &pl::track_name(s, row));
+        let name_w = if short { hr.w - 26.0 } else { hr.w - 4.0 } - (name_x - hr.x - 2.0);
+        ui.c.text_clip(Font::new(16), name_x, hr.y + 1.0, name_w, text, &pl::track_name(s, row));
     }
     if !short {
         ui.c.text(Font::new(14), hr.x + 14.0, led.y - 6.0, text.shade(-0.2), "...");
@@ -1449,25 +1464,12 @@ fn tool_face(ui: &mut Ui, b: Rect, on: bool, hov: bool) -> Color {
 pub fn paint_overlays(ui: &mut Ui, s: &State) {
     if let Some(p) = &s.playlist.popup {
         // At the Pop-ups scaling (spec: ui/ui-scaling.md §1).
-        let scale = if crate::plugin_menu::active(s).is_some() {
-            crate::plugin_menu::scale(s)
-        } else {
-            super::popup_scale(ui.c.scale)
-        };
-        ui.scaled(scale, |ui, k| {
+        ui.scaled(super::popup_scale(ui.c.scale), |ui, k| {
             let (w, h) = ui.c.size();
-            if crate::plugin_menu::searchable(&p.items) {
-                crate::plugin_menu::paint(ui, s, &p.items, (p.x / k, p.y / k), (w, h));
-                return;
-            }
             let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, false, p.scroll[0]);
             if let Some(i) = p.sub {
                 if let (Some(item), Some(rr)) = (p.items.get(i), rows.get(i)) {
-                    if crate::plugin_menu::searchable(&item.children) {
-                        crate::plugin_menu::paint(ui, s, &item.children, (rr.right(), rr.y - 2.0), (w, h));
-                    } else {
-                        popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true, p.scroll[1]);
-                    }
+                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, true, p.scroll[1]);
                 }
             }
         });

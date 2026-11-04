@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::guard::{self, Module};
-use crate::{Attention, Descriptor, HostedEffect, Instrument, Menu, Meter, ParamEvent, ParamInfo, Plugin, SharedPlugin};
+use crate::{Attention, Descriptor, HostedEffect, Instrument, Menu, Meter, NoteOut, ParamEvent, ParamInfo, Plugin, SharedPlugin};
 use os_engine::{ChannelLevels, ChannelVoicing, TransportInfo};
 
 /// A plugin instance of any format, called through the crash guard. Once its code crashed (this instance, or another
@@ -84,11 +84,23 @@ impl<P: Plugin> Instrument for Guarded<P> {
     fn choke(&mut self, offset: u32, key: u8) {
         self.run((), |p| p.choke(offset, key))
     }
-    fn voice_start(&mut self, offset: u32, key: u8, velocity: f32, start: f32, levels: os_engine::NoteLevels, voice: u32) {
-        self.run((), |p| p.voice_start(offset, key, velocity, start, levels, voice))
+    fn voice_start(
+        &mut self,
+        offset: u32,
+        key: u8,
+        velocity: f32,
+        start: f32,
+        end: f32,
+        levels: os_engine::NoteLevels,
+        voice: u32,
+    ) {
+        self.run((), |p| p.voice_start(offset, key, velocity, start, end, levels, voice))
     }
     fn voice_gains(&self) -> bool {
         self.look(false, |p| p.voice_gains())
+    }
+    fn voice_ends(&self) -> bool {
+        self.look(false, |p| p.voice_ends())
     }
     fn voice_gain(&mut self, offset: u32, voice: u32, gain: f32) {
         self.run((), |p| p.voice_gain(offset, voice, gain))
@@ -249,6 +261,12 @@ impl<P: Plugin> Plugin for Guarded<P> {
     fn use_voice_gains(&mut self) -> bool {
         self.run(false, |p| p.use_voice_gains())
     }
+    fn use_end_param(&mut self, name: &str) -> bool {
+        self.run(false, |p| p.use_end_param(name))
+    }
+    fn use_channel_levels(&mut self) -> bool {
+        self.run(false, |p| p.use_channel_levels())
+    }
     fn set_offline(&mut self, offline: bool) {
         self.run((), |p| p.set_offline(offline))
     }
@@ -272,6 +290,15 @@ impl<P: Plugin> Plugin for Guarded<P> {
     }
     fn take_automation_requests(&mut self) -> Vec<u32> {
         self.run(Vec::new(), |p| p.take_automation_requests())
+    }
+    fn capture_notes(&mut self, on: bool) {
+        self.run((), |p| p.capture_notes(on))
+    }
+    fn take_notes_out(&mut self) -> Vec<NoteOut> {
+        self.run(Vec::new(), |p| p.take_notes_out())
+    }
+    fn puts_out_notes(&self) -> bool {
+        self.look(false, |p| p.puts_out_notes())
     }
     fn take_menu(&mut self) -> Option<Menu> {
         self.run(None, |p| p.take_menu())

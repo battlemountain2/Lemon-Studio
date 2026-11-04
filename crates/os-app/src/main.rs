@@ -25,10 +25,13 @@ mod backup;
 #[cfg(test)]
 mod audio_bench;
 #[cfg(test)]
+mod checks;
+#[cfg(test)]
 mod open_bench;
 mod browser;
 mod browser_assets;
 mod browser_index;
+mod burn_midi;
 mod cable;
 mod capture;
 #[cfg(target_os = "linux")]
@@ -78,6 +81,7 @@ mod midi_file;
 mod midi_in;
 mod midi_out;
 mod lemon_midi_out;
+mod track_links;
 mod midi_play;
 mod container;
 mod mixer;
@@ -105,6 +109,7 @@ mod playlist;
 mod plugin_db;
 mod plugin_manager;
 mod plugin_menu;
+mod plugin_palette;
 mod plugin_popup;
 mod plugin_rebuild;
 mod plugin_scan;
@@ -1138,11 +1143,16 @@ impl ApplicationHandler for Shell {
                         event
                     };
                     self.app.repeat = event.repeat;
+                    self.app.code = match event.physical_key {
+                        winit::keyboard::PhysicalKey::Code(code) => Some(code),
+                        _ => None,
+                    };
                     // The key acts in the window that has the keyboard (the one it came to), and a popup or box it
                     // opens shows there.
                     let (key, c, alt) = (&event.logical_key, ctrl(self.mods), self.mods.alt_key());
                     self.app.key_on(self.key_on, key, c, alt);
                     self.app.repeat = false;
+                    self.app.code = None;
                     window.request_redraw();
                 }
             }
@@ -1434,7 +1444,7 @@ fn screenshot(args: &[String]) {
             "--browser-tab" => browser_tab = it.next().and_then(|v| v.parse().ok()),
             // The browser's width incl. its splitter, as dragged (spec: ui/browser.md §9).
             "--browser-width" => browser_w = it.next().and_then(|v| v.parse().ok()),
-            // "all" / "gen" / "fx": that plugin menu at the window's centre (spec: ui/plugin-menu.md §5).
+            // "all" / "gen" / "fx": the plugin palette of that list near the window's top centre (spec: ui/plugin-menu.md §5, §6).
             "--plugin-menu" => {
                 plugin_menu = Some(match it.next().map(String::as_str) {
                     Some("gen") => plugin_menu::Target::Gen(None),
@@ -1624,7 +1634,7 @@ fn screenshot(args: &[String]) {
     }
     if let Some(target) = plugin_menu {
         let (w, h) = app.state.screen;
-        app.open_plugin_menu(target, ((w / 2.0).round(), (h / 3.0).round()));
+        app.open_plugin_palette(target, ((w / 2.0 - crate::plugin_palette::W / 2.0).round(), (h / 4.0).round()), None);
     }
     if let Some((p, piano)) = import_midi {
         // Alt: the MIDI import window's "Show every time" row as it comes.
@@ -1686,7 +1696,7 @@ fn screenshot(args: &[String]) {
         // Set without keeping them (`cpu_panel.txt` stays as the user left it).
         app.state.cpu.fps_view = v == "fps";
         app.state.cpu.misc = v == "misc";
-        app.state.cpu.update(Instant::now(), None, 0, 0);
+        app.state.cpu.update(Instant::now(), None, 0, 0, 0);
     }
     // No "Opened <path>" in the title: the frame shows the project, not where it lives on disk.
     app.state.message = None;

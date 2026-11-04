@@ -148,7 +148,7 @@ impl App {
     }
 
     /// The plugin manager's star on plugin `uid` (spec §10: a favorite plugin; ui/plugin-manager.md §2), toggled.
-    fn star_plugin(&mut self, uid: &str, name: &str) -> String {
+    pub(crate) fn star_plugin(&mut self, uid: &str, name: &str) -> String {
         self.state.plugdb.prefs.toggle_favorite(uid);
         self.prefs_changed();
         if self.state.plugdb.prefs.is_favorite(uid) {
@@ -302,6 +302,15 @@ impl App {
         let shift = self.shift;
         let focus = self.state.browser_search_focus;
         let over = self.over_browser() || focus;
+        if let Key::Named(k @ (NamedKey::ArrowUp | NamedKey::ArrowDown | NamedKey::ArrowLeft | NamedKey::ArrowRight)) = key
+            && over
+            && !ctrl
+            && !alt
+            && !shift
+        {
+            self.browser_arrow(*k);
+            return true;
+        }
         let cmd = match key {
             Key::Named(NamedKey::F2) if !self.state.browser_search.is_empty() => Some(BCmd::Find(-1)),
             Key::Named(NamedKey::F3) if !self.state.browser_search.is_empty() => Some(BCmd::Find(1)),
@@ -434,6 +443,70 @@ impl App {
             }
         }
         false
+    }
+
+    /// The arrows over the browser: Up / Down select the row above / below; Right opens a closed node, steps into an
+    /// open one and plays a sample again; Left closes an open node, else selects the row's parent. With nothing selected
+    /// Up selects the last row, the others the first. A sample the selection lands on plays (§7), as a click does; other
+    /// rows are only selected, not acted on (a history step is not gone to, a pattern not made current).
+    fn browser_arrow(&mut self, k: winit::keyboard::NamedKey) {
+        use winit::keyboard::NamedKey::*;
+        let s = &mut self.state;
+        let rows = view::rows(s);
+        if rows.is_empty() {
+            return;
+        }
+        // While searching every node shows open and stays so.
+        let searching = !s.browser_search.is_empty();
+        let mut play = None;
+        let to = match rows.iter().position(|r| Some(&r.key) == s.browser_sel.as_ref()) {
+            None => Some(if k == ArrowUp { rows.len() - 1 } else { 0 }),
+            Some(i) => {
+                let row = &rows[i];
+                match k {
+                    ArrowUp => i.checked_sub(1),
+                    ArrowDown => Some(i + 1).filter(|&j| j < rows.len()),
+                    ArrowRight => match row.open {
+                        Some(false) if !searching => {
+                            s.browser_open.insert(row.key.clone());
+                            None
+                        }
+                        Some(_) => Some(i + 1).filter(|&j| rows.get(j).is_some_and(|r| r.depth > row.depth)),
+                        None => {
+                            if let Item::Sample(path) = &row.item {
+                                play = Some(path.clone());
+                            }
+                            None
+                        }
+                    },
+                    ArrowLeft => match row.open {
+                        Some(true) if !searching => {
+                            s.browser_open.remove(&row.key);
+                            None
+                        }
+                        _ => (0..i).rev().find(|&j| rows[j].depth < row.depth),
+                    },
+                    _ => None,
+                }
+            }
+        };
+        if let Some(j) = to {
+            select(s, &rows[j].key);
+            if let Item::Sample(path) = &rows[j].item {
+                play = Some(path.clone());
+            }
+        }
+        reveal(s);
+        if let Some(path) = play {
+            self.preview_sample(&path);
+        }
+        self.invalidate();
+    }
+
+    /// Whether a held key repeats in the browser: Up and Down go on walking the rows (`browser_arrow`).
+    pub(crate) fn browser_repeats(&self, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        matches!(key, Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown)) && !ctrl && !alt && !self.shift && (self.over_browser() || self.state.browser_search_focus)
     }
 
     /// A press on the browser's splitter: drags it; a double click gives the browser its default width (spec §9).
@@ -597,6 +670,29 @@ impl App {
                 if let Some((track, tick)) = spot {
                     let msg = self.params_drop(key, index, track, tick);
                     self.state.message = msg;
+                }
+            }
+            // The container (Lemon Studio's Patcher): Shift+dropped on a slot or channel it wraps the plugin there, as
+            // the menus' Wrap in container; dropped without Shift it goes there as an effect or a generator would
+            // (spec: plugins/patcher/README.md §3.3 "Shift+drop").
+            Item::Container => {
+                let shift = self.shift;
+                let msg = if win == Some(Win::Mixer) {
+                    let slot = match self.top_hit(x, y).map(|h| &h.action) {
+                        Some(Action::Mix(crate::mixer::MHit::SlotName(k) | crate::mixer::MHit::SlotArrow(k))) => Some(*k),
+                        _ => None,
+                    };
+                    self.drop_container_on_slot(slot, shift)
+                } else if win == Some(Win::ChannelRack) {
+                    let row = crate::views::rack::row_at(&self.state, y);
+                    self.drop_container_on_rack(row, shift)
+                } else if spot.is_some() {
+                    self.drop_container_on_rack(None, false)
+                } else {
+                    None
+                };
+                if let Some(m) = msg {
+                    self.state.message = Some(m);
                 }
             }
             Item::None | Item::File(_) | Item::History(_) | Item::Preset(_) => {}
@@ -1016,7 +1112,7 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
             let it = PItem::new("Load into selected channel", Cmd::Preset(crate::presets::PCmd::Load(key, p.into())));
             items.push(if s.hosted_rows.contains(&key) { it } else { it.off() });
         }
-        Item::None | Item::File(_) | Item::Param(..) => {}
+        Item::None | Item::File(_) | Item::Param(..) | Item::Container => {}
     }
     if let Some(path) = &row.path {
         sep(&mut items);
@@ -1372,16 +1468,16 @@ mod tests {
         let at = |depth: u8| rows.iter().filter(|r| r.depth == depth).map(|r| r.label.as_str()).collect::<Vec<_>>();
         assert_eq!(at(1), ["Generators", "Effects", view::INSTALLED]);
         assert!(at(2).starts_with(&["Sampler", "Synth"]), "{:?}", at(2));
+        // The container after the categories (spec: plugins/patcher/README.md §3.3 "Shift+drop").
+        assert!(rows.iter().any(|r| r.depth == 2 && r.item == view::Item::Container && r.label == crate::container::CONTAINER));
         assert!(at(3).contains(&view::BUILT_IN));
         app.state.browser_open.insert(format!("{root}/{}/Generators/{}", view::INSTALLED, view::BUILT_IN));
         let built_in: Vec<String> = view::rows(&app.state).into_iter().filter(|r| r.depth == 4).map(|r| r.label).collect();
         assert!(built_in.iter().any(|l| l == crate::plugins::LEMON_SAMPLER), "{built_in:?}");
-        // The mixer's empty-slot menu: Plugin database works and opens the Effects section.
-        let menu = crate::mixer::effect_menu(&app.state, 0, 0.0, 0.0);
-        let first = &menu.items[0];
-        assert!(first.label == "Plugin library" && first.enabled);
+        // An empty mixer slot's plugin palette: its Plugin library button opens the Effects section.
         app.state.browser_tab = 0;
-        app.browser_cmd(BCmd::Jump(Jump::DbEffects));
+        app.open_plugin_palette(crate::plugin_menu::Target::Fx(Some(0)), (0.0, 0.0), None);
+        app.palette_act(crate::plugin_palette::PalAct::Library);
         let fx = format!("{root}/Effects");
         assert!(app.state.browser_tab == view::PLUGIN_TAB && app.state.browser_open.contains(&fx) && app.state.browser_sel.as_ref() == Some(&fx));
         // The options menu: Expand folders and the indexing options work; tags stay greyed out.

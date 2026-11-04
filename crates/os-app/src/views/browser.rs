@@ -115,6 +115,9 @@ pub enum Item {
     /// A plugin preset file (any `presets::IMPORT_EXTS` type) or factory preset path: dropped, it loads (spec:
     /// plugins/presets.md "Drag and drop").
     Preset(String),
+    /// Lemon Studio's container (its Patcher, `crate::container`): dropped on a slot or channel with Shift, it wraps
+    /// the plugin there; without, it puts an empty container there (spec: plugins/patcher/README.md §3.3 "Shift+drop").
+    Container,
 }
 
 #[derive(Debug, Clone)]
@@ -346,7 +349,7 @@ pub fn list_dir(s: &State, dir: &Path) -> Rc<Vec<Entry>> {
 pub fn file_icon(name: &str) -> Icon {
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
     match ext.as_str() {
-        "wav" | "mp3" | "ogg" | "flac" | "aif" | "aiff" => Icon::FileAudio,
+        "wav" | "mp3" | "ogg" | "flac" | "aif" | "aiff" | "m4a" => Icon::FileAudio,
         "mid" | "midi" => Icon::PianoRoll,
         "flp" | "lemon" => Icon::FileProject,
         "txt" | "url" | "pdf" | "nfo" | "rtf" | "htm" | "html" | "md" => Icon::FileText,
@@ -596,6 +599,11 @@ fn plugin_rows(s: &State, root: &str, cat: u8, out: &mut Vec<Row>) {
                 }
             }
         }
+        // Lemon Studio's own: the container after the categories, under its own name (owner request #8 on the name is
+        // open), in both sections, as it holds instruments on a channel and effects in a slot. Dragged with Shift it
+        // wraps the plugin it is dropped on (`App::drop_container_on_slot`, `App::drop_container_on_rack`).
+        let label = crate::container::CONTAINER.to_string();
+        out.push(Row { key: format!("{parent}/{label}"), depth: 2, label, icon, cat, open: None, bright: false, item: Item::Container, path: None });
     }
     if !section(s, root, INSTALLED, Icon::Plug, cat, out) {
         return;

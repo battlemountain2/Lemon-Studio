@@ -57,7 +57,13 @@ pub fn is_favorite(s: &State, row: &Row) -> bool {
 
 pub fn toggle(app: &mut App, row: Row) {
     if let Some((effect, index)) = plugin_target(&row) {
-        crate::plugin_menu::click(app, crate::plugin_menu::Hit::ToggleFavorite(effect, index));
+        let list = if effect { &app.state.plugdb.lists.fx } else { &app.state.plugdb.lists.gens };
+        if let Some(e) = list.iter().find(|e| e.index == index) {
+            let (uid, name) = (e.uid.clone(), e.label.clone());
+            let msg = app.star_plugin(&uid, &name);
+            app.state.message = Some(msg);
+            app.invalidate();
+        }
     } else if let Some((path, kind)) = file_target(&row) {
         if app.state.browser_favorites.remove(&path).is_none() {
             app.state.browser_favorites.insert(path, kind);

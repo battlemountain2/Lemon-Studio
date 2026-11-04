@@ -21,7 +21,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex};
 
 use nih_plug::prelude::*;
-use os_engine::{envelope, Sample};
+use os_engine::Sample;
+use os_plugkit::levels::Levels;
 
 use params::{DiskKey, FxKey, Live, SamplerParams};
 
@@ -188,6 +189,30 @@ thread_local! {
     /// window keeps painting.
     static DEFER_BUILDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
+/// Ticks per quarter note of the project when Lemon Studio hosts the plugin (0: another host). Lemon Studio hands its
+/// instruments one tick per `process` call (spec: audio/conventions.md "Tick"), and the voices then step on those calls
+/// (`dsp::Time::host_ticks`). **(OS)**
+static HOST_PPQ: AtomicU32 = AtomicU32::new(0);
+
+/// Lemon Studio plays a project of `ppq` ticks per quarter note, one tick per `process` call, through the instances of
+/// this process.
+pub fn set_host_ticks(ppq: u16) {
+    HOST_PPQ.store(u32::from(ppq), Ordering::Relaxed);
+}
+
+/// The song's timing for the voices from the transport: steps per beat from the time signature's denominator (16 /
+/// denominator), the song tick from the position in beats.
+fn time(t: &Transport) -> dsp::Time {
+    let host = HOST_PPQ.load(Ordering::Relaxed);
+    let ppq = if host > 0 { host as u16 } else { 96 };
+    let steps = match t.time_sig_denominator {
+        Some(d @ (1 | 2 | 4 | 8 | 16)) => 16 / d as u32,
+        _ => 4,
+    };
+    let song_tick = t.pos_beats().filter(|_| t.playing).map(|b| (b * f64::from(ppq) * f64::from(steps) / 4.0).round().max(0.0) as u64);
+    dsp::Time { tempo: t.tempo.unwrap_or(130.0), ppq, steps, song_tick, host_ticks: host > 0 }
+}
+
 /// Deferred builds queued or running, in every instance of the process.
 static PENDING_BUILDS: AtomicUsize = AtomicUsize::new(0);
 /// Deferred builds waiting for a thread, and how many threads take them.
@@ -584,38 +609,10 @@ impl Default for LemonSampler {
     }
 }
 
-/// An envelope target's LFO (spec §5.2): times from the envelope time law, speed `0.1·2^(8v)` Hz or tempo-synced.
-fn lfo(e: &params::EnvParams, tempo: f64) -> dsp::Lfo {
-    let n = |v: f32| envelope::knob_seconds(params::time_field(v));
-    let sp = f64::from(e.lfo_speed.live());
-    let hz = if e.lfo_tempo.live() {
-        16.0 * tempo / (60.0 * 2f64.powf(8.0 * (1.0 - sp)))
-    } else {
-        0.1 * 2f64.powf(8.0 * sp)
-    };
-    dsp::Lfo {
-        shape: e.lfo_shape.live().clamp(0, 2) as u8,
-        delay: n(e.lfo_delay.live()),
-        attack: n(e.lfo_att.live()),
-        amount: f64::from(e.lfo_amt.live()),
-        hz,
-        global: e.lfo_global.live(),
-    }
-}
-
-/// The per-block settings of the voices from the parameters.
+/// The per-block settings of the voices from the parameters. The envelopes and LFOs are the channel's records, which
+/// the voices step once per tick (spec: audio/envelopes-and-lfos.md).
 pub fn block(p: &SamplerParams, tempo: f64, bend: f64) -> dsp::Block {
-    let mut targets = [dsp::Target::default(); 5];
-    for (i, t) in targets.iter_mut().enumerate() {
-        let e = p.env(i);
-        // The Panning target has no envelope (spec §3).
-        let mut env = if i == dsp::PAN { None } else { e.envelope(128.0) };
-        if e.tempo.live() {
-            // Tempo-based times: the time law at 120 BPM, scaled by the host tempo (Lemon Studio choice).
-            env = env.map(|x| x.scaled(120.0 / tempo.max(1.0)));
-        }
-        *t = dsp::Target { env, amount: f64::from(e.amt.live()), lfo: lfo(e, tempo) };
-    }
+    let records = std::array::from_fn(|i| p.env(i).record(i));
     // Resample and the realtime methods stretch in the voices, the other methods in the processed sample; PITCH plays
     // no part in Resample (spec §5.6).
     let mode = p.ts_mode.live();
@@ -627,7 +624,7 @@ pub fn block(p: &SamplerParams, tempo: f64, bend: f64) -> dsp::Block {
         ts_ratio: if resample || realtime { params::mul_of(p.ts_mul.live()) } else { 1.0 },
         ts_time: if resample || realtime { p.ts_seconds(tempo) } else { None },
         realtime,
-        targets,
+        records,
         f_type: p.f_type.live().clamp(0, 7) as u8,
         f_cut: p.f_cut.live(),
         f_res: p.f_res.live(),
@@ -673,7 +670,7 @@ impl LemonSampler {
     }
 
     /// One note event (between the block's renders): `blk` follows a pitch bend.
-    fn event(&mut self, ev: NoteEvent<()>, blk: &mut dsp::Block, tempo: f64) {
+    fn event(&mut self, ev: NoteEvent<Levels>, blk: &mut dsp::Block, tempo: f64) {
         match ev {
             NoteEvent::NoteOn { note, velocity, voice_id, .. } => self.engine.note_on_id(note, velocity, voice_id, blk),
             NoteEvent::NoteOff { note, .. } => self.engine.note_off(note, blk),
@@ -685,6 +682,7 @@ impl LemonSampler {
             NoteEvent::PolyPan { voice_id, note, pan, .. } => self.engine.pan(voice_id, note, pan),
             NoteEvent::PolyModulation { voice_id, poly_modulation_id, normalized_offset, .. } => match poly_modulation_id {
                 params::START_OFFSET_POLY => self.engine.start_later(voice_id, normalized_offset, blk),
+                params::CLIP_END_POLY => self.engine.end_at(voice_id, normalized_offset, blk),
                 // The note's mod X / mod Y in knob units (the filter knobs' 0..1), added to the knobs for its voice.
                 params::MOD_X_POLY => self.engine.modulate(voice_id, Some(normalized_offset), None),
                 params::MOD_Y_POLY => self.engine.modulate(voice_id, None, Some(normalized_offset)),
@@ -696,6 +694,7 @@ impl LemonSampler {
                 *blk = block(&self.params, tempo, self.bend);
             }
             NoteEvent::MidiCC { cc: 120 | 123, .. } => self.engine.all_off(),
+            NoteEvent::MidiSysEx { message: Levels(volume, pan), .. } => self.engine.set_levels(volume, pan),
             _ => {}
         }
     }
@@ -727,7 +726,7 @@ impl Plugin for LemonSampler {
     const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
 
-    type SysExMessage = ();
+    type SysExMessage = Levels;
     type BackgroundTask = Task;
 
     fn params(&self) -> Arc<dyn Params> {
@@ -785,6 +784,7 @@ impl Plugin for LemonSampler {
         // An offline render or an export waits for frames from disk (spec: plugins/lemon-sampler.md "Keep on disk
         // (Lemon Studio)").
         self.engine.wait = self.offline || stream::exporting();
+        self.engine.begin(buffer.samples(), time(ctx.transport()));
         let tempo = self.shared.tempo();
         let mut blk = block(&self.params, tempo, self.bend);
         // Notes the editor plays itself.
@@ -863,7 +863,7 @@ mod tests {
         p
     }
 
-    fn note_on(id: i32) -> NoteEvent<()> {
+    fn note_on(id: i32) -> NoteEvent<Levels> {
         NoteEvent::NoteOn { timing: 0, voice_id: Some(id), channel: 0, note: 60, velocity: 100.0 / 128.0 }
     }
 
@@ -872,7 +872,7 @@ mod tests {
     }
 
     /// Plays note `id` with `events` sent after its note on; the level of each side over the last half of 9600 frames.
-    fn level(hz: f64, events: &[NoteEvent<()>]) -> (f32, f32) {
+    fn level(hz: f64, events: &[NoteEvent<Levels>]) -> (f32, f32) {
         let mut p = plugin(hz);
         let mut blk = block(&p.params, 130.0, 0.0);
         p.event(note_on(3), &mut blk, 130.0);
@@ -934,12 +934,41 @@ mod tests {
         p.event(NoteEvent::PolyPan { timing: 0, voice_id: Some(3), channel: 0, note: 60, pan: 1.0 }, &mut blk, 130.0);
         let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
         p.engine.render(&mut l, &mut r, &blk);
-        // The pan ramps over one control span.
-        assert!(rms(&l[64..]) < 1e-6 && rms(&r[64..]) > 0.45, "{} {}", rms(&l[64..]), rms(&r[64..]));
+        // The gains move at most `single(44100 / rate) * 0.001` per sample (spec: audio/sampler.md "Gains"): the left
+        // side's 1 takes some 1090 samples at 48 kHz to reach 0.
+        assert!(rms(&l[..200]) > 0.25, "{}", rms(&l[..200]));
+        assert!(rms(&l[1200..]) < 1e-6 && rms(&r[1200..]) > 0.45, "{} {}", rms(&l[1200..]), rms(&r[1200..]));
         p.event(NoteEvent::PolyModulation { timing: 0, voice_id: 3, poly_modulation_id: params::MOD_X_POLY, normalized_offset: -0.9 }, &mut blk, 130.0);
         let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
         p.engine.render(&mut l, &mut r, &blk);
         assert!(rms(&r[2400..]) < 0.05, "{}", rms(&r[2400..]));
+    }
+
+    // spec: plugins/host-link.md "Channel levels": the host's message, as nih-plug reads it off the note port, sets the
+    // channel's volume and pan the voices take; another message is not one.
+    #[test]
+    fn the_host_link_message_sets_the_channel_levels() {
+        let bytes = os_hostlink::levels::encode(0.5, -1.0);
+        let ev = NoteEvent::<Levels>::from_midi(0, &bytes).expect("a SysEx message");
+        assert_eq!(ev, NoteEvent::MidiSysEx { timing: 0, message: Levels(0.5, -1.0) });
+        assert!(NoteEvent::<Levels>::from_midi(0, &[0xF0, 0x7D, 0x01, 0xF7]).is_err());
+        let play = |levels: Option<NoteEvent<Levels>>| {
+            let mut p = plugin(1000.0);
+            let mut blk = block(&p.params, 130.0, 0.0);
+            if let Some(ev) = levels {
+                p.event(ev, &mut blk, 130.0);
+            }
+            p.event(note_on(3), &mut blk, 130.0);
+            let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
+            p.engine.render(&mut l, &mut r, &blk);
+            (rms(&l), rms(&r))
+        };
+        // Without the message the voice is at its note's volume when centred (the host splits after it); with it, the
+        // split of the final levels: hard left at 0.5 is 0.5 on the left.
+        let (l0, r0) = play(None);
+        let (l, r) = play(Some(ev));
+        assert!(r0 > 0.3 && r == 0.0, "panned hard left: {r}");
+        assert!((l - l0 * 0.5).abs() < 1e-4 * l0, "{l} {l0}");
     }
 
     /// A WAV file: `channels`, 16-bit, `frames` of silence, then an `smpl` chunk with one loop when given.

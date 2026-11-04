@@ -26,7 +26,7 @@ const BADGE_KEY_BG: Color = Color::rgb(0x22272e);
 const BADGE_KEY_TEXT: Color = Color::rgb(0xcbd5e1);
 
 pub fn paint(ui: &mut Ui, s: &State) {
-    if !s.palette.open {
+    if !s.cmd_palette.open {
         return;
     }
 
@@ -71,12 +71,12 @@ pub fn paint(ui: &mut Ui, s: &State) {
     let font_search = Font::new(15);
     let text_x = card_r.x + 46.0;
     let text_y = card_r.y + 16.0;
-    if s.palette.query.is_empty() {
+    if s.cmd_palette.query.is_empty() {
         ui.c.text(font_search, text_x, text_y, TEXT_DIM, "Type a command, plugin, window or track name...");
     } else {
-        ui.c.text(font_search, text_x, text_y, TEXT_WHITE, &s.palette.query);
+        ui.c.text(font_search, text_x, text_y, TEXT_WHITE, &s.cmd_palette.query);
         // Blinking / solid cursor bar
-        let tw = ui.c.text_width(font_search, &s.palette.query);
+        let tw = ui.c.text_width(font_search, &s.cmd_palette.query);
         let cur_r = Rect::new(text_x + tw + 2.0, card_r.y + 15.0, 2.0, 21.0);
         ui.c.fill_rect(cur_r, ACCENT_BLUE);
     }
@@ -90,7 +90,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
 
     // 4. Filtered Results List
     let all_items = palette::items(s);
-    let filtered = palette::filter_items(&all_items, &s.palette.query);
+    let filtered = palette::filter_items(&all_items, &s.cmd_palette.query);
     let count = filtered.len();
 
     let list_top = card_r.y + head_h + 1.0;
@@ -98,7 +98,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
     let list_r = Rect::new(card_r.x + 1.0, list_top, card_r.w - 2.0, list_h);
 
     if count == 0 {
-        let msg = format!("No matching commands for \"{}\"", s.palette.query);
+        let msg = format!("No matching commands for \"{}\"", s.cmd_palette.query);
         let font_empty = Font::new(13);
         let tw = ui.c.text_width(font_empty, &msg);
         let empty_x = (card_r.cx() - tw / 2.0).round();
@@ -106,12 +106,12 @@ pub fn paint(ui: &mut Ui, s: &State) {
         ui.c.text(font_empty, empty_x, empty_y, TEXT_DIM, &msg);
     } else {
         let row_h = 39.0;
-        let start = s.palette.scroll;
+        let start = s.cmd_palette.scroll;
         let end = (start + PAGE_SIZE).min(count);
 
         for (rel_i, item_ref) in filtered[start..end].iter().enumerate() {
             let abs_i = start + rel_i;
-            let is_sel = abs_i == s.palette.selected;
+            let is_sel = abs_i == s.cmd_palette.selected;
             let row_r = Rect::new(card_r.x + 8.0, list_top + 4.0 + rel_i as f32 * row_h, card_w - 16.0, row_h - 2.0);
 
             // Register hit first to capture hover state
