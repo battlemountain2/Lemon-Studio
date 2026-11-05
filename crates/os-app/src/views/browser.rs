@@ -968,9 +968,13 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect) {
         let hov = ui.hit(glass, Action::BrowserClear, "Clear the search");
         icons::draw(ui.c, Icon::Close, Rect::new(glass.x + 3.0, fy + 6.0, 15.0, 15.0), if hov { t.browser_search.shade(0.2) } else { t.browser_search });
     }
-    // Splitter: drags the browser's width (§9).
-    ui.c.fill_rect(Rect::new(bw, r.y, 6.0, r.h), t.splitter);
-    ui.c.fill_rect(Rect::new(bw + 6.0, r.y, 2.0, r.h), t.splitter_dark);
+    // Splitter: drags the browser's width (§9). Etched: a hairline down its middle, the backdrop showing either side.
+    if t.style.etched() {
+        ui.c.fill_rect(Rect::new(bw + 3.0, r.y, 1.0, r.h), t.toolbar_line);
+    } else {
+        ui.c.fill_rect(Rect::new(bw, r.y, 6.0, r.h), t.splitter);
+        ui.c.fill_rect(Rect::new(bw + 6.0, r.y, 2.0, r.h), t.splitter_dark);
+    }
     ui.hit(Rect::new(bw, r.y, SPLITTER, r.h), Action::BrowserSplitter, "Browser: drag to resize, double-click for the default width");
 }
 
