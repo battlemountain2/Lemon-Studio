@@ -3272,20 +3272,20 @@ pub fn handle_at(s: &State, g: &PGeom, i: usize, x: f32, y: f32) -> Option<Handl
     }
     if let Some((_, t)) = c.stored_fade_in().filter(|_| !managed(s, c, false)) {
         let (mx, my) = fade_mid(body, body.x, fx_in, t, false);
-        if fx_in - body.x > 10.0 && near(mx, my, 6.0) {
+        if fx_in - body.x > 10.0 && near(mx, my, 8.0) {
             return Some(Handle::TensionIn);
         }
     }
     if let Some((_, t)) = c.stored_fade_out().filter(|_| !managed(s, c, true)) {
         let (mx, my) = fade_mid(body, fx_out, body.right(), t, true);
-        if body.right() - fx_out > 10.0 && near(mx, my, 6.0) {
+        if body.right() - fx_out > 10.0 && near(mx, my, 8.0) {
             return Some(Handle::TensionOut);
         }
     }
-    if near(fx_in + 3.0, body.y + 3.0, 7.0) {
+    if (x >= fx_in - 4.0 && x <= fx_in + 14.0 && y >= body.y && y <= body.y + 16.0) || near(fx_in + 4.0, body.y + 4.0, 9.0) {
         return Some(Handle::FadeIn);
     }
-    if near(fx_out - 3.0, body.y + 3.0, 7.0) {
+    if (x >= fx_out - 14.0 && x <= fx_out + 4.0 && y >= body.y && y <= body.y + 16.0) || near(fx_out - 4.0, body.y + 4.0, 9.0) {
         return Some(Handle::FadeOut);
     }
     if (x - body.cx()).abs() <= 14.0 && (y - (body.bottom() - 2.0)).abs() <= 8.0 {

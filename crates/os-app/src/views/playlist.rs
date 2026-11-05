@@ -1177,7 +1177,23 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
                 (pl::snap(xa + (xb - xa) * u), pl::snap(bottom - os_model::fade_curve(x, f64::from(t)) * h))
             })
             .collect();
-        ui.c.polyline(&pts, 1.4, white.with_alpha(230));
+        // Soft shaded fade veil over the attenuated region
+        if xb > xa + 1.0 {
+            let shade_col = Color::rgb(0x000000).with_alpha(70);
+            if out {
+                let mut poly = vec![(xa as f32, body.y)];
+                poly.extend_from_slice(&pts);
+                poly.push((xb as f32, body.bottom()));
+                poly.push((xb as f32, body.y));
+                ui.c.fill_polygon(&poly, shade_col);
+            } else {
+                let mut poly = vec![(xa as f32, body.y), (xa as f32, body.bottom())];
+                poly.extend_from_slice(&pts);
+                poly.push((xb as f32, body.y));
+                ui.c.fill_polygon(&poly, shade_col);
+            }
+        }
+        ui.c.polyline(&pts, 1.5, white.with_alpha(235));
     };
     // This clip's crossfade with an earlier clip, and whether a later clip draws this clip's fade-out in its own.
     let xf = pl::crossfade(s, g, i);
@@ -1210,9 +1226,51 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
     }
     let _ = wave;
     let col = |h: pl::Handle| if lit(h) { white } else { white.with_alpha(215) };
-    let k = 6.0;
-    ui.c.fill_polygon(&[(fx_in, body.y), (fx_in + k, body.y), (fx_in, body.y + k)], col(pl::Handle::FadeIn));
-    ui.c.fill_polygon(&[(fx_out, body.y), (fx_out - k, body.y), (fx_out, body.y + k)], col(pl::Handle::FadeOut));
+
+    // Floating badge helper for hovered / active handles
+    let badge = |ui: &mut Ui, text: &str, ax: f32, ay: f32| {
+        let font = Font::new(12).bold();
+        let tw = ui.c.text_width(font, text);
+        let bw = tw + 12.0;
+        let bh = 18.0;
+        if body.w >= bw + 4.0 && body.h >= 24.0 {
+            let bx = (ax - bw / 2.0).clamp(body.x + 2.0, (body.right() - bw - 2.0).max(body.x + 2.0));
+            let by = ay.clamp(body.y + 2.0, (body.bottom() - bh - 2.0).max(body.y + 2.0));
+            let br = Rect::new(bx, by, bw, bh);
+            os_ui::kit::popup(ui.c, ui.t, br);
+            ui.c.stroke_rrect(br, 3.0, 1.0, ui.t.accent.with_alpha(190));
+            ui.c.text(font, bx + 6.0, by + 2.0, ui.t.text, text);
+        }
+    };
+
+    // Sleek FL Studio style fade tabs hanging down from the clip's top edge
+    let tab_w = 9.0f32;
+    let tab_h = 13.0f32;
+
+    // Fade In tab
+    let in_active = lit(pl::Handle::FadeIn);
+    let in_x = (fx_in - if fx_in - body.x < 3.0 { 0.0 } else { tab_w * 0.5 }).clamp(body.x, (body.right() - tab_w).max(body.x));
+    let tab_in = Rect::new(in_x, body.y, tab_w, tab_h);
+    ui.c.fill_rrect(tab_in, 2.5, if in_active { ui.t.accent } else { ui.t.sunken_dark.with_alpha(215) });
+    ui.c.stroke_rrect(tab_in, 2.5, 1.0, white.with_alpha(if in_active { 240 } else { 150 }));
+    ui.c.fill_rect(Rect::new(tab_in.cx() - 0.5, tab_in.y + 3.0, 1.0, 6.0), if in_active { ui.t.sunken_dark } else { white.with_alpha(180) });
+
+    // Fade Out tab
+    let out_active = lit(pl::Handle::FadeOut);
+    let out_x = (fx_out - if body.right() - fx_out < 3.0 { tab_w } else { tab_w * 0.5 }).clamp(body.x, (body.right() - tab_w).max(body.x));
+    let tab_out = Rect::new(out_x, body.y, tab_w, tab_h);
+    ui.c.fill_rrect(tab_out, 2.5, if out_active { ui.t.accent } else { ui.t.sunken_dark.with_alpha(215) });
+    ui.c.stroke_rrect(tab_out, 2.5, 1.0, white.with_alpha(if out_active { 240 } else { 150 }));
+    ui.c.fill_rect(Rect::new(tab_out.cx() - 0.5, tab_out.y + 3.0, 1.0, 6.0), if out_active { ui.t.sunken_dark } else { white.with_alpha(180) });
+
+    if in_active {
+        let ms = c.stored_fade_in().map_or(0.0, |f| f.0);
+        badge(ui, &format!("Fade in: {:.0} ms", ms), fx_in, body.y + 16.0);
+    }
+    if out_active {
+        let ms = c.stored_fade_out().map_or(0.0, |f| f.0);
+        badge(ui, &format!("Fade out: {:.0} ms", ms), fx_out, body.y + 16.0);
+    }
 
     // Horizontal gain line across the clip bottom
     let gain_line_alpha = if lit(pl::Handle::Gain) { 220 } else { 85 };
@@ -1229,20 +1287,9 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
     }
 
     // Floating badge for lit gain handle:
-    if lit(pl::Handle::Gain) {
+    if active {
         let db = 20.0 * g_val.log10();
-        let text = format!("{:+.1} dB", db);
-        let font = Font::new(12).bold();
-        let tw = ui.c.text_width(font, &text);
-        let bw = tw + 12.0;
-        if body.w >= bw + 4.0 && body.h >= 26.0 {
-            let bx = (gx - bw / 2.0).clamp(body.x + 2.0, body.right() - bw - 2.0);
-            let by = (gy - 29.0).clamp(body.y + 2.0, body.bottom() - 24.0);
-            let br = Rect::new(bx, by, bw, 18.0);
-            os_ui::kit::popup(ui.c, ui.t, br);
-            ui.c.stroke_rrect(br, 3.0, 1.0, ui.t.accent.with_alpha(190));
-            ui.c.text(font, bx + 6.0, by + 2.0, ui.t.text, &text);
-        }
+        badge(ui, &format!("{:+.1} dB", db), gx, gy - 29.0);
     }
 
     if hovered {
@@ -1254,6 +1301,9 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
             ui.c.fill_circle(hx, hy, if on { pl::XFADE_R + 1.0 } else { pl::XFADE_R }, col(pl::Handle::Crossfade));
             ui.c.fill_circle(hx, ry, 2.5, ui.t.s(0x1c2328).with_alpha(200));
             ui.c.stroke_circle(hx, ry, 2.5, 1.1, white);
+            if on {
+                badge(ui, &format!("Crossfade: {:+.2}", c.fade_in_tension()), hx, hy - 24.0);
+            }
         }
         for (h, on, xa, xb, out) in [
             (pl::Handle::TensionIn, c.stored_fade_in().filter(|_| !pl::managed(s, c, false)), body.x, fx_in, false),
@@ -1265,11 +1315,15 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
             }
             let (mx, my) = pl::fade_mid(body, xa, xb, t, out);
             if lit(h) {
-                ui.c.fill_circle(mx, my, 5.5, white);
+                ui.c.fill_circle(mx, my, 5.5, ui.t.accent);
+                ui.c.stroke_circle(mx, my, 5.5, 1.5, white);
+                ui.c.line(mx - 2.0, my + 2.0, mx + 2.0, my - 2.0, 1.2, ui.t.sunken_dark);
+                let label = if out { "Fade out tension" } else { "Fade in tension" };
+                badge(ui, &format!("{label}: {:+.2}", t), mx, my - 24.0);
             } else {
-                ui.c.fill_circle(mx, my, 4.0, ui.t.s(0x1c2328).with_alpha(200));
-                ui.c.stroke_circle(mx, my, 4.0, 1.3, white);
-                ui.c.line(mx - 2.2, my + 2.2, mx + 2.2, my - 2.2, 1.1, white);
+                ui.c.fill_circle(mx, my, 4.0, ui.t.s(0x1c2328).with_alpha(220));
+                ui.c.stroke_circle(mx, my, 4.0, 1.2, white.with_alpha(200));
+                ui.c.line(mx - 2.0, my + 2.0, mx + 2.0, my - 2.0, 1.0, white.with_alpha(200));
             }
         }
     }
