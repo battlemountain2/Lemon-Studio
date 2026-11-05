@@ -1302,9 +1302,6 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
             ui.c.fill_circle(hx, hy, if on { pl::XFADE_R + 1.0 } else { pl::XFADE_R }, col(pl::Handle::Crossfade));
             ui.c.fill_circle(hx, ry, 2.5, ui.t.s(0x1c2328).with_alpha(200));
             ui.c.stroke_circle(hx, ry, 2.5, 1.1, white);
-            if on {
-                badge(ui, &format!("Crossfade: {:+.2}", c.fade_in_tension()), hx, hy - 24.0);
-            }
         }
         for (h, on, xa, xb, out) in [
             (pl::Handle::TensionIn, c.stored_fade_in().filter(|_| !pl::managed(s, c, false)), body.x, fx_in, false),
@@ -1316,15 +1313,11 @@ fn fades(ui: &mut Ui, s: &State, g: &PGeom, i: usize, c: &Clip, edges: Body, wav
             }
             let (mx, my) = pl::fade_mid(body, xa, xb, t, out);
             if lit(h) {
-                ui.c.fill_circle(mx, my, 5.5, ui.t.accent);
-                ui.c.stroke_circle(mx, my, 5.5, 1.5, white);
-                ui.c.line(mx - 2.0, my + 2.0, mx + 2.0, my - 2.0, 1.2, ui.t.sunken_dark);
-                let label = if out { "Fade out tension" } else { "Fade in tension" };
-                badge(ui, &format!("{label}: {:+.2}", t), mx, my - 24.0);
+                ui.c.fill_circle(mx, my, 5.5, white);
             } else {
-                ui.c.fill_circle(mx, my, 4.0, ui.t.s(0x1c2328).with_alpha(220));
-                ui.c.stroke_circle(mx, my, 4.0, 1.2, white.with_alpha(200));
-                ui.c.line(mx - 2.0, my + 2.0, mx + 2.0, my - 2.0, 1.0, white.with_alpha(200));
+                ui.c.fill_circle(mx, my, 4.0, ui.t.s(0x1c2328).with_alpha(200));
+                ui.c.stroke_circle(mx, my, 4.0, 1.3, white);
+                ui.c.line(mx - 2.2, my + 2.2, mx + 2.2, my - 2.2, 1.1, white);
             }
         }
     }
