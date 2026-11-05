@@ -75,20 +75,20 @@ pub fn promote(tid: i32) -> Result<(), String> {
     }
     static HANDLER: Once = Once::new();
     HANDLER.call_once(|| {
+        raise_memlock();
         install_handler();
         // Started from a thread that may be real-time already: the reset-on-fork flag leaves the watchdog at normal
         // priority.
         let _ = std::thread::Builder::new().name("rt watchdog".into()).spawn(watch);
     });
-    // Again at every promotion: the kernel raises the soft cap by a second at each SIGXCPU, which would leave the hard
-    // one to kill the program next time.
-    cap_rttime();
     // Known before it is real-time: a SIGXCPU while rtkit answers must find it.
     remember(tid);
     let param = libc::sched_param { sched_priority: PRIORITY };
     // SAFETY: sets the scheduling policy of a thread of this process.
     let direct = unsafe { libc::sched_setscheduler(tid, libc::SCHED_FIFO | libc::SCHED_RESET_ON_FORK, &param) } == 0;
     if !direct {
+        // rtkit requires RLIMIT_RTTIME to be capped before it agrees to promote.
+        cap_rttime();
         rtkit(tid)?;
     }
     COUNT.fetch_add(1, Ordering::AcqRel);
@@ -121,6 +121,18 @@ pub fn is_realtime(tid: i32) -> bool {
     let p = unsafe { libc::sched_getscheduler(tid) };
     // rtkit gives SCHED_RR, the kernel's own path SCHED_FIFO.
     p >= 0 && matches!(p & !libc::SCHED_RESET_ON_FORK, libc::SCHED_FIFO | libc::SCHED_RR)
+}
+
+/// Maximizes `RLIMIT_MEMLOCK` up to the hard limit if it's currently lower.
+pub fn raise_memlock() {
+    let mut cur = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: reads and sets this process's own memlock limit.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut cur) == 0 && cur.rlim_cur < cur.rlim_max {
+            let lim = libc::rlimit { rlim_cur: cur.rlim_max, rlim_max: cur.rlim_max };
+            let _ = libc::setrlimit(libc::RLIMIT_MEMLOCK, &lim);
+        }
+    }
 }
 
 fn cap_rttime() {

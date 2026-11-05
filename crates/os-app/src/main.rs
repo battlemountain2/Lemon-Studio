@@ -1985,6 +1985,8 @@ fn main() {
         std::process::exit(plugins::window_check::run(&args[1..]));
     }
     app::move_old_settings();
+    #[cfg(target_os = "linux")]
+    rt::raise_memlock();
     // The mixing threads every engine renders on, from here on (spec: audio/multicore.md).
     mix_threads::start();
     // A render without a window (FILE > Export audio from the command line, `render`).

@@ -29,6 +29,11 @@ pub const WORKERS: usize = 4;
 /// The scanner process: loads one plugin file, prints its plugin list as one `OSSCAN <json>` line and ends at once,
 /// without unloading the plugin (its clean-up code never runs).
 pub fn child_main(args: &[String]) -> ! {
+    // Headless background scanner: do not trigger desktop notification bubbles (e.g. yabridge warnings)
+    #[cfg(unix)]
+    unsafe {
+        std::env::remove_var("DBUS_SESSION_BUS_ADDRESS");
+    }
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
@@ -92,6 +97,8 @@ pub fn scan_in_child(path: &Path, format: Format) -> Scanned {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
+        // Headless background scanner: strip D-Bus so bridged plugins (e.g. yabridge) don't pop up desktop notifications
+        cmd.env_remove("DBUS_SESSION_BUS_ADDRESS");
         if let Some(h) = std::env::var_os("HOME") {
             let user_lib = PathBuf::from(h).join(".local/lib");
             if user_lib.is_dir() {
