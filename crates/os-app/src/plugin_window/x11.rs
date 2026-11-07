@@ -275,7 +275,9 @@ impl FrameWindow {
             c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes())?;
             c.change_property8(PropMode::REPLACE, win, a._NET_WM_NAME, a.UTF8_STRING, title.as_bytes())?;
             // The desktop entry's id: the frame is grouped with Lemon Studio and gets its icon.
-            c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_CLASS, AtomEnum::STRING, b"lemonstudio\0lemonstudio\0")?;
+            let class = if super::hyprland::running() { super::hyprland::class(win) } else { "lemonstudio".to_string() };
+            let class = format!("lemonstudio\0{class}\0");
+            c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_CLASS, AtomEnum::STRING, class.as_bytes())?;
             c.change_property32(PropMode::REPLACE, win, a.WM_PROTOCOLS, AtomEnum::ATOM, &[a.WM_DELETE_WINDOW, a._NET_WM_PING])?;
             // The process and its host: the window manager can end an unresponsive Lemon Studio from a frame.
             c.change_property32(PropMode::REPLACE, win, a._NET_WM_PID, AtomEnum::CARDINAL, &[std::process::id()])?;
@@ -414,7 +416,7 @@ impl FrameWindow {
         let (c, a, win) = (&self.f.conn.c, &self.f.conn.atoms, self.f.win);
         let _ = c.map_window(win);
         if self.detached() && !self.f.plain.replace(true) {
-            super::hyprland::plain();
+            super::hyprland::plain(win);
         }
         let _ = c.configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
         if !self.detached() {
@@ -758,7 +760,7 @@ impl Frame {
             Reply::Move if super::hyprland::running() => {
                 // Hyprland ignores the request below: it moves the frame on our asking, in its own coordinates, as the
                 // pointer goes (the press's grab brings the motion here).
-                *self.hypr_drag.borrow_mut() = super::hyprland::Drag::start();
+                *self.hypr_drag.borrow_mut() = super::hyprland::Drag::start(self.win);
                 let (x, y) = self.top_left();
                 self.state.borrow_mut().moving = Some((i32::from(root.0), i32::from(root.1), x, y));
             }
@@ -871,11 +873,10 @@ impl Frame {
             Event::MotionNotify(e) if self.state.borrow().moving.is_some() => {
                 let Some((cx, cy, wx, wy)) = self.state.borrow().moving else { return };
                 let at = (wx + i32::from(e.root_x) - cx, wy + i32::from(e.root_y) - cy);
-                if self.state.borrow().detached {
-                    if let Some(d) = self.hypr_drag.borrow_mut().as_mut() {
-                        d.follow(false);
-                    }
-                } else if at != self.pos.get() {
+                let compositor_drag = if self.state.borrow().detached {
+                    self.hypr_drag.borrow_mut().as_mut().is_some_and(|d| d.follow(false))
+                } else { false };
+                if !compositor_drag && at != self.pos.get() {
                     self.pos.set(at);
                     let _ = self.conn.c.configure_window(self.win, &ConfigureWindowAux::new().x(at.0).y(at.1));
                     // Re-clip at once for the new place; what the move uncovered is shown by the next present.

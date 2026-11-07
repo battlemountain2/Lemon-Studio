@@ -6,7 +6,11 @@ do not reset or force-push main to update it.
 
 ## Patch inventory
 
-The [October 28 isolated candidate](upstream-integration-2026-10-28.md) records current upstream integration, extraction
+The [November 6 review](upstream-review-2026-11-06.md) compares fork `ef57488e` with upstream `73e63898`, records
+Antigravity's intervening integrations, and tracks the new uncommitted safety candidate and restored Hyprland protections.
+Its validation and promotion status are separate from the historical results below.
+
+The [October 28 integration record](upstream-integration-2026-10-28.md) records earlier upstream integration, extraction
 safety, adapted Hyprland window handling, persistent browser favorites/waveforms, and live clip-gain changes.
 The downstream-only `browser_assets.rs`, `stem_separator/job.rs` and preserved `legacy_delay.rs` are listed in the
 watermark exceptions rather than adding upstream authorship headers to these files.
@@ -46,8 +50,9 @@ and continues checking every other source. These exceptions do not change the pr
 
 ## Update workflow
 
-The latest local candidate and its release gates are documented in
-[the October 22 integration record](upstream-integration-2026-10-22.md). Bry authorized source publication after
+The latest local review candidate and its release gates are documented in
+[the November 6 review](upstream-review-2026-11-06.md); the
+[October 22 integration record](upstream-integration-2026-10-22.md) is historical. Bry authorized earlier source publication after
 validation; installation and live hardware/listening acceptance remain separate release gates.
 
 1. Fetch both remotes and review upstream changes in modules listed above.

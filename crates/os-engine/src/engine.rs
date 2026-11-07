@@ -2096,9 +2096,11 @@ impl Engine {
         self.marks = marks::Marks::default();
     }
 
-    /// Pause in place (spec: audio/transport.md "Pause"): the channels (voices, audio clips, hosted instruments) fade
-    /// out of the mixer over about 6 ms and are then held exactly where they are, with the song position, while the
-    /// mixer's effects run on with nothing coming in, so a reverb's or a delay's tail rings out.
+    /// Pause in place (spec: audio/transport.md "Pause"): the sampler channels (voices, audio clips) fade out of the
+    /// mixer over about 6 ms and are then held exactly where they are, with the song position, while the mixer's
+    /// effects run on with nothing coming in, so a reverb's or a delay's tail rings out. The hosted instruments get a
+    /// note off for every note they hold once the fade is over and go on being processed, so their releases and their
+    /// own effects ring out too, as in FL (spec: audio/transport.md "Tails after Pause and Stop").
     pub fn pause(&mut self) {
         if self.fade_out > 0 || self.held {
             return;
@@ -2130,6 +2132,12 @@ impl Engine {
         self.held || self.fade_out > 0
     }
 
+    /// Paused, and the channels' fade is over: nothing but the hosted instruments and the mixer is processed
+    /// (`render_held`).
+    pub fn held(&self) -> bool {
+        self.held
+    }
+
     /// Keep a live-only engine running while nothing plays (an instrument's editor is open): its instruments are
     /// processed every tick, so notes from the editor's own keyboard sound. Off, it finishes again once silent.
     pub fn set_awake(&mut self, on: bool) {
@@ -2140,6 +2148,8 @@ impl Engine {
     /// sound again when it plays on). For a paused playback while another stream processes the same instruments (live
     /// notes, an open editor): its held notes would ring there for as long as it is paused.
     pub fn release_instruments(&mut self) {
+        // A note an instrument missed while busy would start after its note off: it never starts.
+        self.inst_missed.retain(|m| !matches!(m.1, notes::Note::On { .. }));
         self.send_held_offs();
         self.relaunch_clips |= self.inst_offs.iter().any(|o| o.3.is_some());
         self.inst_offs.clear();
@@ -3204,11 +3214,8 @@ impl Engine {
             self.tap_clicks.mix(&mut self.bus[click][..len * 2]);
         }
         self.pad_voices(len);
-        self.instruments_out(len);
-        for ch in &mut self.channels {
-            ch.advance(len as u32);
-        }
-        // Pause / resume: the channels fade out of (into) the mixer's inputs; the effects behind them run on.
+        // Pause / resume: the sampler channels fade out of (into) the mixer's inputs; the effects behind them run on.
+        // The hosted instruments are left out: at the hold they are let go of their notes and ring on.
         if self.fade_out > 0 || self.fade_in > 0 {
             let total = self.fade_len as f32;
             let (left, out) = if self.fade_out > 0 { (self.fade_out as f32, true) } else { (self.fade_in as f32, false) };
@@ -3225,10 +3232,16 @@ impl Engine {
                 self.held = self.fade_out == 0;
                 if self.held {
                     self.marker_paused = self.pause_at.take().or(self.marker_paused);
+                    // Held from here: the hosted instruments are let go of what they hold and ring on.
+                    self.release_instruments();
                 }
             } else {
                 self.fade_in = self.fade_in.saturating_sub(len as u32);
             }
+        }
+        self.instruments_out(len);
+        for ch in &mut self.channels {
+            ch.advance(len as u32);
         }
         self.tick = tick + 1;
         // A nudge pressed or let go changes the ticks after this one, as a tempo change does.
@@ -3329,9 +3342,9 @@ impl Engine {
         self.hand_out(self.tick, self.frame, true, false);
     }
 
-    /// A tick's worth of the mixer alone while paused (`pause`): the position, the channels and the automation stay
-    /// where they are, the effects run with nothing coming in. It is handed out at the held position: the tick and
-    /// the frame the next tick starts on.
+    /// A tick's worth of the hosted instruments and the mixer while paused (`pause`): the position, the sampler
+    /// channels and the automation stay where they are; the instruments, let go of their notes, and the effects run on,
+    /// so their tails ring out. It is handed out at the held position: the tick and the frame the next tick starts on.
     fn render_held(&mut self) {
         let len = (self.clock.samples_per_tick().round() as usize).max(1);
         let mut song = self.transport_at(self.frame);
@@ -3343,6 +3356,7 @@ impl Engine {
             b.clear();
             b.resize(len * 2, 0.0);
         }
+        self.render_instruments(len, &song);
         self.mix(len, &song);
         self.out.clear();
         self.out.extend_from_slice(&self.bus[0][..len * 2]);
@@ -3959,15 +3973,20 @@ impl Engine {
                 inst.voice_choke(0, sent(c, key), v);
             }
         }
-        let mut held: Vec<(usize, u8)> = self.inst_offs.iter().filter(|o| o.3.is_none()).map(|&(_, c, key, _, _)| (c, key)).collect();
-        held.extend(self.sounding.iter().filter(|s| s.2 == u64::MAX).map(|&(c, key, _)| (c, key.min(127) as u8)));
+        let mut notes: Vec<(usize, u8)> = self.inst_offs.iter().filter(|o| o.3.is_none()).map(|&(_, c, key, _, _)| (c, key)).collect();
+        notes.extend(self.sounding.iter().filter(|s| s.2 == u64::MAX).map(|&(c, key, _)| (c, key.min(127) as u8)));
         // Voices whose notes have not ended (a mono voice sounds under its first key).
+        let mut voices: Vec<(usize, u8)> = Vec::new();
         for (c, v) in self.note_voices.iter().enumerate() {
-            held.extend(v.held_keys().map(|key| (c, key)));
+            voices.extend(v.held_keys().map(|key| (c, key)));
         }
-        // A note can be held in more than one of these: one note off each.
-        held.sort_unstable();
-        held.dedup();
+        // A note is held in both lists: one note off each. A key held twice (a clip's note still sounding as the next
+        // clip starts the same key) gets two, or its second voice rings on.
+        let count = |v: &[(usize, u8)], k: (usize, u8)| v.iter().filter(|&&x| x == k).count();
+        let mut keys: Vec<(usize, u8)> = notes.iter().chain(&voices).copied().collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let held = keys.into_iter().flat_map(|k| std::iter::repeat_n(k, count(&notes, k).max(count(&voices, k))));
         for (c, key) in held {
             if let Some(Ok(mut inst)) = self.channels.get(c).and_then(|ch| ch.instrument.0.as_ref()).map(|i| i.lock()) {
                 inst.note_off(0, sent(c, key));
@@ -5803,9 +5822,9 @@ mod tests {
         assert_eq!(e.take_missed(), 0, "the held tick waited for the effect");
     }
 
-    // spec: audio/transport.md "Pause"
+    // spec: audio/transport.md "Pause", "Tails after Pause and Stop"
     #[test]
-    fn pause_holds_the_channels_and_lets_the_effects_ring_out() {
+    fn pause_holds_the_position_and_lets_the_plugins_ring_out() {
         let mut p = project(vec![long_note(0, 384 * 4, 0)], vec![]);
         p.channels[0].kind = ChannelKind::Plugin;
         p.channels[0].mixer_track = 1;
@@ -5840,17 +5859,113 @@ mod tests {
         let tail = peak(&mut e, 40);
         assert!(tail > 0.01 && tail < playing, "the effect's tail rings on while paused: {tail}");
         let probe_now = probe.lock().unwrap();
-        assert_eq!((e.tick, probe_now.at), (tick, at), "the position and the instrument are held");
-        assert_eq!(probe_now.held, vec![60], "the note is still held at the instrument");
+        assert_eq!(e.tick, tick, "the position is held");
+        assert!(probe_now.at > at, "the instrument goes on being processed");
+        assert!(probe_now.held.is_empty(), "its note was let go of: {:?}", probe_now.held);
         drop(probe_now);
-        // Resume: the note goes on from where it was held.
+        // Resume: playback goes on from where it was held; the note let go of does not come back.
         e.resume();
         assert!(!e.paused());
         let frame = e.frame;
         let (_, t, f, held, _) = e.next_tick().unwrap();
         assert_eq!((t, f, held), (tick as f64, frame, false), "goes on from the held tick and frame");
-        let again = peak(&mut e, 20);
-        assert!(again > 0.1 && e.tick > tick, "the note sounds again: {again}");
+        peak(&mut e, 20);
+        assert!(e.tick > tick && probe.lock().unwrap().held.is_empty(), "the note is not started again");
+    }
+
+    /// A key held twice at a pause (a note still sounding as another starts the same key, as two clips meeting do):
+    /// the instrument gets a note off for each, so neither voice rings on while paused.
+    #[test]
+    fn a_key_held_twice_gets_two_note_offs_at_a_pause() {
+        /// Holds one voice per note on, and lets one go per note off.
+        struct Voices(Vec<u8>);
+        impl crate::Instrument for Voices {
+            fn note_on(&mut self, _offset: u32, key: u8, _velocity: f32) {
+                self.0.push(key);
+            }
+            fn note_off(&mut self, _offset: u32, key: u8) {
+                if let Some(i) = self.0.iter().position(|&k| k == key) {
+                    self.0.remove(i);
+                }
+            }
+            fn process(&mut self, _rate: u32, l: &mut [f32], r: &mut [f32]) {
+                let v = if self.0.is_empty() { 0.0 } else { 1.0 };
+                l.fill(v);
+                r.fill(v);
+            }
+        }
+        let mut p = project(vec![long_note(0, 384, 0), long_note(96, 384, 0)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        let inst = Arc::new(std::sync::Mutex::new(Voices(Vec::new())));
+        e.set_instrument(0, inst.clone());
+        while e.tick < 120 {
+            e.next_tick();
+        }
+        assert_eq!(inst.lock().unwrap().0.len(), 2, "both notes sound");
+        e.pause();
+        for _ in 0..10 {
+            e.next_tick();
+        }
+        assert!(e.held());
+        assert_eq!(inst.lock().unwrap().0, Vec::<u8>::new(), "every voice let go of");
+    }
+
+    /// An instrument whose notes fade out over its release: a level that falls by `fall` each frame once let go of.
+    struct Release {
+        level: f32,
+        on: bool,
+        fall: f32,
+    }
+
+    impl crate::Instrument for Release {
+        fn note_on(&mut self, _offset: u32, _key: u8, _velocity: f32) {
+            (self.level, self.on) = (1.0, true);
+        }
+        fn note_off(&mut self, _offset: u32, _key: u8) {
+            self.on = false;
+        }
+        fn process(&mut self, _rate: u32, l: &mut [f32], r: &mut [f32]) {
+            for (a, b) in l.iter_mut().zip(r.iter_mut()) {
+                (*a, *b) = (self.level, self.level);
+                if !self.on {
+                    self.level *= self.fall;
+                }
+            }
+        }
+    }
+
+    /// A hosted instrument's release rings on through a pause, decaying as it would have, and is not cut by the
+    /// pause's fade (spec: audio/transport.md "Tails after Pause and Stop": FL processes the instruments while paused).
+    #[test]
+    fn an_instruments_release_rings_on_while_paused() {
+        let mut p = project(vec![long_note(0, 384 * 4, 0)], vec![]);
+        p.channels[0].kind = ChannelKind::Plugin;
+        let mut lib = SampleLibrary::default();
+        let mut e = Engine::new(&p, &mut lib, 48000, PlayMode::Pattern(1));
+        // About -60 dB after one second.
+        let fall = (1e-3f32).powf(1.0 / 48000.0);
+        e.set_instrument(0, Arc::new(std::sync::Mutex::new(Release { level: 0.0, on: false, fall })));
+        let peaks = |e: &mut Engine, ticks: usize| -> Vec<f32> {
+            let mut v = Vec::new();
+            for _ in 0..ticks {
+                if let Some((s, ..)) = e.next_tick() {
+                    v.push(s.iter().fold(0.0f32, |m, x| m.max(x.abs())));
+                }
+            }
+            v
+        };
+        let playing = peaks(&mut e, 20);
+        assert!(playing.iter().all(|&v| v > 0.1), "the note sounds: {playing:?}");
+        e.pause();
+        let paused = peaks(&mut e, 60);
+        assert!(e.held(), "held");
+        // Every tick of the pause: no drop to silence at the fade, a release decaying smoothly.
+        assert!(paused[0] >= playing[0] * 0.99, "not faded out: {} of {}", paused[0], playing[0]);
+        assert!(paused.windows(2).all(|w| w[1] <= w[0] && w[1] > 0.0), "decays: {paused:?}");
+        let last = *paused.last().unwrap();
+        assert!(last < paused[5] * 0.9, "the release goes on while paused: {} -> {last}", paused[5]);
     }
 
     /// An instrument's editor is open: the live engine keeps processing it with no note from the host, so a note
@@ -6733,6 +6848,89 @@ mod tests {
         assert!(plain[f * 2] > 0.1);
         assert!((f64::from(out[f * 2]) - f64::from(plain[f * 2]) * layer * pl / cl).abs() < 1e-5, "{} {}", out[f * 2], plain[f * 2]);
         assert!((f64::from(out[f * 2 + 1]) - f64::from(plain[f * 2 + 1]) * layer * pr / cr).abs() < 1e-5);
+    }
+
+    /// Every note a recorder got has ended: per key, as many note offs or chokes as note ons, and none started last.
+    fn all_ended(r: &Arc<std::sync::Mutex<Rec>>, what: &str) {
+        let log = r.lock().unwrap().log.clone();
+        for key in 0..=127u8 {
+            let of: Vec<&str> = log.iter().filter(|l| l.2 == key && l.1 != "tune").map(|l| l.1).collect();
+            let ons = of.iter().filter(|k| **k == "on").count();
+            assert!(of.len() - ons >= ons && of.last() != Some(&"on"), "{what}: key {key} left sounding: {log:?}");
+        }
+    }
+
+    /// Plays `p` to `tick`, pauses, and holds for a while: every note its plugin channels got has ended (spec:
+    /// audio/transport.md "Pause": the paused playback lets go of every note it holds at the instruments).
+    fn paused_at(p: &Project, tick: u64, what: &str) {
+        let (mut e, recs) = recorded(p);
+        while e.tick < tick {
+            e.next_tick();
+        }
+        assert!(recs.iter().any(|r| !r.lock().unwrap().held.is_empty()), "{what}: notes sound before the pause");
+        e.pause();
+        for _ in 0..10 {
+            e.next_tick();
+        }
+        assert!(e.held(), "{what}: held");
+        for r in &recs {
+            all_ended(r, what);
+        }
+    }
+
+    /// The note rules keep their own records of what is held (a mono channel's list, portamento, a slide, a layer's
+    /// children): a pause in the middle of each lets go of every note.
+    #[test]
+    fn a_pause_lets_go_of_every_note_whatever_the_note_rules() {
+        let on = |c: u16, position: u32, length: u32, key: u16| Note { channel: c, key, ..long_note(position, length, 0) };
+        // One plugin channel (1) behind an unused first channel, as `recorded` plays every channel but the first.
+        let plugin = |notes: Vec<Note>| {
+            let mut p = project(notes, vec![]);
+            p.channels.push(Channel { index: 1, kind: ChannelKind::Plugin, ..channel() });
+            p
+        };
+        let mut mono = plugin(vec![on(1, 0, 384, 60), on(1, 48, 384, 64), on(1, 96, 384, 67)]);
+        mono.channels[1].misc.mono = true;
+        paused_at(&mono, 120, "mono");
+        let mut porta = plugin(vec![on(1, 0, 384, 60), on(1, 48, 384, 64)]);
+        porta.channels[1].misc.porta = true;
+        paused_at(&porta, 120, "portamento");
+        let slide = Note { flags: 0x4000 | Note::SLIDE, ..on(1, 48, 24, 72) };
+        paused_at(&plugin(vec![on(1, 0, 384, 60), slide]), 60, "slide");
+        let kinds = [ChannelKind::Plugin, ChannelKind::Plugin];
+        paused_at(&layered(0, vec![long_note(0, 384, 0), long_note(48, 384, 0)], &kinds), 120, "layer");
+    }
+
+    /// An instrument busy (held by the UI) as a note is due misses it; the note waits for it. A pause letting go of the
+    /// notes then drops that waiting note on, or it would start after its note off and sound for as long as the
+    /// playback stays paused.
+    #[test]
+    fn a_note_an_instrument_missed_does_not_start_after_the_pause() {
+        let mut p = project(vec![long_note(1, 384, 0)], vec![]);
+        p.channels.push(Channel { index: 1, kind: ChannelKind::Plugin, ..channel() });
+        p.patterns[0].notes[0].channel = 1;
+        let (mut e, recs) = recorded(&p);
+        e.busy_wait = Duration::ZERO;
+        e.next_tick();
+        // Held elsewhere through the note's start and the end of the pause's fade.
+        let rec = recs[0].clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _g = rec.lock().unwrap();
+            tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        rx.recv().unwrap();
+        e.pause();
+        for _ in 0..4 {
+            e.next_tick();
+        }
+        assert!(e.held(), "held");
+        holder.join().unwrap();
+        for _ in 0..4 {
+            e.next_tick();
+        }
+        all_ended(&recs[0], "missed");
     }
 
     /// Flag 4: one child per note in turn, from the first; flag 1: one at random, drawn from the project's generator
