@@ -392,6 +392,8 @@ pub enum Scroll {
     PopupSub,
     /// The plugin palette's list (spec: ui/plugin-menu.md §6.2).
     Palette,
+    /// Omni Command Palette list (Ctrl+K, Phase 4).
+    CmdPalette,
 }
 
 /// A scroll bar painted this frame.
@@ -471,7 +473,7 @@ pub(crate) fn scroll_win(t: Scroll) -> Option<Win> {
         Scroll::MixerX => Some(Win::Mixer),
         Scroll::RackX | Scroll::RackY => Some(Win::ChannelRack),
         Scroll::Palette => Some(Win::PluginPalette),
-        Scroll::Settings | Scroll::PlugTable | Scroll::Popup | Scroll::PopupSub => None,
+        Scroll::Settings | Scroll::PlugTable | Scroll::Popup | Scroll::PopupSub | Scroll::CmdPalette => None,
     }
 }
 
@@ -7150,6 +7152,7 @@ impl App {
             Scroll::Settings => s.settings.scroll,
             Scroll::PlugTable => s.plugdb.top as f32 * views::settings::TABLE_ROW_H,
             Scroll::Palette => s.palette.scroll,
+            Scroll::CmdPalette => s.cmd_palette.scroll as f32 * 39.0,
             Scroll::Popup | Scroll::PopupSub => s.playlist.popup.as_ref().map_or(0.0, |p| p.scroll[usize::from(t == Scroll::PopupSub)] as f32),
         }
     }
@@ -7173,6 +7176,15 @@ impl App {
             Scroll::Settings => s.settings.scroll = v,
             Scroll::PlugTable => s.plugdb.top = (v / views::settings::TABLE_ROW_H).round() as usize,
             Scroll::Palette => s.palette.scroll = v,
+            Scroll::CmdPalette => {
+                let row = (v / 39.0).round().max(0.0) as usize;
+                s.cmd_palette.scroll = row;
+                if s.cmd_palette.selected < s.cmd_palette.scroll {
+                    s.cmd_palette.selected = s.cmd_palette.scroll;
+                } else if s.cmd_palette.selected >= s.cmd_palette.scroll + crate::palette::PAGE_SIZE {
+                    s.cmd_palette.selected = (s.cmd_palette.scroll + crate::palette::PAGE_SIZE).saturating_sub(1);
+                }
+            }
             Scroll::Popup | Scroll::PopupSub => {
                 let Some(p) = s.playlist.popup.as_mut() else { return };
                 let (k, col) = (usize::from(t == Scroll::PopupSub), v.round() as usize);
@@ -8056,6 +8068,13 @@ impl App {
     pub fn wheel(&mut self, dx: f32, dy: f32, shift: bool, ctrl: bool) {
         if self.modal_open() {
             return self.dialog_wheel(dy);
+        }
+        if self.state.cmd_palette.open {
+            let all = crate::palette::items(&self.state);
+            let count = crate::palette::filter_items(&all, &self.state.cmd_palette.query).len();
+            crate::palette::wheel(&mut self.state.cmd_palette, count, dy + dx);
+            self.invalidate();
+            return;
         }
         if self.menu_wheel(dx, dy, shift) {
             return;
@@ -25267,10 +25286,19 @@ mod tests {
         assert!(app.state.cmd_palette.open);
         assert_eq!(app.state.cmd_palette.query, "", "Re-opened palette resets query");
 
-        // 8. Paint frame with palette open, verify hits generated
+        // 8. Paint frame with palette open, verify hits generated (rows and scrollbar)
         frame(&mut app, &mut c, None);
         assert!(app.hits.iter().any(|h| matches!(h.action, Action::ToggleCommandPalette)), "Backdrop close hit registered");
         assert!(app.hits.iter().any(|h| matches!(h.action, Action::PaletteClick(_))), "Item row click hits registered");
+        assert!(app.hits.iter().any(|h| matches!(h.action, Action::Scrollbar(Scroll::CmdPalette))), "Scrollbar hit registered");
+
+        // Test mouse wheel scrolling in command palette
+        assert_eq!(app.state.cmd_palette.scroll, 0);
+        app.wheel(0.0, -1.0, false, false);
+        assert!(app.state.cmd_palette.scroll > 0, "Mouse wheel down advanced scroll");
+        let scrolled = app.state.cmd_palette.scroll;
+        app.wheel(0.0, 1.0, false, false);
+        assert!(app.state.cmd_palette.scroll < scrolled, "Mouse wheel up decreased scroll");
 
         // 9. Enter executes the selected command (Focus Playlist / Win::Playlist)
         // Set query to "Playlist"

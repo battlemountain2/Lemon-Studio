@@ -8,7 +8,7 @@
 //! category badges, keyboard shortcut indicators, and an interactive search bar.
 
 use os_ui::{Color, Font, Rect};
-use crate::app::{Action, State, Ui};
+use crate::app::{Action, Scroll, State, Ui};
 use crate::palette::{self, PAGE_SIZE};
 
 /// The frame outer border and card background.
@@ -108,11 +108,12 @@ pub fn paint(ui: &mut Ui, s: &State) {
         let row_h = 39.0;
         let start = s.cmd_palette.scroll;
         let end = (start + PAGE_SIZE).min(count);
+        let row_w = if count > PAGE_SIZE { card_w - 26.0 } else { card_w - 16.0 };
 
         for (rel_i, item_ref) in filtered[start..end].iter().enumerate() {
             let abs_i = start + rel_i;
             let is_sel = abs_i == s.cmd_palette.selected;
-            let row_r = Rect::new(card_r.x + 8.0, list_top + 4.0 + rel_i as f32 * row_h, card_w - 16.0, row_h - 2.0);
+            let row_r = Rect::new(card_r.x + 8.0, list_top + 4.0 + rel_i as f32 * row_h, row_w, row_h - 2.0);
 
             // Register hit first to capture hover state
             let hov = ui.hit(row_r, Action::PaletteClick(item_ref.original_index), "Run command");
@@ -157,9 +158,15 @@ pub fn paint(ui: &mut Ui, s: &State) {
                 ui.c.text_center(font_sc, sc_r, BADGE_KEY_TEXT, sc);
             }
         }
+
+        // 5. Scroll bar (if results exceed page size)
+        if count > PAGE_SIZE {
+            let track = Rect::new(card_r.right() - 14.0, list_top + 4.0, 6.0, list_h - 8.0);
+            crate::views::scrollbar(ui, track, true, s.cmd_palette.scroll as f32 * row_h, PAGE_SIZE as f32 * row_h, count as f32 * row_h, Scroll::CmdPalette);
+        }
     }
 
-    // 5. Footer Bar
+    // 6. Footer Bar
     let foot_y = card_r.bottom() - 34.0;
     ui.c.fill_rect(Rect::new(card_r.x, foot_y, card_r.w, 1.0), BG_HEADER_LINE);
     let foot_r = Rect::new(card_r.x + 1.0, foot_y + 1.0, card_r.w - 2.0, 33.0);
@@ -168,7 +175,7 @@ pub fn paint(ui: &mut Ui, s: &State) {
     ui.c.fill_rect(Rect::new(foot_r.x, foot_r.y, foot_r.w, 10.0), BG_SEARCH);
 
     // Navigation hint
-    ui.c.text(Font::new(11), card_r.x + 16.0, foot_y + 10.0, TEXT_DIM, "↑↓ Navigate   ·   Enter Run   ·   Esc Dismiss");
+    ui.c.text(Font::new(11), card_r.x + 16.0, foot_y + 10.0, TEXT_DIM, "↑↓ / Scroll Navigate   ·   Enter Run   ·   Esc Dismiss");
 
     // Result count
     let count_text = format!("{} results", count);

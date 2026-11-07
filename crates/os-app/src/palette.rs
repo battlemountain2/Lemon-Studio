@@ -20,6 +20,7 @@ pub enum Category {
     Effect,
     Channel,
     Mixer,
+    Automation,
 }
 
 impl Category {
@@ -31,6 +32,7 @@ impl Category {
             Category::Effect => "EFFECT",
             Category::Channel => "CHANNEL",
             Category::Mixer => "MIXER",
+            Category::Automation => "AUTO",
         }
     }
 
@@ -43,6 +45,7 @@ impl Category {
             Category::Effect => (Color::rgb(0x3b1d54), Color::rgb(0xc084fc)),
             Category::Channel => (Color::rgb(0x4a1834), Color::rgb(0xf472b6)),
             Category::Mixer => (Color::rgb(0x133848), Color::rgb(0x38bdf8)),
+            Category::Automation => (Color::rgb(0x402208), Color::rgb(0xfb923c)),
         }
     }
 }
@@ -71,6 +74,9 @@ pub enum PaletteAction {
     ClearStamp,
     ColorGradientTracks,
     TransposeChannel(i32),
+    LastTweakedAutomation,
+    LastTweakedLink,
+    AddAutomationClip,
 }
 
 /// A single item searchable within the command palette.
@@ -595,27 +601,67 @@ pub fn items(s: &State) -> Vec<PaletteItem> {
         action: PaletteAction::OpenSettings(crate::views::settings::PLUGINS),
     });
 
-    // 3. Channels in Current Project
+    // 3. Automation Actions
+    list.push(PaletteItem {
+        title: "Create Automation Clip for Last Tweaked Parameter".into(),
+        subtitle: "Create automation clip linked to the most recently adjusted control".into(),
+        category: Category::Automation,
+        shortcut: None,
+        action: PaletteAction::LastTweakedAutomation,
+    });
+    list.push(PaletteItem {
+        title: "Link Last Tweaked Parameter to Controller...".into(),
+        subtitle: "Connect last adjusted knob or slider to an external MIDI controller".into(),
+        category: Category::Automation,
+        shortcut: None,
+        action: PaletteAction::LastTweakedLink,
+    });
+    list.push(PaletteItem {
+        title: "Add Empty Automation Clip".into(),
+        subtitle: "Append a blank automation clip channel to arrangement".into(),
+        category: Category::Automation,
+        shortcut: None,
+        action: PaletteAction::AddAutomationClip,
+    });
+    list.push(PaletteItem {
+        title: "Focus Event Editor (Pattern Automation)".into(),
+        subtitle: "Open event editor window for fine-grained controller automation".into(),
+        category: Category::Automation,
+        shortcut: None,
+        action: PaletteAction::FocusWindow(Win::Events),
+    });
+
+    // 4. Channels & Automation in Current Project
     for (i, ch) in s.project.channels.iter().enumerate() {
         let name = ch.name.as_deref().unwrap_or("Channel");
-        let kind = match ch.kind {
-            os_model::ChannelKind::Sampler => "Sampler",
-            os_model::ChannelKind::Plugin => "Plugin",
-            os_model::ChannelKind::AudioClip => "Audio Clip",
-            os_model::ChannelKind::Layer => "Layer",
-            os_model::ChannelKind::Automation => "Automation",
-            _ => "Channel",
-        };
-        list.push(PaletteItem {
-            title: format!("Channel: {name}"),
-            subtitle: format!("{kind} · Row {}, Mixer Track {}", i + 1, ch.mixer_track),
-            category: Category::Channel,
-            shortcut: None,
-            action: PaletteAction::FocusChannel(i),
-        });
+        if ch.kind == os_model::ChannelKind::Automation {
+            let points = s.project.automation(ch.index).map_or(0, |a| a.points.len());
+            list.push(PaletteItem {
+                title: format!("Automation Clip: {name}"),
+                subtitle: format!("{points} point(s) · Channel Row {}", i + 1),
+                category: Category::Automation,
+                shortcut: None,
+                action: PaletteAction::FocusChannel(i),
+            });
+        } else {
+            let kind = match ch.kind {
+                os_model::ChannelKind::Sampler => "Sampler",
+                os_model::ChannelKind::Plugin => "Plugin",
+                os_model::ChannelKind::AudioClip => "Audio Clip",
+                os_model::ChannelKind::Layer => "Layer",
+                _ => "Channel",
+            };
+            list.push(PaletteItem {
+                title: format!("Channel: {name}"),
+                subtitle: format!("{kind} · Row {}, Mixer Track {}", i + 1, ch.mixer_track),
+                category: Category::Channel,
+                shortcut: None,
+                action: PaletteAction::FocusChannel(i),
+            });
+        }
     }
 
-    // 4. Mixer Tracks
+    // 5. Mixer Tracks
     for m in &s.project.mixer {
         let name = if m.index == 0 {
             "Master".to_string()
@@ -911,6 +957,19 @@ pub fn execute(app: &mut App, item: &PaletteItem) {
             app.state.piano.dirty = true;
             app.state.message = Some(format!("Transposed {count} note(s) by {semi:+} semitones"));
         }
+        PaletteAction::LastTweakedAutomation => {
+            if let Some(msg) = app.params_menu(crate::params::MenuEntry::Automation) {
+                app.state.message = Some(msg);
+            }
+        }
+        PaletteAction::LastTweakedLink => {
+            if let Some(msg) = app.params_menu(crate::params::MenuEntry::Last) {
+                app.state.message = Some(msg);
+            }
+        }
+        PaletteAction::AddAutomationClip => {
+            app.add_clip_channel(os_model::ChannelKind::Automation);
+        }
     }
     app.invalidate();
 }
@@ -1038,9 +1097,37 @@ fn update_scroll(pal: &mut Palette, count: usize) {
     }
 }
 
+/// Scrolls the command palette by `notches` (mouse wheel). Positive is up, negative is down.
+pub fn wheel(pal: &mut Palette, count: usize, notches: f32) {
+    if count <= PAGE_SIZE {
+        return;
+    }
+    let max_scroll = count.saturating_sub(PAGE_SIZE);
+    let step = if notches.abs() >= 1.0 { (notches * 2.0).round() as i32 } else { notches.signum() as i32 * 2 };
+    let new_scroll = (pal.scroll as i32 - step).clamp(0, max_scroll as i32) as usize;
+    pal.scroll = new_scroll;
+    if pal.selected < pal.scroll {
+        pal.selected = pal.scroll;
+    } else if pal.selected >= pal.scroll + PAGE_SIZE {
+        pal.selected = pal.scroll + PAGE_SIZE - 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palette_wheel_scrolls_and_clamps() {
+        let mut p = Palette::default();
+        wheel(&mut p, 30, -1.0); // scroll down
+        assert!(p.scroll > 0);
+        assert!(p.selected >= p.scroll);
+
+        wheel(&mut p, 30, 20.0); // scroll up
+        assert_eq!(p.scroll, 0);
+        assert!(p.selected < PAGE_SIZE);
+    }
 
     #[test]
     fn fuzzy_matching_prefers_prefix_and_word_boundaries() {
@@ -1108,8 +1195,11 @@ mod tests {
         assert_eq!(Category::Effect.label(), "EFFECT");
         assert_eq!(Category::Channel.label(), "CHANNEL");
         assert_eq!(Category::Mixer.label(), "MIXER");
+        assert_eq!(Category::Automation.label(), "AUTO");
 
         let (bg, fg) = Category::Action.colors();
         assert_ne!(bg, fg);
+        let (bg_a, fg_a) = Category::Automation.colors();
+        assert_ne!(bg_a, fg_a);
     }
 }
