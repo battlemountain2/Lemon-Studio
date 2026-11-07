@@ -49,6 +49,7 @@ mod cpu;
 mod data_folder;
 mod device;
 mod drum_chop;
+mod grooves;
 mod stem_separator;
 mod dialog;
 mod floating;

@@ -21,6 +21,7 @@ pub enum Category {
     Channel,
     Mixer,
     Automation,
+    Groove,
 }
 
 impl Category {
@@ -33,6 +34,7 @@ impl Category {
             Category::Channel => "CHANNEL",
             Category::Mixer => "MIXER",
             Category::Automation => "AUTO",
+            Category::Groove => "GROOVE",
         }
     }
 
@@ -46,6 +48,7 @@ impl Category {
             Category::Channel => (Color::rgb(0x4a1834), Color::rgb(0xf472b6)),
             Category::Mixer => (Color::rgb(0x133848), Color::rgb(0x38bdf8)),
             Category::Automation => (Color::rgb(0x402208), Color::rgb(0xfb923c)),
+            Category::Groove => (Color::rgb(0x421236), Color::rgb(0xf43f5e)),
         }
     }
 }
@@ -77,6 +80,8 @@ pub enum PaletteAction {
     LastTweakedAutomation,
     LastTweakedLink,
     AddAutomationClip,
+    ApplyDrumGroove(crate::grooves::DrumGroove),
+    ApplyChordProgression(crate::grooves::ChordProgression),
 }
 
 /// A single item searchable within the command palette.
@@ -416,6 +421,27 @@ pub fn items(s: &State) -> Vec<PaletteItem> {
         shortcut: None,
         action: PaletteAction::ChopStutter(8),
     });
+    list.push(PaletteItem {
+        title: "Stutter Clips (16x Glitch Roll)".into(),
+        subtitle: "Split and repeat first slice 16 times for hyper-fast digicore glitch stutters".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::ChopStutter(16),
+    });
+    list.push(PaletteItem {
+        title: "Chop to Grid: 32nd Note (1/32 Glitch)".into(),
+        subtitle: "Micro-slice selected clips every 32nd note for digicore granular chops".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::ChopGrid(crate::playlist::ChopGrid::ThirtySecond),
+    });
+    list.push(PaletteItem {
+        title: "Chop to Grid: Triplet (1/6)".into(),
+        subtitle: "Slice selected clips to 1/6 triplet grid divisions".into(),
+        category: Category::Action,
+        shortcut: None,
+        action: PaletteAction::ChopGrid(crate::playlist::ChopGrid::TripletSixth),
+    });
     // Audio Stem Separation (Phase 6)
     use crate::stem_separator::StemMode;
     list.push(PaletteItem {
@@ -631,7 +657,47 @@ pub fn items(s: &State) -> Vec<PaletteItem> {
         action: PaletteAction::FocusWindow(Win::Events),
     });
 
-    // 4. Channels & Automation in Current Project
+    // 4. Digicore, EDM & Trap Preset Grooves & Progressions
+    use crate::grooves::{DrumGroove, ChordProgression};
+    for groove in [
+        DrumGroove::Trap2Step,
+        DrumGroove::TrapRolls,
+        DrumGroove::DigicoreGlitchHats,
+        DrumGroove::DrillBounce,
+        DrumGroove::Edm4OnFloor,
+        DrumGroove::EdmOffbeatHat,
+        DrumGroove::TrapSnare,
+        DrumGroove::DigicoreGlitchSnare,
+        DrumGroove::DembowSnare,
+        DrumGroove::EdmBuildUpSnare,
+    ] {
+        list.push(PaletteItem {
+            title: groove.title().into(),
+            subtitle: groove.subtitle().into(),
+            category: Category::Groove,
+            shortcut: None,
+            action: PaletteAction::ApplyDrumGroove(groove),
+        });
+    }
+
+    for prog in [
+        ChordProgression::DigicoreRoyal,
+        ChordProgression::HyperpopAnthem,
+        ChordProgression::TrapEmotionalMinor,
+        ChordProgression::EdmFutureBassStabs,
+        ChordProgression::NeoSoulJazz251,
+        ChordProgression::DigicoreCyberPhrygian,
+    ] {
+        list.push(PaletteItem {
+            title: prog.title().into(),
+            subtitle: prog.subtitle().into(),
+            category: Category::Groove,
+            shortcut: None,
+            action: PaletteAction::ApplyChordProgression(prog),
+        });
+    }
+
+    // 5. Channels & Automation in Current Project
     for (i, ch) in s.project.channels.iter().enumerate() {
         let name = ch.name.as_deref().unwrap_or("Channel");
         if ch.kind == os_model::ChannelKind::Automation {
@@ -970,6 +1036,12 @@ pub fn execute(app: &mut App, item: &PaletteItem) {
         PaletteAction::AddAutomationClip => {
             app.add_clip_channel(os_model::ChannelKind::Automation);
         }
+        PaletteAction::ApplyDrumGroove(groove) => {
+            crate::grooves::apply_drum_groove(&mut app.state, *groove);
+        }
+        PaletteAction::ApplyChordProgression(prog) => {
+            crate::grooves::apply_chord_progression(&mut app.state, *prog);
+        }
     }
     app.invalidate();
 }
@@ -1196,10 +1268,13 @@ mod tests {
         assert_eq!(Category::Channel.label(), "CHANNEL");
         assert_eq!(Category::Mixer.label(), "MIXER");
         assert_eq!(Category::Automation.label(), "AUTO");
+        assert_eq!(Category::Groove.label(), "GROOVE");
 
         let (bg, fg) = Category::Action.colors();
         assert_ne!(bg, fg);
         let (bg_a, fg_a) = Category::Automation.colors();
         assert_ne!(bg_a, fg_a);
+        let (bg_g, fg_g) = Category::Groove.colors();
+        assert_ne!(bg_g, fg_g);
     }
 }
