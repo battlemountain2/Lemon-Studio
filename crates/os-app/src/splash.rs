@@ -912,8 +912,11 @@ mod x11 {
         if let (Some(ty), Some(splash)) = (atom(b"_NET_WM_WINDOW_TYPE"), atom(b"_NET_WM_WINDOW_TYPE_SPLASH")) {
             let _ = c.change_property32(PropMode::REPLACE, win, ty, AtomEnum::ATOM, &[splash]);
         }
-        let _ = c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, b"Lemon Studio");
-        let _ = c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_CLASS, AtomEnum::STRING, b"lemonstudio\0LemonStudio\0");
+        let _ = c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, b"Lemon Studio Splash");
+        let _ = c.change_property8(PropMode::REPLACE, win, AtomEnum::WM_CLASS, AtomEnum::STRING, b"lemonstudio-splash\0lemonstudio-splash\0");
+        if let Some(pid_atom) = atom(b"_NET_WM_PID") {
+            let _ = c.change_property32(PropMode::REPLACE, win, pid_atom, AtomEnum::CARDINAL, &[std::process::id()]);
+        }
         // No input region: clicks go through to what is behind.
         let _ = c.shape_rectangles(shape::SO::SET, shape::SK::INPUT, ClipOrdering::UNSORTED, win, 0, 0, &[]);
         let gc = c.generate_id().ok()?;
