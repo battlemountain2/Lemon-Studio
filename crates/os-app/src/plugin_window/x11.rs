@@ -396,9 +396,53 @@ impl FrameWindow {
         let changed = self.f.state.borrow().clip.as_ref().is_none_or(|c| c.0 != work);
         self.f.state.borrow_mut().clip = Some((work, covers.to_vec()));
         if changed {
+            // The workspace may have shrunk (e.g. browser shown or widened): keep the window in bounds
+            if work[2] > work[0] && work[3] > work[1] {
+                let k = self.scale();
+                let (w, _) = {
+                    let c = self.f.canvas.borrow();
+                    (c.pixmap.width() as i32, c.pixmap.height() as i32)
+                };
+                let (x, y) = self.f.pos.get();
+                let clamped = crate::win_clamp::keep_px((x, y), w, work, k);
+                if clamped != (x, y) {
+                    self.f.pos.set(clamped);
+                    let _ = self.f.conn.c.configure_window(self.f.win, &ConfigureWindowAux::new().x(clamped.0).y(clamped.1));
+                }
+            }
             self.f.refit();
         }
         self.f.apply_clip();
+    }
+
+    /// VIEW > Into workspace: a docked window partly outside the workspace it was clipped to moves fully back in,
+    /// keeping its size (the plugin's editor sets it). Detached windows stay where they are.
+    pub fn move_into_workspace(&self) {
+        if self.detached() {
+            return;
+        }
+        let work = self.f.state.borrow().clip.as_ref().map(|c| c.0);
+        let Some(work) = work else { return };
+        let (w, h) = {
+            let c = self.f.canvas.borrow();
+            (c.pixmap.width() as i32, c.pixmap.height() as i32)
+        };
+        let (x, y) = self.f.pos.get();
+        let to = crate::win_clamp::inside_px([x, y, x + w, y + h], work);
+        self.move_to(to.0, to.1);
+    }
+
+    /// Moves the docked window's top-left to `(x, y)` in the parent's client area (physical px); a detached one stays.
+    pub fn move_to(&self, x: i32, y: i32) {
+        if self.detached() {
+            return;
+        }
+        self.f.pos.set((x, y));
+        let _ = self.f.conn.c.configure_window(self.f.win, &ConfigureWindowAux::new().x(x).y(y));
+        self.f.apply_clip();
+        let _ = self.f.conn.c.flush();
+        expose();
+        os_clap::wake();
     }
 
     /// The native frame window (an X11 window id).
@@ -872,10 +916,19 @@ impl Frame {
             }
             Event::MotionNotify(e) if self.state.borrow().moving.is_some() => {
                 let Some((cx, cy, wx, wy)) = self.state.borrow().moving else { return };
-                let at = (wx + i32::from(e.root_x) - cx, wy + i32::from(e.root_y) - cy);
+                let mut at = (wx + i32::from(e.root_x) - cx, wy + i32::from(e.root_y) - cy);
                 let compositor_drag = if self.state.borrow().detached {
                     self.hypr_drag.borrow_mut().as_mut().is_some_and(|d| d.follow(false))
-                } else { false };
+                } else {
+                    if let Some((work, _)) = self.state.borrow().clip.as_ref() {
+                        if work[2] > work[0] && work[3] > work[1] {
+                            let k = self.scale.get();
+                            let w = self.canvas.borrow().pixmap.width() as i32;
+                            at = crate::win_clamp::keep_px(at, w, *work, k);
+                        }
+                    }
+                    false
+                };
                 if !compositor_drag && at != self.pos.get() {
                     self.pos.set(at);
                     let _ = self.conn.c.configure_window(self.win, &ConfigureWindowAux::new().x(at.0).y(at.1));

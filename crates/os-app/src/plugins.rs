@@ -1262,7 +1262,7 @@ impl Plugins {
 
     /// VIEW > Into workspace for the docked windows: one partly outside the workspace moves fully back in
     /// (`FrameWindow::move_into_workspace`).
-    #[cfg(all(plugin_windows, windows))]
+    #[cfg(all(plugin_windows, any(windows, target_os = "linux")))]
     pub fn move_into_workspace(&self) {
         for w in self.hosted.values().filter_map(|h| h.window.as_ref()) {
             w.move_into_workspace();
@@ -1270,7 +1270,7 @@ impl Plugins {
     }
 
     /// Moves row `row`'s docked window to `(x, y)` (main-window client px; VIEW > Align all channel editors).
-    #[cfg(all(plugin_windows, windows))]
+    #[cfg(all(plugin_windows, any(windows, target_os = "linux")))]
     pub fn move_docked(&self, row: usize, x: i32, y: i32) {
         if let Some(w) = self.hosted.get(&row).and_then(|h| h.window.as_ref()) {
             w.move_to(x, y);

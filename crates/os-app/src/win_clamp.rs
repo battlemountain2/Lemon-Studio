@@ -180,7 +180,7 @@ impl App {
                 set_pos(s, w, (to.x, to.y));
             }
         }
-        #[cfg(all(plugin_windows, windows))]
+        #[cfg(all(plugin_windows, any(windows, target_os = "linux")))]
         self.plugins.move_into_workspace();
         self.invalidate();
     }

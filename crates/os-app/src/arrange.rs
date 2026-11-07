@@ -131,7 +131,7 @@ impl App {
         let (x, y) = channel_home(s);
         s.plugin_pos = (x, y);
         s.plugin_moved = false;
-        #[cfg(all(plugin_windows, windows))]
+        #[cfg(all(plugin_windows, any(windows, target_os = "linux")))]
         {
             let first = usize::from(s.shown(Win::Plugin));
             let k = self.plugins.scale;
