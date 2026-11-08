@@ -459,6 +459,13 @@ lines at the top of the header, `Copyright (C) <year> <name>`, and keep the line
 Join the [Lemon Studio Discord server](https://discord.gg/yC2uCuGs3M) to follow development and talk
 about the project. Please keep in mind that support is not offered at this stage.
 
+### Acknowledgements & Community Forks
+
+Special thanks and credit to community contributors and active forks:
+- **[Mango Studio](https://github.com/apikun/Mango-Studio)** by [@apikun](https://github.com/apikun) — for ergonomic DAW workflow innovations including `Ctrl + Wheel` 1/10th precision micro-stepping on knobs/faders, and smart boundary submenu flipping.
+- **[Wave Candy / Lemon Drop](https://github.com/ItsAlphaNeon/Lemon-Studio/tree/wave-candy)** — upstream visualizer, vectorscope, and oscilloscope engineering.
+
+
 ## Third-party components
 
 | Component | Use | License |

@@ -341,6 +341,8 @@ pub enum Cmd {
     ClipRename(usize),
     ClipRandomColor(usize),
     ClipPreview(usize),
+    /// The audio clip's menu's Convert to MIDI: the clip's sample's pitches become a new pattern's notes.
+    ClipToMidi(usize),
     /// Chop & transient slicing tools (Phase 7: Drum Chopper).
     ChopTransients(usize),
     ChopGrid(usize, ChopGrid),
@@ -2843,6 +2845,7 @@ pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
         if s.project.channel(ch).is_some_and(|chan| chan.kind.is_sampler()) {
             let is_rev = s.project.channel(ch).is_some_and(|chan| chan.sound.fx.flags & os_model::SampleFx::REVERSE != 0);
             items.push(PItem::new("Reverse source sample (Shift+R)", Cmd::ToggleReverse).mark(Mark::Check(is_rev)));
+            items.push(PItem::new("Convert to MIDI", Cmd::ClipToMidi(i)));
         }
     }
     items.push(PItem::new("Transpose +1 semitone (Shift+Alt+Up)", Cmd::Transpose(1)));
@@ -4769,6 +4772,11 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             }
             return None;
         }
+        Cmd::ClipToMidi(i) => {
+            let m = crate::pitch_job::clip_to_midi(app, i);
+            app.invalidate();
+            return Some(m);
+        }
         Cmd::Pick(c, ch) => {
             let m = pick(app, c, ch);
             app.invalidate();
@@ -5083,7 +5091,7 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             snapshot(s);
             (!delete_space(s)).then(|| "Delete space: make a time selection first (right-drag the ruler)".into())
         }
-        Cmd::Consolidate | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::TypeIn(_) | Cmd::Reset(_) | Cmd::Remote(_) | Cmd::MidiExt(_) => None,
+        Cmd::Consolidate | Cmd::ExportTracks | Cmd::QuantizeStarts | Cmd::PointValue(..) | Cmd::ClipPreview(_) | Cmd::ClipToMidi(_) | Cmd::TypeIn(_) | Cmd::Reset(_) | Cmd::Remote(_) | Cmd::MidiExt(_) => None,
         Cmd::StretchMode => {
             s.playlist.stretch = !s.playlist.stretch;
             Some(if s.playlist.stretch { "Stretch mode on: resizing an audio clip stretches it".into() } else { "Stretch mode off".into() })

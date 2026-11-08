@@ -958,6 +958,7 @@ pub fn page(tab: usize, s: &State) -> Vec<Group> {
                     Big(format!("Lemon Studio {}", env!("CARGO_PKG_VERSION"))),
                     txt("A digital audio workstation written in Rust."),
                     txt("Copyright (C) 2026 ItsAlphaNeon and the Lemon Studio contributors."),
+                    txt("Special thanks to apikun (Mango Studio) and community contributors."),
                     Gap(10.0),
                 ],
                 if cfg!(windows) {

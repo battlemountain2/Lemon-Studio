@@ -38,6 +38,7 @@ scratch-session composition milestone, not a network service or a second editing
 | Meter and tempo | Use upstream `Project::bar`, bar-beat BPM and derived quarter-note tick tempo. Preserve runtime invalid-input bounds without clamping the derived tick tempo to displayed-BPM limits; preserve raw tempo metadata in FLP loading. | Meter/count-in tests, derived-tempo clock regression and FLP tests. |
 | Hyprland/XWayland scaling | Retain X11 docking. Linux plugin frames inherit the X11 host scale and docked editors follow scale changes, preserving their active page; docking requests reconcile stale scales. Native Wayland's separate plugin frames retain X-server scaling. | Scale-selection/validation unit tests and the explicit display-dependent `docked_editor_follows_xwayland_parent_scale` check, covering real Lemon Sampler geometry and docking at fractional/integer scales. |
 | CI and bundles | Run inherited platform matrix on main, integrate, feat and fix branches as well as PRs. Lock nested plugin builds. | CI must actually run remotely before claiming Windows/macOS verification. |
+| Mango Studio contributions | Direct credit to @apikun (apikun/Mango-Studio) for ergonomic micro-stepping (Ctrl+Wheel 1/10th control) and smart boundary submenu flipping. | App wheel tests and submenu boundary flip regressions. |
 
 ## Source attribution
 

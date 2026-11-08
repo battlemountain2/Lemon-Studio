@@ -139,9 +139,8 @@ pub fn tools_menu(_s: &State, x: f32, y: f32) -> Popup {
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-/// The toolbar's Options menu (top-left arrow): hierarchical menus matching FL Studio.
-pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
-    use crate::piano_dlg::Tool;
+/// Helper to construct Root Note and Scale submenus.
+pub fn scale_submenus(s: &State) -> (Vec<PItem>, Vec<PItem>) {
     use NCmd::*;
     let root_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
     let cur_root = s.piano.scale_highlight.root;
@@ -197,6 +196,52 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
     }
     scale_items.push(PItem::sub("World & Exotic Scales", exotic_items));
 
+    (root_items, scale_items)
+}
+
+pub fn key_labels_sub(s: &State) -> Vec<PItem> {
+    use NCmd::*;
+    vec![
+        item("All notes (Show labels on all keys)", SetKeyLabels(crate::piano::KeyLabels::AllNotes)).mark(Mark::Radio(s.piano.key_labels == crate::piano::KeyLabels::AllNotes)),
+        item("White notes only", SetKeyLabels(crate::piano::KeyLabels::AllWhite)).mark(Mark::Radio(s.piano.key_labels == crate::piano::KeyLabels::AllWhite)),
+        item("Root notes only", SetKeyLabels(crate::piano::KeyLabels::RootOnly)).mark(Mark::Radio(s.piano.key_labels == crate::piano::KeyLabels::RootOnly)),
+        item("None", SetKeyLabels(crate::piano::KeyLabels::None)).mark(Mark::Radio(s.piano.key_labels == crate::piano::KeyLabels::None)),
+    ]
+}
+
+pub fn note_display_sub(s: &State) -> Vec<PItem> {
+    use NCmd::*;
+    vec![
+        item("Note names (e.g. C5, D#5)", SetNoteDisplay(crate::piano::NoteDisplay::Name)).mark(Mark::Radio(s.piano.note_display == crate::piano::NoteDisplay::Name)),
+        item("MIDI note numbers (e.g. 60, 63)", SetNoteDisplay(crate::piano::NoteDisplay::Number)).mark(Mark::Radio(s.piano.note_display == crate::piano::NoteDisplay::Number)),
+        item("None (Clean note bodies)", SetNoteDisplay(crate::piano::NoteDisplay::None)).mark(Mark::Radio(s.piano.note_display == crate::piano::NoteDisplay::None)),
+    ]
+}
+
+/// Dedicated scale highlighting and musical key helpers menu (opened by Note toolbar button or Alt+H).
+pub fn scale_menu(s: &State, x: f32, y: f32) -> Popup {
+    use NCmd::*;
+    let (root_items, scale_items) = scale_submenus(s);
+    let items = vec![
+        item("Scale highlighting", ToggleScaleHighlight).key("Alt+H").mark(Mark::Check(s.piano.scale_highlight.enabled)),
+        item("Detect scale from notes", DetectScale),
+        item("Snap notes to scale (Key quantize)", SnapToScale),
+        PItem::sep(),
+        PItem::sub("Root note", root_items),
+        PItem::sub("Scale", scale_items),
+        PItem::sep(),
+        PItem::sub("Key labels (Vertical keyboard)", key_labels_sub(s)),
+        PItem::sub("Note labels (Grid notes)", note_display_sub(s)),
+    ];
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// The toolbar's Options menu (top-left arrow): hierarchical menus matching FL Studio.
+pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
+    use crate::piano_dlg::Tool;
+    use NCmd::*;
+    let (root_items, scale_items) = scale_submenus(s);
+
     let helpers_items = vec![
         item("Scale highlighting", ToggleScaleHighlight).key("Alt+H").mark(Mark::Check(s.piano.scale_highlight.enabled)),
         item("Detect scale from notes", DetectScale),
@@ -230,22 +275,9 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         item("Invert selection", InvertSelection).key("Ctrl+Shift+I"),
     ];
 
-    let key_labels_items = vec![
-        item("All notes (Show labels on all keys)", SetKeyLabels(crate::piano::KeyLabels::AllNotes)).mark(Mark::Radio(s.piano.key_labels == crate::piano::KeyLabels::AllNotes)),
-        item("White notes only", SetKeyLabels(crate::piano::KeyLabels::AllWhite)).mark(Mark::Radio(s.piano.key_labels == crate::piano::KeyLabels::AllWhite)),
-        item("Root notes only", SetKeyLabels(crate::piano::KeyLabels::RootOnly)).mark(Mark::Radio(s.piano.key_labels == crate::piano::KeyLabels::RootOnly)),
-        item("None", SetKeyLabels(crate::piano::KeyLabels::None)).mark(Mark::Radio(s.piano.key_labels == crate::piano::KeyLabels::None)),
-    ];
-
-    let note_display_items = vec![
-        item("Note names (e.g. C5, D#5)", SetNoteDisplay(crate::piano::NoteDisplay::Name)).mark(Mark::Radio(s.piano.note_display == crate::piano::NoteDisplay::Name)),
-        item("MIDI note numbers (e.g. 60, 63)", SetNoteDisplay(crate::piano::NoteDisplay::Number)).mark(Mark::Radio(s.piano.note_display == crate::piano::NoteDisplay::Number)),
-        item("None (Clean note bodies)", SetNoteDisplay(crate::piano::NoteDisplay::None)).mark(Mark::Radio(s.piano.note_display == crate::piano::NoteDisplay::None)),
-    ];
-
     let view_items = vec![
-        PItem::sub("Key labels (Vertical keyboard)", key_labels_items),
-        PItem::sub("Note labels (Grid notes)", note_display_items),
+        PItem::sub("Key labels (Vertical keyboard)", key_labels_sub(s)),
+        PItem::sub("Note labels (Grid notes)", note_display_sub(s)),
         PItem::sep(),
         item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
         item("Add time marker", AddMarker).key("Alt+T"),

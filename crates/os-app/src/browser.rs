@@ -79,6 +79,11 @@ impl App {
                         s.rack.select_only(c);
                     }
                     Item::History(e) => s.message = crate::history::go_to(s, e),
+                    Item::FreesoundSearch => {
+                        s.freesound.typing = true;
+                        s.browser_search_focus = true;
+                    }
+                    Item::Freesound(i) => crate::freesound::preview(self, i),
                     _ => {}
                 }
                 if let Item::Sample(path) = &row.item {
@@ -86,7 +91,7 @@ impl App {
                 }
                 let s = &mut self.state;
                 s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
-                if !matches!(row.item, Item::None | Item::File(_) | Item::History(_)) {
+                if !matches!(row.item, Item::None | Item::File(_) | Item::History(_) | Item::FreesoundSearch | Item::Freesound(_)) {
                     self.drag = Some(Drag::Browser { item: row.item, label: row.label, m0: self.mouse, started: false });
                 }
             }
@@ -411,6 +416,28 @@ impl App {
         }
         let s = &mut self.state;
         if focus {
+            // While the Freesound search row has the typing, the field edits the query (Enter searches, Esc leaves).
+            if s.freesound.typing {
+                match key {
+                    Key::Named(NamedKey::Escape) => {
+                        s.freesound.typing = false;
+                        s.browser_search_focus = false;
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        s.freesound.typing = false;
+                        s.browser_search_focus = false;
+                        crate::freesound::start_search(self);
+                    }
+                    Key::Named(NamedKey::Backspace) => {
+                        s.freesound.query.pop();
+                    }
+                    Key::Named(NamedKey::Space) => s.freesound.query.push(' '),
+                    Key::Character(c) if !ctrl && !alt => s.freesound.query.push_str(c),
+                    _ => return false,
+                }
+                self.invalidate();
+                return true;
+            }
             match key {
                 Key::Named(NamedKey::Escape) => {
                     s.browser_search.clear();
@@ -625,7 +652,7 @@ impl App {
                 Win::Mixer => slot(),
                 _ => grid.or(rack),
             },
-            Item::None | Item::File(_) | Item::History(_) | Item::Preset(_) => None,
+            Item::None | Item::File(_) | Item::History(_) | Item::Preset(_) | Item::FreesoundSearch | Item::Freesound(_) => None,
         }?;
         Some((win, r))
     }
@@ -771,7 +798,7 @@ impl App {
                     self.state.message = Some(m);
                 }
             }
-            Item::None | Item::File(_) | Item::History(_) | Item::Preset(_) => {}
+            Item::None | Item::File(_) | Item::History(_) | Item::Preset(_) | Item::FreesoundSearch | Item::Freesound(_) => {}
         }
     }
 
@@ -838,6 +865,7 @@ impl App {
                     s.rack.select_only(c);
                 }
                 Item::History(e) => return crate::history::go_to(s, e),
+                Item::Freesound(i) => crate::freesound::preview(self, i),
                 _ => {}
             },
             RowCmd::Pattern(pc) => {
@@ -1179,6 +1207,7 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
         Item::Generator(index) => items.push(PItem::new("Add to instrument rack", Cmd::Plugin(crate::plugin_menu::PlugCmd::Generator { index, after: None }))),
         Item::Effect(index) => items.push(PItem::new("Add to selected mixer track", Cmd::Plugin(crate::plugin_menu::PlugCmd::Effect { index, slot: None }))),
         Item::History(_) => items.push(r("Go to this step", RowCmd::Activate)),
+        Item::Freesound(_) => items.push(r("Preview", RowCmd::Activate)),
         // Into the selected channel's plugin (spec: plugins/presets.md "Browser").
         Item::Preset(ref p) if crate::channel_states::is_state_file(std::path::Path::new(p)) => {
             items.push(PItem::new("Add to channel rack", Cmd::ChannelState(crate::channel_states::CsCmd::Add(p.into()))));
@@ -1188,7 +1217,7 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
             let it = PItem::new("Load into selected channel", Cmd::Preset(crate::presets::PCmd::Load(key, p.into())));
             items.push(if s.hosted_rows.contains(&key) { it } else { it.off() });
         }
-        Item::None | Item::File(_) | Item::Param(..) | Item::Container => {}
+        Item::None | Item::File(_) | Item::Param(..) | Item::Container | Item::FreesoundSearch => {}
     }
     if let Some(path) = &row.path {
         sep(&mut items);

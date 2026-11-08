@@ -290,6 +290,8 @@ pub enum Action {
     PianoToolsMenu,
     /// Toolbar top-left arrow: full Piano roll options menu (File, Edit, View, Helpers, Tools).
     PianoOptionsMenu,
+    /// Toolbar note button: dedicated scale highlighting and musical key helpers menu.
+    PianoScaleMenu,
     /// Toolbar stamp tool button: chords and scales stamp picker.
     PianoStampMenu,
     /// Piano roll toolbar button & Ctrl+Alt+M: jump to channel's mixer track & signal chain dock.
@@ -1125,6 +1127,10 @@ pub struct State {
     /// Omni Command Palette state (Phase 4).
     pub cmd_palette: crate::palette::Palette,
     pub spectral_progress: Option<(usize, bool)>,
+    /// The audio-to-MIDI conversion running: the clip's sample is being analysed on its thread.
+    pub pitch_job: Option<crate::pitch_job::Job>,
+    /// The browser's Freesound search and preview downloads.
+    pub freesound: crate::freesound::Browser,
     pub rack_pos: (f32, f32),
     pub rack_size: (f32, f32),
     /// Horizontal step scroll of the rack, pixels.
@@ -1623,6 +1629,8 @@ impl App {
                 drag_hud: None,
                 cmd_palette: Default::default(),
                 spectral_progress: None,
+                pitch_job: None,
+                freesound: Default::default(),
                 rack_pos: crate::arrange::RACK_POS,
                 rack_size: views::rack::DEFAULT_SIZE,
                 rack_scroll_x: 0.0,
@@ -4713,6 +4721,14 @@ impl App {
         }
         self.record_tick();
         self.audio_log.tick();
+        // Audio to MIDI: a finished conversion becomes the clip's new pattern.
+        if let Some(job) = self.state.pitch_job.as_mut() {
+            if let Some(done) = job.tick() {
+                self.state.pitch_job = None;
+                self.pitch_done(done);
+            }
+        }
+        crate::freesound::tick(self);
         // CPU panel (spec: ui/main-window.md §13) and the Plugin performance monitor: a reading at the panel's refresh
         // rate.
         let now = std::time::Instant::now();
@@ -8366,7 +8382,9 @@ impl App {
             if id == crate::knobs::KnobId::MasterPitch {
                 v = (v * 24.0).round() / 24.0; // wheel steps from the nearest semitone
             }
-            let v = v + dy.signum() * id.notch() * if dy == 0.0 { 0.0 } else { 1.0 };
+            // Ctrl turns the notch into a tenth of one, the fine adjustment (spec: ui/knobs.md).
+            let fine = if ctrl { 0.1 } else { 1.0 };
+            let v = v + dy.signum() * id.notch() * fine * if dy == 0.0 { 0.0 } else { 1.0 };
             if v.clamp(0.0, 1.0) != self.state.knob(id) {
                 crate::history::knob(&mut self.state, id, true);
             }
@@ -8376,13 +8394,14 @@ impl App {
             self.hint = Cow::Owned(self.state.knob_text(id));
             return None;
         }
-        // The wheel over a mixer fader moves it, not the mixer's scroll (spec: ui/mixer.md §4).
+        // The wheel over a mixer fader moves it, not the mixer's scroll (spec: ui/mixer.md §4); Ctrl
+        // takes a tenth of a notch, the fine adjustment.
         if let Some(Action::Fader(t)) = area
             && dy != 0.0
         {
             let s = &mut self.state;
             let v0 = crate::mixer::track(s, t).map(|m| m.volume.unwrap_or(0.8))?;
-            let v = (v0 + f64::from(dy.signum()) * views::mixer::FADER_NOTCH).clamp(0.0, 1.0);
+            let v = (v0 + f64::from(dy.signum()) * views::mixer::FADER_NOTCH * if ctrl { 0.1 } else { 1.0 }).clamp(0.0, 1.0);
             if v != v0 {
                 // One step for a run of notches on the fader (none with Undo knob tweaks off: a fader is a knob here).
                 if crate::prefs::check(&crate::prefs::UNDO_KNOB_TWEAKS) && !s.history.joins(crate::history::Run::Fader(t)) {
@@ -9885,6 +9904,10 @@ impl App {
             Action::PianoOptionsMenu => {
                 let (x, y) = self.mouse;
                 s.playlist.popup = Some(crate::piano_tools::options_menu(s, x - 6.0, y + 10.0));
+            }
+            Action::PianoScaleMenu => {
+                let (x, y) = self.mouse;
+                s.playlist.popup = Some(crate::piano_tools::scale_menu(s, x - 6.0, y + 10.0));
             }
             Action::PianoStampMenu => {
                 let (x, y) = self.mouse;
@@ -16566,9 +16589,9 @@ mod tests {
         app.state.playlist.reset();
         app.state.z = vec![Win::Playlist];
         frame(&mut app, &mut c, None);
-        // The all tab lists the roots with content, the preset store and the channel states, all closed.
+        // The all tab lists the roots with content, the preset store, channel states, and Freesound, all closed.
         let labels: Vec<String> = rows(&app.state).into_iter().map(|r| r.label).collect();
-        assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets", "Channel presets"]);
+        assert_eq!(labels, ["Current project", "Plugin library", "Plugin presets", "Channel presets", "Freesound"]);
         // Project tab: Current project opened with its patterns (default like the screenshot), History above them.
         let r0 = hit_rect(&app, &Action::BrowserTab(1));
         click(&mut app, &mut c, r0);
@@ -17824,7 +17847,7 @@ mod tests {
         // Esc clears the search and leaves the box.
         app.key(&Key::Named(NamedKey::Escape), false, false);
         assert!(app.state.browser_search.is_empty() && !app.state.browser_search_focus);
-        assert_eq!(rows(&app.state).len(), 4);
+        assert_eq!(rows(&app.state).len(), 5);
         // Search box on top moves the list down.
         app.browser_cmd(crate::browser::BCmd::Toggle("top"));
         frame(&mut app, &mut c, None);
@@ -25660,6 +25683,72 @@ mod tests {
         assert!(!app.typing_key(KeyCode::KeyZ, false, false, false));
         app.release_keys_up(|_| false);
         assert!(app.typing_held.is_empty());
+    }
+
+    /// Ctrl+wheel takes a tenth of a step on the mixer fader and on a knob, the fine adjustment;
+    /// the plain wheel keeps its full notch.
+    #[test]
+    fn ctrl_wheel_takes_a_tenth_step() {
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        app.state.project = test_project();
+        app.state.z = vec![Win::Mixer];
+        frame(&mut app, &mut c, None);
+        let vol = |app: &App| crate::mixer::track(&app.state, 1).unwrap().volume.unwrap();
+        let r = hit_rect(&app, &Action::Fader(1));
+        app.mouse_move(r.cx(), r.cy());
+        let v0 = vol(&app);
+        app.wheel(0.0, 1.0, false, false);
+        let v_plain = vol(&app);
+        assert!((v_plain - (v0 + views::mixer::FADER_NOTCH)).abs() < 1e-4);
+        if let Some(m) = crate::mixer::track_mut(&mut app.state, 1) {
+            m.volume = Some(v0);
+        }
+        app.wheel(0.0, 1.0, false, true);
+        let v_ctrl = vol(&app);
+        assert!((v_ctrl - (v0 + views::mixer::FADER_NOTCH * 0.1)).abs() < 1e-4);
+    }
+
+    /// A submenu that would not fit to the right of its parent opens to the left of it instead of clamped
+    /// back on top of the parent menu; with room it stays to the right.
+    #[test]
+    fn submenu_near_the_right_edge_opens_left() {
+        use crate::playlist::{Cmd, PItem, Popup};
+        let Ok(mut c) = Canvas::new(1920, 1080, 1.0) else { return };
+        let mut app = App::new(None);
+        let menu = || Popup { x: 300.0, y: 200.0, items: vec![PItem::sub("Big", vec![PItem::new("Sub", Cmd::Nothing)])], sub: Some(0), scroll: [0; 2] };
+        // Room to the right: the submenu sits to the right of the parent row.
+        app.state.playlist.popup = Some(menu());
+        frame(&mut app, &mut c, None);
+        let row = hit_rect(&app, &Action::PlPopup(0));
+        let sub = hit_rect(&app, &Action::PlPopupSub(0));
+        assert!(sub.x >= row.right() - 1.0, "to the right with room: {} vs {}", sub.x, row.right());
+        // Anchored past the right edge (the parent itself is clamped on screen): flipped to the left of the parent.
+        app.state.playlist.popup = Some(Popup { x: 1850.0, ..menu() });
+        frame(&mut app, &mut c, None);
+        let row = hit_rect(&app, &Action::PlPopup(0));
+        let sub = hit_rect(&app, &Action::PlPopupSub(0));
+        assert!(sub.right() <= row.x + 1.0, "left of the parent: {} vs {}", sub.right(), row.x);
+        assert!(sub.x >= 0.0, "still on screen");
+    }
+
+    /// Audio to MIDI converts an audio clip's sample pitches into a new pattern's notes.
+    #[test]
+    fn audio_to_midi_converts_sample() {
+        let mut app = App::new(None);
+        let done = crate::pitch_job::Done {
+            name: "test_sample".into(),
+            ch: 0,
+            notes: vec![
+                crate::pitch_job::NoteOut { start: 0.0, end: 0.5, key: 60 },
+                crate::pitch_job::NoteOut { start: 0.5, end: 1.0, key: 64 },
+            ],
+        };
+        app.pitch_done(Some(done));
+        let notes = crate::piano::notes(&app.state);
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].key, 60);
+        assert_eq!(notes[1].key, 64);
     }
 }
 

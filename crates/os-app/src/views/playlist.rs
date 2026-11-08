@@ -1629,12 +1629,12 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
             // What the menu is: its entries, where it opened (spec: ui/animations.md §4.2).
             let key = crate::motion::key((p.x.to_bits(), p.y.to_bits(), p.items.iter().map(|it| &*it.label).collect::<Vec<_>>()));
             let fx = MenuFx { s, slot: crate::motion::Slot::Popup, key, anchor: (p.x / k, p.y / k), k };
-            let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, fx, p.scroll[0]);
+            let (_, rows) = popup_list(ui, &p.items, p.x / k, p.y / k, (w, h), p.sub, fx, p.scroll[0], None);
             if let Some(i) = p.sub {
                 if let (Some(item), Some(rr)) = (p.items.get(i), rows.get(i)) {
                     let key = crate::motion::key((key, i));
                     let fx = MenuFx { s, slot: crate::motion::Slot::Sub, key, anchor: (rr.right(), rr.y), k };
-                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, fx, p.scroll[1]);
+                    popup_list(ui, &item.children, rr.right(), rr.y - 2.0, (w, h), None, fx, p.scroll[1], Some(rr.x));
                 }
             }
         });
@@ -1757,9 +1757,11 @@ pub fn menu_highlight(ui: &mut Ui, rr: Rect, lemon: bool) {
 
 /// Draw a popup list at (x, y) kept on screen; returns its rect and each item's row rect. Columns wider than the
 /// screen: the ones that fit from column `scroll` on, and a scroll bar under them (spec: ui/menus.md "Menus wider than
-/// the window"). It appears and its highlight glides as `fx` says (spec: ui/animations.md §4.2).
+/// the window"). It appears and its highlight glides as `fx` says (spec: ui/animations.md §4.2). A submenu
+/// (`parent_left`, the parent row's left edge) that would not fit to the right of its anchor opens to the left of its
+/// parent menu instead of clamped back on top of it.
 #[allow(clippy::too_many_arguments)]
-fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, fx: MenuFx, scroll: usize) -> (Rect, Vec<Rect>) {
+fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f32), open: Option<usize>, fx: MenuFx, scroll: usize, parent_left: Option<f32>) -> (Rect, Vec<Rect>) {
     let sub = fx.slot == crate::motion::Slot::Sub;
     let t = ui.t;
     let font = Font::new(14);
@@ -1786,7 +1788,13 @@ fn popup_list(ui: &mut Ui, items: &[pl::PItem], x: f32, y: f32, screen: (f32, f3
     let shown = if bar_h > 0.0 { ((room / cw) as usize).clamp(1, cols) } else { cols };
     let first = scroll.min(cols - shown);
     let (w, h) = (cw * shown as f32, body_h + 2.0 * m.border + bar_h);
-    let x = x.min(screen.0 - w - 2.0).max(0.0);
+    let x = if x + w + 2.0 > screen.0 {
+        parent_left
+            .and_then(|l| (l - w - 2.0 >= 0.0).then_some(l - w - 2.0))
+            .unwrap_or_else(|| (screen.0 - w - 2.0).max(0.0))
+    } else {
+        x.max(0.0)
+    };
     let y = y.min(screen.1 - h - 2.0).max(0.0);
     let r = Rect::new(x, y, w, h);
     let menu = if sub { crate::app::MENU_SUB } else { crate::app::MENU_POPUP };

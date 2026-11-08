@@ -435,10 +435,10 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
     let active = s.piano.tool;
     let ox = r.x - 209.0 + shift;
     let items: [(f32, Icon, &'static str, Option<Action>); 16] = [
-        (222.0, Icon::ArrowRight, "Piano roll options (File, Edit, Helpers, View)", Some(Action::PianoOptionsMenu)),
+        (222.0, Icon::ArrowRight, "Piano roll options (File, Edit, Select, Tools, View, Helpers, Snap)", Some(Action::PianoOptionsMenu)),
         (242.0, Icon::MidiControl, "Piano roll tools: quantize, chop, strum, arpeggiate, 808 generate...", Some(Action::PianoToolsMenu)),
         (263.0, Icon::Magnet, "", Some(Action::PianoSnapMenu)),
-        (283.0, Icon::Note, "Note properties", None),
+        (283.0, Icon::Note, "Scale highlighting & key helpers (Alt+H)", Some(Action::PianoScaleMenu)),
         (305.0, Icon::Blend, "Stamp tool: chords & scale stamps (click note grid to stamp)", Some(Action::PianoStampMenu)),
         (327.0, Icon::Undo, "Undo (Ctrl+Z)", Some(Action::PianoUndo)),
         (360.0, Icon::Pencil, "Draw (P)", Some(Action::PianoTool(Tool::Draw))),
@@ -459,7 +459,9 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
             icons::draw(ui.c, icon, b, t.text_faint);
             continue;
         };
-        let on = action == Action::PianoTool(active) || (action == Action::PianoStampMenu && s.piano.stamp.is_some());
+        let on = action == Action::PianoTool(active)
+            || (action == Action::PianoStampMenu && s.piano.stamp.is_some())
+            || (action == Action::PianoScaleMenu && s.piano.scale_highlight.enabled);
         // The magnet's hint names the current snap (spec: ui/piano-snap.md §8).
         let hint: std::borrow::Cow<'static, str> = if action == Action::PianoSnapMenu { crate::piano_snap::hint(s).into() } else { hint.into() };
         let hov = ui.hit(b, action, hint);

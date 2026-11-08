@@ -20,6 +20,8 @@ pub mod formula_ctrl;
 pub mod limiter;
 pub mod love_philter;
 pub mod maximus;
+pub mod oneknob;
+pub mod otter;
 pub mod peak_ctrl;
 pub mod phaser;
 pub mod reverb;
