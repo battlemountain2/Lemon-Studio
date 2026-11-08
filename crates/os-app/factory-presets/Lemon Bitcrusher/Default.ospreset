@@ -1,0 +1,7 @@
+OSPRESET 1
+plugin=Lemon Bitcrusher	id=clap:org.openstudio.lemon-bitcrusher	format=clap	body=params
+Bit depth = 8
+Downsample = 4
+Drive = 128
+Mix = 128
+Post gain = 128

@@ -393,6 +393,7 @@ pub fn builtin_effects() -> Vec<Available> {
         &lemon_delay::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_soft_clipper::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_fast_distortion::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_bitcrusher::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_balance::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_stereo_enhancer::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_transient_processor::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
@@ -1561,12 +1562,13 @@ pub const LEMON_WAVETABLE: &str = "Lemon Wavetable";
 /// Lemon Studio's effects compiled in besides the EQ (`builtin_effects`, in this order). They have no file plugin of
 /// their own to be stored as, so a project stores them wrapped, as it stored their plugin files
 /// (`project_plugins::is_wrapped`).
-pub const LINKED_EFFECTS: [&str; 17] = [
+pub const LINKED_EFFECTS: [&str; 18] = [
     "Lemon Limiter",
     "Lemon Reverb",
     "Lemon Delay",
     "Lemon Soft Clipper",
     "Lemon Fast Distortion",
+    "Lemon Bitcrusher",
     "Lemon Balance",
     "Lemon Stereo Enhancer",
     "Lemon Transient Processor",
@@ -1662,6 +1664,7 @@ pub fn recreation_state_from_fl(lemon: &str, fl: &[u8]) -> Option<Vec<u8>> {
         "Lemon Delay" => lemon_delay::params::plugin_state_from_fl(fl),
         "Lemon Soft Clipper" => small(lemon_small_fx::soft_clipper::SPEC, fl),
         "Lemon Fast Distortion" => small(lemon_small_fx::fast_distortion::SPEC, fl),
+        "Lemon Bitcrusher" => small(lemon_small_fx::bitcrusher::SPEC, fl),
         "Lemon Balance" => small(lemon_small_fx::balance::SPEC, fl),
         "Lemon Stereo Enhancer" => small(lemon_small_fx::stereo_enhancer::SPEC, fl),
         "Lemon Transient Processor" => small(lemon_small_fx::transient_processor::SPEC, fl),
@@ -1686,6 +1689,7 @@ pub fn fl_from_recreation_state(lemon: &str, blob: &[u8]) -> Option<Vec<u8>> {
         "Lemon Delay" => lemon_delay::params::fl_from_plugin_state(blob),
         "Lemon Soft Clipper" => small(lemon_small_fx::soft_clipper::SPEC, blob),
         "Lemon Fast Distortion" => small(lemon_small_fx::fast_distortion::SPEC, blob),
+        "Lemon Bitcrusher" => small(lemon_small_fx::bitcrusher::SPEC, blob),
         "Lemon Balance" => small(lemon_small_fx::balance::SPEC, blob),
         "Lemon Stereo Enhancer" => small(lemon_small_fx::stereo_enhancer::SPEC, blob),
         "Lemon Transient Processor" => small(lemon_small_fx::transient_processor::SPEC, blob),

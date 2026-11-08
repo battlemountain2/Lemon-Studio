@@ -288,6 +288,10 @@ pub enum Cmd {
     Consolidate,
     /// Shift+R: toggle sample reverse on selected audio clips.
     ToggleReverse,
+    /// Transpose selected audio clips (cents) or pattern clips (semitones).
+    Transpose(i16),
+    /// Generates structured song arrangement with markers and clips.
+    Arrangement(crate::grooves::ArrangementStyle),
     ColorGradient,
     SelectAll,
     Deselect,
@@ -2841,6 +2845,10 @@ pub fn clip_menu(s: &State, i: usize, x: f32, y: f32) -> Popup {
             items.push(PItem::new("Reverse source sample (Shift+R)", Cmd::ToggleReverse).mark(Mark::Check(is_rev)));
         }
     }
+    items.push(PItem::new("Transpose +1 semitone (Shift+Alt+Up)", Cmd::Transpose(1)));
+    items.push(PItem::new("Transpose -1 semitone (Shift+Alt+Down)", Cmd::Transpose(-1)));
+    items.push(PItem::new("Transpose +1 octave (Ctrl+Shift+Up)", Cmd::Transpose(12)));
+    items.push(PItem::new("Transpose -1 octave (Ctrl+Shift+Down)", Cmd::Transpose(-12)));
     // Chop / Slice tools (Phase 7: Drum Chopper)
     let chop_sub = vec![
         PItem::new("Slice at transients (Drum Chopper)", Cmd::ChopTransients(i)),
@@ -4810,6 +4818,56 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
             let count = toggled_channels.len();
             return Some(format!("Reversed {count} source sample{} (all clips using the source)", if count == 1 { "" } else { "s" }));
         }
+        Cmd::Transpose(semitones) => {
+            let s = &mut app.state;
+            let targets: Vec<usize> = if !s.playlist.sel.is_empty() {
+                s.playlist.sel.clone()
+            } else if let Some(ci) = s.playlist.hover_clip {
+                vec![ci]
+            } else {
+                Vec::new()
+            };
+            if targets.is_empty() {
+                return Some("Transpose: select or hover a clip first".into());
+            }
+            crate::playlist::snapshot_as(s, "Transpose clips");
+            let mut count = 0;
+            let mut transposed_pats = std::collections::BTreeSet::new();
+            let mut transposed_channels = std::collections::BTreeSet::new();
+            for &ci in &targets {
+                if ci >= clips(s).len() { continue; }
+                let c = clips(s)[ci];
+                match c.source {
+                    ClipSource::Channel(ch) => {
+                        if transposed_channels.insert(ch) {
+                            if let Some(chan) = s.project.channels.iter_mut().find(|chan| chan.index == ch) {
+                                chan.pitch_cents = (chan.pitch_cents + (semitones as i32) * 100).clamp(-4800, 4800);
+                                count += 1;
+                            }
+                        }
+                    }
+                    ClipSource::Pattern(pat) => {
+                        if transposed_pats.insert(pat) {
+                            if let Some(p) = s.project.patterns.iter_mut().find(|p| p.number == pat) {
+                                for n in &mut p.notes {
+                                    let new_key = (n.key as i32) + (semitones as i32);
+                                    n.key = new_key.clamp(0, 127) as u16;
+                                }
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            s.piano.dirty = true;
+            app.invalidate();
+            return Some(format!("Transposed {count} clip source(s) by {:+} semitone(s)", semitones));
+        }
+        Cmd::Arrangement(style) => {
+            let msg = crate::grooves::generate_arrangement(&mut app.state, style);
+            app.invalidate();
+            return Some(msg);
+        }
         Cmd::ColorGradient => {
             gradient(&mut app.state);
             app.invalidate();
@@ -4856,6 +4914,8 @@ pub fn run(app: &mut App, cmd: Cmd) -> Option<String> {
     let msg = match cmd {
         Cmd::Nothing
             | Cmd::ToggleReverse
+            | Cmd::Transpose(_)
+            | Cmd::Arrangement(_)
             | Cmd::ColorGradient
             | Cmd::ChopTransients(_)
             | Cmd::ChopGrid(..)
@@ -5752,6 +5812,10 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Named(NamedKey::PageDown) => Cmd::ZoomOut,
         Key::Named(NamedKey::ArrowLeft) if shift => Cmd::ShiftTime(-1),
         Key::Named(NamedKey::ArrowRight) if shift => Cmd::ShiftTime(1),
+        Key::Named(NamedKey::ArrowUp) if shift && alt => Cmd::Transpose(1),
+        Key::Named(NamedKey::ArrowDown) if shift && alt => Cmd::Transpose(-1),
+        Key::Named(NamedKey::ArrowUp) if ctrl && shift => Cmd::Transpose(12),
+        Key::Named(NamedKey::ArrowDown) if ctrl && shift => Cmd::Transpose(-12),
         Key::Named(NamedKey::ArrowUp) if shift => Cmd::ShiftTracks(-1),
         Key::Named(NamedKey::ArrowDown) if shift => Cmd::ShiftTracks(1),
         Key::Named(NamedKey::ArrowUp) if ctrl => {
@@ -6262,5 +6326,29 @@ mod tests {
         crate::history::undo(&mut app.state);
         crate::history::undo(&mut app.state);
         assert!(crate::mixer::track(&app.state, t).unwrap().slot_cpu.iter().all(|c| c.threaded));
+    }
+
+    #[test]
+    fn test_playlist_transpose_and_arrangement_cmds() {
+        let mut app = crate::app::App::new(None);
+        let s = &mut app.state;
+        let p1 = ClipSource::Pattern(1);
+        let clip = Clip::new(0, 96, 0, p1);
+        arr_mut(s).clips = vec![clip];
+        s.playlist.sel = vec![0];
+
+        // Add a note to pattern 1
+        let p = s.project.patterns.iter_mut().find(|p| p.number == 1).unwrap();
+        p.notes = vec![os_model::Note { key: 60, ..os_model::Note::step(0, 0) }];
+
+        // Transpose pattern notes +2 semitones
+        let msg = run(&mut app, Cmd::Transpose(2));
+        assert!(msg.is_some());
+        assert_eq!(app.state.project.patterns.iter().find(|p| p.number == 1).unwrap().notes[0].key, 62);
+
+        // Transpose arrangement command
+        let arr_msg = run(&mut app, Cmd::Arrangement(crate::grooves::ArrangementStyle::TrapStructure));
+        assert!(arr_msg.is_some());
+        assert_eq!(arr_mut(&mut app.state).markers.len(), 5);
     }
 }

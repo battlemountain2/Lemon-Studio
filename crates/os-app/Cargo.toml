@@ -38,6 +38,7 @@ lemon-reverb = { path = "../../plugins/lemon-reverb", features = ["linked"] }
 lemon-delay = { path = "../../plugins/lemon-delay", features = ["linked"] }
 lemon-soft-clipper = { path = "../../plugins/lemon-soft-clipper", features = ["linked"] }
 lemon-fast-distortion = { path = "../../plugins/lemon-fast-distortion", features = ["linked"] }
+lemon-bitcrusher = { path = "../../plugins/lemon-bitcrusher", features = ["linked"] }
 lemon-balance = { path = "../../plugins/lemon-balance", features = ["linked"] }
 lemon-stereo-enhancer = { path = "../../plugins/lemon-stereo-enhancer", features = ["linked"] }
 lemon-transient-processor = { path = "../../plugins/lemon-transient-processor", features = ["linked"] }

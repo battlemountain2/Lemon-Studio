@@ -1943,6 +1943,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lemon-bitcrusher"
+version = "0.0.1"
+dependencies = [
+ "lemon-small-fx",
+ "nih_plug",
+ "os-plugkit",
+]
+
+[[package]]
 name = "lemon-chorus"
 version = "0.0.1"
 dependencies = [
@@ -3004,6 +3013,7 @@ dependencies = [
  "jpeg-decoder",
  "lemon-3x-osc",
  "lemon-balance",
+ "lemon-bitcrusher",
  "lemon-chorus",
  "lemon-delay",
  "lemon-drum-sampler",

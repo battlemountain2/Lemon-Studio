@@ -42,6 +42,12 @@ pub enum NCmd {
     StockLength(crate::playlist::Snap),
     /// Make a channel rack row the piano roll's channel (the title's channel menu).
     Target(usize),
+    /// Smart MIDI & Grooves
+    ToggleSlide,
+    AddOctaveSlide,
+    Humanize,
+    SnapToScale,
+    Generate808,
 }
 
 fn item(label: &'static str, c: NCmd) -> PItem {
@@ -76,6 +82,12 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         item("Randomize...", Dialog(Tool::Randomize)).key("Alt+R"),
         item("Scale levels...", Dialog(Tool::Levels)).key("Alt+X"),
         item("LFO...", Dialog(Tool::Lfo)).key("Alt+O"),
+        PItem::head("Smart MIDI"),
+        item("Auto-generate 808 bassline from chords", Generate808),
+        item("Toggle slide notes (808 glide)", ToggleSlide),
+        item("Add octave slide-up glide", AddOctaveSlide),
+        item("Humanize notes (timing & velocity)", Humanize).key("Alt+H"),
+        item("Snap notes to scale (key quantize)", SnapToScale),
         PItem::head("View"),
         item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
         item("Add time marker", AddMarker).key("Alt+T"),
@@ -122,6 +134,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if alt && !ctrl && is(c, "x") => NCmd::Dialog(crate::piano_dlg::Tool::Levels),
         Key::Character(c) if alt && !ctrl && is(c, "o") => NCmd::Dialog(crate::piano_dlg::Tool::Lfo),
         Key::Character(c) if alt && !ctrl && is(c, "r") => NCmd::Dialog(crate::piano_dlg::Tool::Randomize),
+        Key::Character(c) if alt && !ctrl && is(c, "h") => NCmd::Humanize,
         Key::Character(c) if alt && !ctrl && is(c, "v") => NCmd::Ghosts,
         Key::Character(c) if alt && !ctrl && !shift && is(c, "t") => NCmd::AddMarker,
         Key::Character(c) if ctrl && !alt && is(c, "d") => {
@@ -354,6 +367,11 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
             app.invalidate();
             return Some(m);
         }
+        NCmd::ToggleSlide => return Some(crate::grooves::toggle_slide_notes(s)),
+        NCmd::AddOctaveSlide => return Some(crate::grooves::add_octave_slide(s)),
+        NCmd::Humanize => return Some(crate::grooves::humanize_notes(s, 6, 3)),
+        NCmd::SnapToScale => return Some(crate::grooves::snap_notes_to_scale(s)),
+        NCmd::Generate808 => return Some(crate::grooves::generate_808_bassline(s)),
     };
     s.piano.dirty = true;
     Some(msg)

@@ -19,6 +19,7 @@
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
 pub mod balance;
+pub mod bitcrusher;
 pub mod chorus;
 pub mod editor;
 pub mod fast_distortion;

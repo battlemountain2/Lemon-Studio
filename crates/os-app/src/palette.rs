@@ -22,6 +22,7 @@ pub enum Category {
     Mixer,
     Automation,
     Groove,
+    Arrangement,
 }
 
 impl Category {
@@ -35,6 +36,7 @@ impl Category {
             Category::Mixer => "MIXER",
             Category::Automation => "AUTO",
             Category::Groove => "GROOVE",
+            Category::Arrangement => "ARRANGE",
         }
     }
 
@@ -49,6 +51,7 @@ impl Category {
             Category::Mixer => (Color::rgb(0x133848), Color::rgb(0x38bdf8)),
             Category::Automation => (Color::rgb(0x402208), Color::rgb(0xfb923c)),
             Category::Groove => (Color::rgb(0x421236), Color::rgb(0xf43f5e)),
+            Category::Arrangement => (Color::rgb(0x0e3a3a), Color::rgb(0x2dd4bf)),
         }
     }
 }
@@ -82,6 +85,13 @@ pub enum PaletteAction {
     AddAutomationClip,
     ApplyDrumGroove(crate::grooves::DrumGroove),
     ApplyChordProgression(crate::grooves::ChordProgression),
+    Generate808,
+    ToggleSlide,
+    AddOctaveSlide,
+    HumanizeNotes,
+    SnapNotesToScale,
+    TransposeClips(i16),
+    GenerateArrangement(crate::grooves::ArrangementStyle),
 }
 
 /// A single item searchable within the command palette.
@@ -697,6 +707,88 @@ pub fn items(s: &State) -> Vec<PaletteItem> {
         });
     }
 
+    // Smart Pattern & 808 MIDI Tools
+    list.push(PaletteItem {
+        title: "Auto-Generate 808 Bassline from Chords".into(),
+        subtitle: "Extracts chord roots into syncopated sub-bass with octave slides".into(),
+        category: Category::Groove,
+        shortcut: None,
+        action: PaletteAction::Generate808,
+    });
+    list.push(PaletteItem {
+        title: "Toggle Slide Notes (808 Glides)".into(),
+        subtitle: "Flips 0x0008 slide note flag on selected notes in piano roll".into(),
+        category: Category::Groove,
+        shortcut: None,
+        action: PaletteAction::ToggleSlide,
+    });
+    list.push(PaletteItem {
+        title: "Add Octave Slide-Up (+12 st) to Selected Notes".into(),
+        subtitle: "Appends gliding slide note to note tails for 808 pitch bends".into(),
+        category: Category::Groove,
+        shortcut: None,
+        action: PaletteAction::AddOctaveSlide,
+    });
+    list.push(PaletteItem {
+        title: "Humanize Notes (Micro-Timing & Velocity)".into(),
+        subtitle: "Injects organic swing (±6 velocity, ±3 ticks) to notes".into(),
+        category: Category::Groove,
+        shortcut: Some("Alt+H"),
+        action: PaletteAction::HumanizeNotes,
+    });
+    list.push(PaletteItem {
+        title: "Snap Notes to Scale (Key Quantize)".into(),
+        subtitle: "Snaps out-of-key note pitches to current piano roll scale highlight".into(),
+        category: Category::Groove,
+        shortcut: None,
+        action: PaletteAction::SnapNotesToScale,
+    });
+
+    // Song Arrangement & Structure Generators
+    for style in [
+        crate::grooves::ArrangementStyle::TrapStructure,
+        crate::grooves::ArrangementStyle::DigicoreStructure,
+        crate::grooves::ArrangementStyle::EdmStructure,
+    ] {
+        list.push(PaletteItem {
+            title: style.title().into(),
+            subtitle: style.subtitle().into(),
+            category: Category::Arrangement,
+            shortcut: None,
+            action: PaletteAction::GenerateArrangement(style),
+        });
+    }
+
+    // Clip Pitch Manipulation & Transposition
+    list.push(PaletteItem {
+        title: "Transpose Selected Clips +1 Semitone".into(),
+        subtitle: "Pitch shift audio clips (+100 cents) or pattern notes (+1 st)".into(),
+        category: Category::Arrangement,
+        shortcut: Some("Shift+Alt+Up"),
+        action: PaletteAction::TransposeClips(1),
+    });
+    list.push(PaletteItem {
+        title: "Transpose Selected Clips -1 Semitone".into(),
+        subtitle: "Pitch shift audio clips (-100 cents) or pattern notes (-1 st)".into(),
+        category: Category::Arrangement,
+        shortcut: Some("Shift+Alt+Down"),
+        action: PaletteAction::TransposeClips(-1),
+    });
+    list.push(PaletteItem {
+        title: "Transpose Selected Clips +1 Octave (+12 st)".into(),
+        subtitle: "Pitch shift audio clips (+1200 cents) or pattern notes (+12 st)".into(),
+        category: Category::Arrangement,
+        shortcut: Some("Ctrl+Shift+Up"),
+        action: PaletteAction::TransposeClips(12),
+    });
+    list.push(PaletteItem {
+        title: "Transpose Selected Clips -1 Octave (-12 st)".into(),
+        subtitle: "Pitch shift audio clips (-1200 cents) or pattern notes (-12 st)".into(),
+        category: Category::Arrangement,
+        shortcut: Some("Ctrl+Shift+Down"),
+        action: PaletteAction::TransposeClips(-12),
+    });
+
     // 5. Channels & Automation in Current Project
     for (i, ch) in s.project.channels.iter().enumerate() {
         let name = ch.name.as_deref().unwrap_or("Channel");
@@ -1042,6 +1134,36 @@ pub fn execute(app: &mut App, item: &PaletteItem) {
         PaletteAction::ApplyChordProgression(prog) => {
             crate::grooves::apply_chord_progression(&mut app.state, *prog);
         }
+        PaletteAction::Generate808 => {
+            let msg = crate::grooves::generate_808_bassline(&mut app.state);
+            app.state.message = Some(msg);
+        }
+        PaletteAction::ToggleSlide => {
+            let msg = crate::grooves::toggle_slide_notes(&mut app.state);
+            app.state.message = Some(msg);
+        }
+        PaletteAction::AddOctaveSlide => {
+            let msg = crate::grooves::add_octave_slide(&mut app.state);
+            app.state.message = Some(msg);
+        }
+        PaletteAction::HumanizeNotes => {
+            let msg = crate::grooves::humanize_notes(&mut app.state, 6, 3);
+            app.state.message = Some(msg);
+        }
+        PaletteAction::SnapNotesToScale => {
+            let msg = crate::grooves::snap_notes_to_scale(&mut app.state);
+            app.state.message = Some(msg);
+        }
+        PaletteAction::TransposeClips(semi) => {
+            if let Some(msg) = crate::playlist::run(app, crate::playlist::Cmd::Transpose(*semi)) {
+                app.state.message = Some(msg);
+            }
+        }
+        PaletteAction::GenerateArrangement(style) => {
+            if let Some(msg) = crate::playlist::run(app, crate::playlist::Cmd::Arrangement(*style)) {
+                app.state.message = Some(msg);
+            }
+        }
     }
     app.invalidate();
 }
@@ -1269,6 +1391,7 @@ mod tests {
         assert_eq!(Category::Mixer.label(), "MIXER");
         assert_eq!(Category::Automation.label(), "AUTO");
         assert_eq!(Category::Groove.label(), "GROOVE");
+        assert_eq!(Category::Arrangement.label(), "ARRANGE");
 
         let (bg, fg) = Category::Action.colors();
         assert_ne!(bg, fg);
@@ -1276,5 +1399,7 @@ mod tests {
         assert_ne!(bg_a, fg_a);
         let (bg_g, fg_g) = Category::Groove.colors();
         assert_ne!(bg_g, fg_g);
+        let (bg_r, fg_r) = Category::Arrangement.colors();
+        assert_ne!(bg_r, fg_r);
     }
 }
