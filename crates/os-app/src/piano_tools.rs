@@ -54,6 +54,11 @@ pub enum NCmd {
     SetScaleRoot(u8),
     SetScale(usize),
     DetectScale,
+    SetKeyLabels(crate::piano::KeyLabels),
+    SetNoteDisplay(crate::piano::NoteDisplay),
+    SelectAll,
+    SelectNone,
+    InvertSelection,
 }
 
 fn item(label: &'static str, c: NCmd) -> PItem {
@@ -147,15 +152,55 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         root_items.push(item(name, SetScaleRoot(r as u8)).mark(Mark::Radio(cur_root == r as u8)));
     }
 
+    let common_scales = [
+        (67, "Major (Ionian)"),
+        (73, "Minor Natural (Aeolian)"),
+        (70, "Minor Harmonic"),
+        (71, "Minor Melodic"),
+        (68, "Major Pentatonic"),
+        (72, "Minor Pentatonic"),
+        (80, "Blues"),
+    ];
+    let mode_scales = [
+        (84, "Dorian"),
+        (85, "Phrygian"),
+        (86, "Lydian"),
+        (87, "Mixolydian"),
+        (88, "Locrian"),
+    ];
+    let exotic_scales = [
+        (76, "Whole Tone"),
+        (77, "Diminished"),
+        (78, "Dominant Bebop"),
+        (69, "Major Bebop"),
+        (79, "Japanese In Sen"),
+        (81, "Arabic"),
+        (75, "Minor Hungarian"),
+        (74, "Minor Neapolitan"),
+        (83, "Neapolitan"),
+        (82, "Enigmatic"),
+    ];
+
     let mut scale_items = Vec::new();
-    for sc in 67..=88usize {
-        let name = crate::chords::label(sc);
-        scale_items.push(item(name, SetScale(sc)).mark(Mark::Radio(cur_scale == sc)));
+    for (sc, label) in common_scales {
+        scale_items.push(item(label, SetScale(sc)).mark(Mark::Radio(cur_scale == sc)));
     }
+    scale_items.push(PItem::sep());
+    let mut mode_items = Vec::new();
+    for (sc, label) in mode_scales {
+        mode_items.push(item(label, SetScale(sc)).mark(Mark::Radio(cur_scale == sc)));
+    }
+    scale_items.push(PItem::sub("Modes (Dorian, Lydian...)", mode_items));
+    let mut exotic_items = Vec::new();
+    for (sc, label) in exotic_scales {
+        exotic_items.push(item(label, SetScale(sc)).mark(Mark::Radio(cur_scale == sc)));
+    }
+    scale_items.push(PItem::sub("World & Exotic Scales", exotic_items));
 
     let helpers_items = vec![
         item("Scale highlighting", ToggleScaleHighlight).key("Alt+H").mark(Mark::Check(s.piano.scale_highlight.enabled)),
         item("Detect scale from notes", DetectScale),
+        item("Snap notes to scale (Key quantize)", SnapToScale),
         PItem::sep(),
         PItem::sub("Root note", root_items),
         PItem::sub("Scale", scale_items),
@@ -172,11 +217,47 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         PItem::new("Paste", Cmd::Paste).key("Ctrl+V"),
         PItem::new("Delete", Cmd::Delete).key("Del"),
         item("Duplicate", Duplicate).key("Ctrl+B"),
+        PItem::sep(),
         item("Quick legato", Legato).key("Ctrl+L"),
         item("Quick chop", QuickChop).key("Ctrl+U"),
         item("Glue", Glue).key("Ctrl+G"),
         item("Discard lengths", DiscardLengths).key("Shift+D"),
     ];
+
+    let select_items = vec![
+        item("Select all", SelectAll).key("Ctrl+A"),
+        item("Select none (Deselect)", SelectNone).key("Ctrl+D"),
+        item("Invert selection", InvertSelection).key("Ctrl+Shift+I"),
+    ];
+
+    let key_labels_items = vec![
+        item("All notes (Show labels on all keys)", SetKeyLabels(crate::piano::KeyLabels::AllNotes)).mark(Mark::Radio(s.piano.key_labels == crate::piano::KeyLabels::AllNotes)),
+        item("White notes only", SetKeyLabels(crate::piano::KeyLabels::AllWhite)).mark(Mark::Radio(s.piano.key_labels == crate::piano::KeyLabels::AllWhite)),
+        item("Root notes only", SetKeyLabels(crate::piano::KeyLabels::RootOnly)).mark(Mark::Radio(s.piano.key_labels == crate::piano::KeyLabels::RootOnly)),
+        item("None", SetKeyLabels(crate::piano::KeyLabels::None)).mark(Mark::Radio(s.piano.key_labels == crate::piano::KeyLabels::None)),
+    ];
+
+    let note_display_items = vec![
+        item("Note names (e.g. C5, D#5)", SetNoteDisplay(crate::piano::NoteDisplay::Name)).mark(Mark::Radio(s.piano.note_display == crate::piano::NoteDisplay::Name)),
+        item("MIDI note numbers (e.g. 60, 63)", SetNoteDisplay(crate::piano::NoteDisplay::Number)).mark(Mark::Radio(s.piano.note_display == crate::piano::NoteDisplay::Number)),
+        item("None (Clean note bodies)", SetNoteDisplay(crate::piano::NoteDisplay::None)).mark(Mark::Radio(s.piano.note_display == crate::piano::NoteDisplay::None)),
+    ];
+
+    let view_items = vec![
+        PItem::sub("Key labels (Vertical keyboard)", key_labels_items),
+        PItem::sub("Note labels (Grid notes)", note_display_items),
+        PItem::sep(),
+        item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
+        item("Add time marker", AddMarker).key("Alt+T"),
+    ];
+
+    let snap_items = crate::piano_snap::snap_menu(s, 0.0, 0.0).items;
+
+    let cur_ch = s.selected_channel;
+    let target_items: Vec<PItem> = s.project.channels.iter().enumerate().map(|(i, ch)| {
+        let name = ch.name.as_deref().filter(|n| !n.is_empty()).map(String::from).unwrap_or_else(|| format!("Channel {}", i + 1));
+        PItem::new(name, Cmd::Piano(NCmd::Target(i))).mark(Mark::Radio(cur_ch == i))
+    }).collect();
 
     let tools_items = vec![
         item("Quick quantize", Quantize { strength: 100, starts_only: false }).key("Ctrl+Q"),
@@ -199,17 +280,15 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         item("Snap notes to scale (key quantize)", SnapToScale),
     ];
 
-    let view_items = vec![
-        item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
-        item("Add time marker", AddMarker).key("Alt+T"),
-    ];
-
     let items = vec![
         PItem::sub("File", file_items),
         PItem::sub("Edit", edit_items),
+        PItem::sub("Select", select_items),
         PItem::sub("Tools", tools_items),
-        PItem::sub("Helpers (Scale highlighting)", helpers_items),
         PItem::sub("View", view_items),
+        PItem::sub("Helpers (Scale Highlighting)", helpers_items),
+        PItem::sub("Snap", snap_items),
+        PItem::sub("Target channel", target_items),
         PItem::sep(),
         item("Go to Mixer Track & Signal Chain", GoToMixer).key("Ctrl+Alt+M"),
     ];
@@ -283,11 +362,9 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
         Key::Character(c) if alt && !ctrl && is(c, "h") => NCmd::Humanize,
         Key::Character(c) if alt && !ctrl && is(c, "v") => NCmd::Ghosts,
         Key::Character(c) if alt && !ctrl && !shift && is(c, "t") => NCmd::AddMarker,
-        Key::Character(c) if ctrl && !alt && is(c, "d") => {
-            app.state.piano.clear_selection();
-            app.invalidate();
-            return true;
-        }
+        Key::Character(c) if ctrl && !alt && !shift && is(c, "a") => NCmd::SelectAll,
+        Key::Character(c) if ctrl && !alt && !shift && is(c, "d") => NCmd::SelectNone,
+        Key::Character(c) if ctrl && shift && !alt && is(c, "i") => NCmd::InvertSelection,
         Key::Character(c) if ctrl && !alt && is(c, "x") => {
             let s = &mut app.state;
             let sel = s.piano.selection(s.pattern, piano::channel(s));
@@ -553,6 +630,59 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
         NCmd::DetectScale => {
             let msg = detect_scale_from_notes(&mut app.state);
             return Some(msg);
+        }
+        NCmd::SetKeyLabels(kl) => {
+            app.state.piano.key_labels = kl;
+            app.state.piano.dirty = true;
+            let name = match kl {
+                crate::piano::KeyLabels::AllNotes => "All notes",
+                crate::piano::KeyLabels::AllWhite => "White notes only",
+                crate::piano::KeyLabels::RootOnly => "Root notes only",
+                crate::piano::KeyLabels::None => "None",
+            };
+            return Some(format!("Key labels: {}", name));
+        }
+        NCmd::SetNoteDisplay(nd) => {
+            app.state.piano.note_display = nd;
+            app.state.piano.dirty = true;
+            let name = match nd {
+                crate::piano::NoteDisplay::Name => "Note names",
+                crate::piano::NoteDisplay::Number => "MIDI numbers",
+                crate::piano::NoteDisplay::None => "None",
+            };
+            return Some(format!("Note labels: {}", name));
+        }
+        NCmd::SelectAll => {
+            let s = &mut app.state;
+            if let Some(ch) = piano::channel(s) {
+                let all = piano::notes(s).iter().enumerate().filter(|(_, n)| n.channel == ch).map(|(i, _)| i).collect();
+                s.piano.select(s.pattern, ch, all);
+                s.piano.range = Some((0, piano::pattern_end(s)));
+                s.piano.dirty = true;
+            }
+            return Some("Selected all notes".into());
+        }
+        NCmd::SelectNone => {
+            app.state.piano.clear_selection();
+            app.state.piano.dirty = true;
+            return Some("Deselected".into());
+        }
+        NCmd::InvertSelection => {
+            let s = &mut app.state;
+            let pat_num = s.pattern.max(1);
+            let ch = piano::channel(s);
+            if let Some(ch_idx) = ch {
+                if let Some(pat) = s.project.patterns.iter().find(|p| p.number == pat_num) {
+                    let cur = s.piano.selection(pat_num, Some(ch_idx));
+                    let inv: Vec<usize> = pat.notes.iter().enumerate()
+                        .filter(|(i, n)| n.channel == ch_idx && !cur.contains(i))
+                        .map(|(i, _)| i)
+                        .collect();
+                    s.piano.select(pat_num, ch_idx, inv);
+                    s.piano.dirty = true;
+                }
+            }
+            return Some("Inverted selection".into());
         }
     };
     s.piano.dirty = true;

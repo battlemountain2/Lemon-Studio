@@ -75,6 +75,7 @@ pub enum KeyLabels {
     #[default]
     RootOnly,
     AllWhite,
+    AllNotes,
     None,
 }
 

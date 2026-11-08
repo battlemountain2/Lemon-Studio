@@ -1088,7 +1088,8 @@ pub fn execute(app: &mut App, item: &PaletteItem) {
         }
         PaletteAction::CycleKeyLabels => {
             app.state.piano.key_labels = match app.state.piano.key_labels {
-                crate::piano::KeyLabels::AllWhite => crate::piano::KeyLabels::RootOnly,
+                crate::piano::KeyLabels::AllWhite => crate::piano::KeyLabels::AllNotes,
+                crate::piano::KeyLabels::AllNotes => crate::piano::KeyLabels::RootOnly,
                 crate::piano::KeyLabels::RootOnly => crate::piano::KeyLabels::None,
                 crate::piano::KeyLabels::None => crate::piano::KeyLabels::AllWhite,
             };

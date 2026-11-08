@@ -260,8 +260,15 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
                 let w = ui.c.text_width(font, &label);
                 let shown = if w <= room - 4.0 {
                     label
-                } else if room >= 12.0 {
-                    format!("{}..", &label[..1.min(label.len())])
+                } else if room >= 14.0 {
+                    let pitch_only = label.trim_end_matches(|c: char| c.is_ascii_digit());
+                    if ui.c.text_width(font, pitch_only) <= room - 4.0 {
+                        pitch_only.to_string()
+                    } else {
+                        label.chars().take(1).collect()
+                    }
+                } else if room >= 8.0 {
+                    label.chars().take(1).collect()
                 } else {
                     String::new()
                 };
@@ -638,10 +645,12 @@ fn keyboard(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, lit: &[i32]) {
             let is_c = key.rem_euclid(12) == 0;
             let is_white = !is_black(key);
             let is_root = highlight.enabled && key.rem_euclid(12) == highlight.root as i32;
-            let show = if s.piano.key_labels == crate::piano::KeyLabels::AllWhite {
-                is_white
-            } else {
-                is_c || is_root
+            let in_key = highlight.enabled && crate::chords::in_scale(highlight.root, highlight.scale_idx, key);
+            let show = match s.piano.key_labels {
+                crate::piano::KeyLabels::AllNotes => true,
+                crate::piano::KeyLabels::AllWhite => is_white,
+                crate::piano::KeyLabels::RootOnly => is_c || is_root,
+                crate::piano::KeyLabels::None => false,
             };
             if show && row >= 6.0 {
                 let y = g.y_of(key);
@@ -665,29 +674,35 @@ fn keyboard(ui: &mut Ui, s: &State, l: &Layout, g: &Geom, lit: &[i32]) {
                     let badge_rect = Rect::new(badge_x, badge_y, badge_w, badge_h);
                     let badge_bg = if lemon { t.window_body.shade(0.12) } else { ui.t.s(0x9ca3a9) };
                     ui.c.fill_rrect(badge_rect, 2.0, badge_bg);
-                    let text_color = if lemon { t.text } else { ui.t.s(0x23272c) };
+                    let text_color = if is_root { t.pill } else if lemon { t.text } else { ui.t.s(0x23272c) };
                     let name = key_name(key);
                     let tw = ui.c.text_width(font, &name);
                     let tx = (badge_x + (badge_w - tw) / 2.0).round();
                     ui.c.text(font, tx, y_text, text_color, &name);
+                } else if is_black(key) {
+                    // Black key: draw on the black key with contrasting crisp color
+                    let name = key_name(key);
+                    let col = if is_root { t.pill } else if in_key { ui.t.tx(0xffffff) } else { ui.t.tx(0xb0b6c2) };
+                    ui.c.text_right(font, k.x + 44.0, y_text, col, &name);
                 } else {
-                    let col = if is_root { t.key_label } else { t.key_label.with_alpha(170) };
+                    let col = if is_root { t.pill } else if in_key { t.key_label } else { t.key_label.with_alpha(160) };
                     ui.c.text_right(font, k.right() - 6.0, y_text, col, &key_name(key));
                 }
             }
         }
     }
-    if highlight.enabled && row >= 8.0 {
+    if highlight.enabled && row >= 6.0 {
         for key in lo..=hi {
             let in_key = crate::chords::in_scale(highlight.root, highlight.scale_idx, key);
             let is_root = key.rem_euclid(12) == highlight.root as i32;
             if in_key {
                 let y = g.y_of(key);
-                let (dot_x, dot_y) = (k.right() - 6.0, y + row / 2.0);
                 if is_root {
-                    ui.c.fill_circle(dot_x, dot_y, 3.0, t.pill);
+                    // Glowing tonic indicator strip on left edge of root keys
+                    ui.c.fill_rrect(Rect::new(k.x + 1.0, y + 2.0, 3.5, (row - 4.0).max(4.0)), 1.5, t.pill);
                 } else {
-                    ui.c.fill_circle(dot_x, dot_y, 2.0, t.key_label.with_alpha(150));
+                    // Subtle scale indicator marker on in-scale keys
+                    ui.c.fill_rrect(Rect::new(k.x + 1.0, y + 3.0, 2.0, (row - 6.0).max(3.0)), 1.0, t.pill.with_alpha(150));
                 }
             }
         }
