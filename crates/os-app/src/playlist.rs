@@ -6034,6 +6034,13 @@ pub fn fill_plugin_window_menu(s: &State, key: usize, menu: &mut Popup) {
     for it in menu.items.iter_mut() {
         match &*it.label {
             "Piano roll" => set(it, Cmd::Rack(RCmd::PianoRoll(key))),
+            "Replace" => {
+                let replace = crate::plugin_menu::items(s, crate::plugin_menu::Target::Replace(key), true);
+                *it = PItem::sub("Replace", replace);
+            }
+            "Add to favourites" => {
+                *it = PItem::new("Add to favourites", Cmd::Browser(crate::browser::BCmd::Star(key)));
+            }
             "Delete..." => set(it, Cmd::Rack(RCmd::Delete(key))),
             "Rename, color and icon..." => set(it, Cmd::Pick(PickCmd::Rename, ch)),
             "Change color..." => set(it, Cmd::Pick(PickCmd::ChangeColor, ch)),

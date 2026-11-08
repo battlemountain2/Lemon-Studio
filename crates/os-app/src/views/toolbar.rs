@@ -270,7 +270,7 @@ fn panel(ui: &mut Ui, c: &Ctx, p: Panel) -> bool {
         Panel::Snap => snap(ui, c),
         Panel::Pattern => pattern(ui, c),
         Panel::Windows => return window_buttons(ui, c, 0..5),
-        Panel::Tools => return window_buttons(ui, c, 5..9),
+        Panel::Tools => return window_buttons(ui, c, 5..10),
         Panel::Space | Panel::Flex => {}
     }
     true
@@ -916,6 +916,7 @@ fn window_buttons(ui: &mut Ui, c: &Ctx, which: Range<usize>) -> bool {
         (Icon::Plug, Action::PickerOpen, "Plugin palette (F8)"),
         (Icon::Kick, Action::ToggleWin(Win::Tapper), "Tap tempo (Ctrl+F5)"),
         (Icon::Touch, Action::ToggleWin(Win::Touch), "Touch controller (Alt+F7)"),
+        (Icon::Plug, Action::ToggleDeviceStrip, "Bottom Device Strip / Signal Chain Dock (Alt+D)"),
         // FL's store button is hidden: its stand-in, a repository of free and open-source plugins (spec:
         // ui/main-window.md §3), had the plugin picker's icon. It is to come back with a shop icon.
     ];
@@ -925,7 +926,7 @@ fn window_buttons(ui: &mut Ui, c: &Ctx, which: Range<usize>) -> bool {
             return false;
         }
         let hov = ui.hit(r, action.clone(), hint);
-        let down = ui.down(r, &action);
+        let down = ui.down(r, &action) || (action == Action::ToggleDeviceStrip && c.s.show_device_strip);
         super::lit_button(ui, r, icon, if down { super::Look::Hot } else { super::Look::Off }, super::Look::Hot, hov && !down);
     }
     // FL's news panel (x 1304..1470, with its separator) is left out: it suggested an online service Lemon Studio

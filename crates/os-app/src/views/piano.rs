@@ -371,12 +371,12 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
     let t = ui.t;
     let active = s.piano.tool;
     let ox = r.x - 209.0 + shift;
-    let items: [(f32, Icon, &'static str, Option<Action>); 15] = [
-        (222.0, Icon::ArrowRight, "Piano roll options", None),
+    let items: [(f32, Icon, &'static str, Option<Action>); 16] = [
+        (222.0, Icon::ArrowRight, "Piano roll options", Some(Action::PianoOptionsMenu)),
         (242.0, Icon::MidiControl, "Piano roll tools: quantize, chop, glue, strum, arpeggiate, randomize...", Some(Action::PianoToolsMenu)),
         (263.0, Icon::Magnet, "", Some(Action::PianoSnapMenu)),
         (283.0, Icon::Note, "Note properties", None),
-        (305.0, Icon::Blend, "Scale and chord helpers", None),
+        (305.0, Icon::Blend, "Scale and chord stamps (Stamp tool)", Some(Action::PianoStampMenu)),
         (327.0, Icon::Undo, "Undo (Ctrl+Z)", Some(Action::PianoUndo)),
         (360.0, Icon::Pencil, "Draw (P)", Some(Action::PianoTool(Tool::Draw))),
         (380.0, Icon::Brush, "Paint (B): drag to paint notes along the row", Some(Action::PianoTool(Tool::Paint))),
@@ -387,19 +387,16 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
         (485.0, Icon::Select, "Select (E): drag a box to select notes, Ctrl adds", Some(Action::PianoTool(Tool::Select))),
         (507.0, Icon::Zoom, "Zoom (Z): drag a box to zoom, right-click zooms out / back", Some(Action::PianoTool(Tool::Zoom))),
         (527.0, Icon::Speaker, "Playback (Y): drag to hear the notes under the line", Some(Action::PianoTool(Tool::Playback))),
+        (549.0, Icon::Mixer, "Channel Mixer Track & Signal Chain (Ctrl+Alt+M)", Some(Action::PianoChannelMixer)),
     ];
     for (x, icon, hint, action) in items {
         let b = Rect::new(ox + x - 9.0, r.y + 2.0, 18.0, 18.0);
         let Some(action) = action else {
             ui.off(b, hint);
-            if x == 222.0 {
-                os_ui::kit::triangle(ui.c, b.cx(), b.cy(), 4.0, os_ui::kit::Dir::Down, t.glyph);
-            } else {
-                icons::draw(ui.c, icon, b, t.text_faint);
-            }
+            icons::draw(ui.c, icon, b, t.text_faint);
             continue;
         };
-        let on = action == Action::PianoTool(active);
+        let on = action == Action::PianoTool(active) || (action == Action::PianoStampMenu && s.piano.stamp.is_some());
         // The magnet's hint names the current snap (spec: ui/piano-snap.md §8).
         let hint: std::borrow::Cow<'static, str> = if action == Action::PianoSnapMenu { crate::piano_snap::hint(s).into() } else { hint.into() };
         let hov = ui.hit(b, action, hint);

@@ -83,6 +83,7 @@ pub enum PaletteAction {
     LastTweakedAutomation,
     LastTweakedLink,
     AddAutomationClip,
+    AutoSidechainDucking,
     ApplyDrumGroove(crate::grooves::DrumGroove),
     ApplyChordProgression(crate::grooves::ChordProgression),
     Generate808,
@@ -660,6 +661,13 @@ pub fn items(s: &State) -> Vec<PaletteItem> {
         action: PaletteAction::AddAutomationClip,
     });
     list.push(PaletteItem {
+        title: "Setup Auto-Sidechain Ducking (Selected Track -> Target Track)".into(),
+        subtitle: "Route selected mixer track with 0 dB sidechain send and create ducking automation".into(),
+        category: Category::Automation,
+        shortcut: None,
+        action: PaletteAction::AutoSidechainDucking,
+    });
+    list.push(PaletteItem {
         title: "Focus Event Editor (Pattern Automation)".into(),
         subtitle: "Open event editor window for fine-grained controller automation".into(),
         category: Category::Automation,
@@ -1127,6 +1135,12 @@ pub fn execute(app: &mut App, item: &PaletteItem) {
         }
         PaletteAction::AddAutomationClip => {
             app.add_clip_channel(os_model::ChannelKind::Automation);
+        }
+        PaletteAction::AutoSidechainDucking => {
+            let dst = app.state.selected_mixer;
+            if let Some(msg) = crate::mixer::auto_sidechain_ducking(&mut app.state, dst) {
+                app.state.message = Some(msg);
+            }
         }
         PaletteAction::ApplyDrumGroove(groove) => {
             crate::grooves::apply_drum_groove(&mut app.state, *groove);

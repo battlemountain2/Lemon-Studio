@@ -108,6 +108,8 @@ pub enum MCmd {
     RenderWave(u16),
     /// Route the selected tracks to `dst`: only = drop their other routes, side = sidechain (level 0).
     Route { dst: u16, only: bool, side: bool },
+    /// 1-Click auto-sidechain ducking: routes selected tracks to `dst` (level 0) and creates ducking automation.
+    AutoDucking(u16),
     /// Layout menu: Wide (the only layout drawn; the others are greyed out).
     Layout(u8),
     /// Options ▸ Cable physics: open / close the cables' debug panel (Lemon Studio's own).
@@ -1064,6 +1066,8 @@ pub fn right(app: &mut App, h: MHit) -> bool {
                 PItem::sep(),
                 PItem::new("Sidechain to this track", Cmd::Mixer(MCmd::Route { dst, only: false, side: true })),
                 PItem::new("Sidechain to this track only", Cmd::Mixer(MCmd::Route { dst, only: true, side: true })),
+                PItem::sep(),
+                PItem::new("Auto-sidechain ducking to this track", Cmd::Mixer(MCmd::AutoDucking(dst))),
             ];
             s.playlist.popup = Some(Popup { x: at.0, y: at.1, items, sub: None, scroll: [0; 2] });
         }
@@ -1456,6 +1460,62 @@ pub fn route(s: &mut State, dst: u16, only: bool, side: bool) -> Option<String> 
     msg
 }
 
+/// Sets up 1-click sidechain ducking from selected source track(s) (or kick / track 1) to `dst`:
+/// sends a 0 dB sidechain signal and creates a 4-beat ducking volume automation curve.
+pub fn auto_sidechain_ducking(s: &mut State, dst: u16) -> Option<String> {
+    let mut sources: Vec<u16> = selected(s).into_iter().filter(|&t| t != dst && t != 0).collect();
+    if sources.is_empty() {
+        let max_t = inserts(s);
+        let found = (1..=max_t).find(|&t| t != dst && {
+            let nm = name(s, t).to_lowercase();
+            nm.contains("kick") || nm.contains("kd")
+        });
+        if let Some(src) = found {
+            sources.push(src);
+        } else if dst != 1 && max_t >= 1 {
+            sources.push(1);
+        } else if dst != 2 && max_t >= 2 {
+            sources.push(2);
+        }
+    }
+    if sources.is_empty() {
+        return Some("Select a source mixer track first (e.g. Kick)".into());
+    }
+
+    for &src in &sources {
+        if makes_loop(s, src, dst) {
+            return Some(format!("Can't sidechain {} to {}: loop detected", name(s, src), name(s, dst)));
+        }
+        if let Some(m) = track_mut(s, src) {
+            if !m.routes.contains(&dst) {
+                m.routes.push(dst);
+                m.routes.sort_unstable();
+            }
+            m.send_levels.retain(|&(d, _)| d != dst);
+            m.send_levels.push((dst, 0.0));
+        }
+    }
+
+    let vol = track(s, dst).and_then(|t| t.volume).unwrap_or(0.8) as f64;
+    let target = os_model::target::mixer(dst, os_model::target::MIXER_VOLUME);
+    let auto_name = format!("{} Ducking", name(s, dst));
+    let ch_idx = crate::playlist::create_automation(s, target, &auto_name, vol);
+
+    if let Some(a) = s.project.automation_mut(ch_idx) {
+        let mut pts = Vec::new();
+        for b in 0..4 {
+            pts.push(os_model::AutoPoint { beat: b as f64, value: vol * 0.15, tension: 0.6, mode: os_model::AutoMode::Single, flag: 2 });
+            pts.push(os_model::AutoPoint { beat: b as f64 + 0.75, value: vol, tension: 0.0, mode: os_model::AutoMode::Hold, flag: 2 });
+        }
+        pts.push(os_model::AutoPoint { beat: 4.0, value: vol, tension: 0.0, mode: os_model::AutoMode::Single, flag: 2 });
+        a.points = pts;
+    }
+
+    changed(s);
+    let src_names: Vec<String> = sources.iter().map(|&t| name(s, t)).collect();
+    Some(format!("Sidechained [{}] to {} with ducking volume automation", src_names.join(", "), name(s, dst)))
+}
+
 /// Appends a track (`at` = None) or inserts one before `at`, shifting the later ones; selects it. Returns its number.
 pub fn add_track(s: &mut State, at: Option<u16>) -> u16 {
     let last = inserts(s) + 1;
@@ -1787,6 +1847,8 @@ fn track_routing(s: &State, n: u16) -> PItem {
         PItem::sep(),
         PItem::new("Sidechain selected tracks to this track", mx(false, true)),
         PItem::new("Sidechain selected tracks to this track only", mx(true, true)),
+        PItem::sep(),
+        PItem::new("Auto-sidechain ducking to this track", Cmd::Mixer(MCmd::AutoDucking(n))),
     ];
     let it = PItem::sub("Track routing", items);
     if is_selected(s, n) && selected(s).iter().any(|&t| t != n && t != 0) { it } else { it.off() }
@@ -1972,7 +2034,7 @@ pub fn run(app: &mut App, c: MCmd) -> Option<String> {
         MCmd::AutoBypassAll => Some("Auto-bypass for all plugins"),
         MCmd::PdcAuto => Some("Plugin delay compensation"),
         MCmd::Reset(_) => Some("Mixer track reset"),
-        MCmd::ResetRouting(_) | MCmd::UnrouteTo(_) | MCmd::Route { .. } | MCmd::RouteChannels { .. } => Some(ROUTING),
+        MCmd::ResetRouting(_) | MCmd::UnrouteTo(_) | MCmd::Route { .. } | MCmd::RouteChannels { .. } | MCmd::AutoDucking(_) => Some(ROUTING),
         MCmd::Trim { .. } | MCmd::Delete(_) => Some("Delete mixer track"),
         // The original's History names (spec: ui/one-click-recording.md §1).
         MCmd::AssignAudio(_) => Some(crate::track_links::ASSIGN_AUDIO),
@@ -2268,6 +2330,7 @@ fn run_now(app: &mut App, c: MCmd) -> Option<String> {
             return None;
         }
         MCmd::Route { dst, only, side } => route(s, dst, only, side),
+        MCmd::AutoDucking(dst) => auto_sidechain_ducking(s, dst),
         // Wide is the layout shown; the others are greyed out in the menu.
         MCmd::Layout(_) => None,
         MCmd::CablePhysics => {
@@ -3750,7 +3813,13 @@ mod tests {
         let e = entry(&a, 5);
         assert!(e.enabled);
         let labels: Vec<&str> = e.children.iter().filter(|i| !i.sep).map(|i| i.label.as_ref()).collect();
-        assert_eq!(labels, ["Route selected tracks to this track", "Route selected tracks to this track only", "Sidechain selected tracks to this track", "Sidechain selected tracks to this track only"]);
+        assert_eq!(labels, [
+            "Route selected tracks to this track",
+            "Route selected tracks to this track only",
+            "Sidechain selected tracks to this track",
+            "Sidechain selected tracks to this track only",
+            "Auto-sidechain ducking to this track",
+        ]);
         assert!(!entry(&a, 9).enabled, "a track outside the selection");
         let steps = a.state.history.at();
         crate::playlist::run(&mut a, e.children[0].cmd.clone());
@@ -3759,6 +3828,19 @@ mod tests {
         crate::playlist::run(&mut a, e.children[4].cmd.clone());
         assert_eq!((send(&a.state, 2, 5), send(&a.state, 2, 0)), (Some(0.0), None), "sidechained only: the master route goes");
         assert_eq!(send(&a.state, 5, 5), None, "this track does not route to itself");
+    }
+
+    #[test]
+    fn auto_sidechain_ducking_sets_up_routing_and_envelope() {
+        let mut a = app();
+        select(&mut a.state, 1, false);
+        select(&mut a.state, 2, true);
+        let msg = run(&mut a, MCmd::AutoDucking(2));
+        assert!(msg.is_some());
+        assert_eq!(send(&a.state, 1, 2), Some(0.0), "sidechain route created");
+        let auto = a.state.project.automations.last().expect("automation created");
+        assert_eq!(auto.targets, vec![os_model::target::mixer(2, os_model::target::MIXER_VOLUME)]);
+        assert!(auto.points.len() > 2, "ducking envelope points populated");
     }
 
     /// The slot menu's Change color... and Random color (Lemon Studio's design): the slot gets a colour (Default clears

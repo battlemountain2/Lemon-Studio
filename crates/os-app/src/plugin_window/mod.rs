@@ -937,6 +937,11 @@ impl State {
             }
             Some(Part::Knob(i)) => {
                 let k = KNOBS[usize::from(i)];
+                if double {
+                    let d = if k == Knob::Vol { 0.78125 } else { 0.5 };
+                    self.set_knob(k, d);
+                    return Reply::Repaint;
+                }
                 self.drag = Some((k, y, self.knob_value(k)));
                 Reply::Hold
             }
@@ -945,6 +950,10 @@ impl State {
                 self.events.push(FrameEvent::ShowTrack);
                 os_clap::wake();
                 Reply::Repaint
+            }
+            Some(Part::Range) if double => {
+                self.set_knob(Knob::Range, 2.0);
+                return Reply::Repaint;
             }
             Some(Part::Range | Part::Track) => {
                 let k = if part == Some(Part::Range) { Knob::Range } else { Knob::Track };
@@ -1564,7 +1573,7 @@ mod tests {
             let mut st = state(true, "Bus 1");
             st.editor = editor;
             st.resize_min = Some((200.0, 100.0));
-            let at = |st: &State, i: usize| (tab_rect(i).cx(), tab_rect(i).cy());
+            let at = |_st: &State, i: usize| (tab_rect(i).cx(), tab_rect(i).cy());
             let (x, y) = at(&st, st.pages.len());
             assert_eq!(st.left_down(x, y, false, &screen), Reply::Relayout);
             assert_eq!(st.size(), (PAGE_W + 2.0 * BORDER, st.area_y() + PAGE_H + BORDER));

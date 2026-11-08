@@ -48,6 +48,8 @@ pub enum NCmd {
     Humanize,
     SnapToScale,
     Generate808,
+    GoToMixer,
+    Stamp(Option<usize>),
 }
 
 fn item(label: &'static str, c: NCmd) -> PItem {
@@ -92,6 +94,76 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
         item("Add time marker", AddMarker).key("Alt+T"),
     ];
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// The toolbar's Options menu (top-left arrow).
+pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
+    use crate::piano_dlg::Tool;
+    use NCmd::*;
+    let items = vec![
+        PItem::head("File"),
+        PItem::new("Import MIDI file...", Cmd::MidiImport(true)),
+        PItem::new("Export as MIDI file...", Cmd::MidiExport(true)),
+        PItem::head("Edit"),
+        PItem::new("Cut", Cmd::Cut).key("Ctrl+X"),
+        PItem::new("Copy", Cmd::Copy).key("Ctrl+C"),
+        PItem::new("Paste", Cmd::Paste).key("Ctrl+V"),
+        PItem::new("Delete", Cmd::Delete).key("Del"),
+        item("Duplicate", Duplicate).key("Ctrl+B"),
+        item("Quick legato", Legato).key("Ctrl+L"),
+        item("Glue", Glue).key("Ctrl+G"),
+        item("Discard lengths", DiscardLengths).key("Shift+D"),
+        PItem::head("Tools"),
+        item("Quick quantize", Quantize { strength: 100, starts_only: false }).key("Ctrl+Q"),
+        item("Quick quantize start times", Quantize { strength: 100, starts_only: true }).key("Shift+Q"),
+        item("Quantize...", Dialog(Tool::Quantize)).key("Alt+Q"),
+        item("Quick chop", QuickChop).key("Ctrl+U"),
+        item("Chop...", Dialog(Tool::Chop)).key("Alt+U"),
+        item("Strum...", Strum).key("Alt+S"),
+        item("Arpeggiate...", Arpeggiate).key("Alt+A"),
+        item("Flam...", Dialog(Tool::Flam)).key("Alt+F"),
+        item("Claw machine...", Dialog(Tool::Claw)).key("Alt+W"),
+        item("Limit...", Dialog(Tool::Limit)).key("Alt+K"),
+        item("Flip...", Dialog(Tool::Flip)).key("Alt+Y"),
+        item("Randomize...", Dialog(Tool::Randomize)).key("Alt+R"),
+        item("Scale levels...", Dialog(Tool::Levels)).key("Alt+X"),
+        item("LFO...", Dialog(Tool::Lfo)).key("Alt+O"),
+        PItem::head("Smart MIDI"),
+        item("Auto-generate 808 bassline from chords", Generate808),
+        item("Toggle slide notes (808 glide)", ToggleSlide),
+        item("Add octave slide-up glide", AddOctaveSlide),
+        item("Humanize notes (timing & velocity)", Humanize).key("Alt+H"),
+        item("Snap notes to scale (key quantize)", SnapToScale),
+        PItem::head("View"),
+        item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
+        item("Add time marker", AddMarker).key("Alt+T"),
+        item("Go to Mixer Track & Signal Chain", GoToMixer).key("Ctrl+Alt+M"),
+    ];
+    Popup { x, y, items, sub: None, scroll: [0; 2] }
+}
+
+/// The stamp tool's chords and scales picker menu (Blend icon).
+pub fn stamp_menu(s: &State, x: f32, y: f32) -> Popup {
+    use NCmd::*;
+    let mut items = vec![
+        item("None (Clear stamp)", Stamp(None)).mark(Mark::Check(s.piano.stamp.is_none())),
+        PItem::sep(),
+    ];
+    let mut chord_items = Vec::new();
+    for k in 1..=66usize {
+        let name = crate::chords::label(k);
+        chord_items.push(item(name, Stamp(Some(k))).mark(Mark::Check(s.piano.stamp == Some(k))));
+    }
+    items.push(PItem::sub("Chords", chord_items));
+
+    let mut scale_items = Vec::new();
+    for k in 67..=88usize {
+        let name = crate::chords::label(k);
+        scale_items.push(item(name, Stamp(Some(k))).mark(Mark::Check(s.piano.stamp == Some(k))));
+    }
+    items.push(PItem::sub("Scales", scale_items));
+
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
@@ -372,6 +444,18 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
         NCmd::Humanize => return Some(crate::grooves::humanize_notes(s, 6, 3)),
         NCmd::SnapToScale => return Some(crate::grooves::snap_notes_to_scale(s)),
         NCmd::Generate808 => return Some(crate::grooves::generate_808_bassline(s)),
+        NCmd::GoToMixer => {
+            app.piano_jump_to_mixer();
+            return None;
+        }
+        NCmd::Stamp(opt) => {
+            app.state.piano.stamp = opt;
+            let m = match opt {
+                Some(k) => format!("Stamp tool: {} (click note grid to stamp)", crate::chords::label(k)),
+                None => "Stamp tool cleared".into(),
+            };
+            return Some(m);
+        }
     };
     s.piano.dirty = true;
     Some(msg)

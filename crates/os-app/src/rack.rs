@@ -1349,7 +1349,10 @@ pub fn delete_rows(app: &mut App, rows: &[usize]) {
 /// Move the selected channels one row up (`dir` -1) or down (+1).
 pub fn move_selected(app: &mut App, dir: i32) {
     let n = app.state.project.channels.len();
-    let sel = app.state.rack.sel.clone();
+    let mut sel = app.state.rack.sel.clone();
+    if sel.is_empty() && app.state.selected_channel < n {
+        sel.insert(app.state.selected_channel);
+    }
     if sel.is_empty() || (dir < 0 && sel.contains(&0)) || (dir > 0 && sel.contains(&(n - 1))) {
         return;
     }
@@ -1368,6 +1371,9 @@ pub fn move_selected(app: &mut App, dir: i32) {
         }
     }
     reorder(app, &order);
+    if let Some(pos) = order.iter().position(|&orig| orig == app.state.selected_channel) {
+        app.state.selected_channel = pos;
+    }
 }
 
 /// Shift+wheel over channel `r`'s name button (§13): it becomes the only selected channel and moves one row per notch,
@@ -1488,6 +1494,7 @@ pub fn open_box(s: &mut State, b: RBox, at: (f32, f32)) {
 pub enum RCmd {
     // Channel menu (§18), on a row.
     PianoRoll(usize),
+    SendToPiano(usize),
     Graph(usize),
     Rename(usize),
     ChangeColor(usize),
@@ -1826,6 +1833,7 @@ pub fn channel_menu(s: &State, r: usize, x: f32, y: f32) -> Popup {
     let piano_on = s.shown(Win::PianoRoll) && s.selected_channel == r;
     let mut items = vec![
         it("Piano roll", RCmd::PianoRoll(r)).key("F7").mark(Mark::Check(piano_on)),
+        it("Send to piano roll", RCmd::SendToPiano(r)),
         it("Step parameters", RCmd::Graph(r)),
         PItem::sep(),
         it("Rename, color and icon...", RCmd::Rename(r)),
@@ -2224,7 +2232,16 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         return app.burn_midi(r, new);
     }
     let mouse = app.mouse;
-    let sel: Vec<usize> = app.state.rack.sel.iter().copied().collect();
+    let n_chans = app.state.project.channels.len();
+    let sel: Vec<usize> = if app.state.rack.sel.is_empty() {
+        if app.state.selected_channel < n_chans {
+            vec![app.state.selected_channel]
+        } else {
+            Vec::new()
+        }
+    } else {
+        app.state.rack.sel.iter().copied().collect()
+    };
     match c {
         RCmd::Clone(r) => clone_rows(app, &[r]),
         RCmd::CloneSel => clone_rows(app, &sel),
@@ -2241,6 +2258,24 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         RCmd::PianoRoll(r) => {
             app.focus_channel(r);
             app.state.raise(Win::PianoRoll);
+        }
+        RCmd::SendToPiano(r) => {
+            app.focus_channel(r);
+            let ppq = u32::from(app.state.project.ppq.max(4));
+            let step_len = ppq / 4;
+            let pat = app.state.pattern.max(1);
+            if let Some(p) = app.state.project.patterns.iter_mut().find(|p| p.number == pat) {
+                if let Some(ch) = app.state.project.channels.get(r).map(|c| c.index) {
+                    for n in &mut p.notes {
+                        if n.channel == ch && n.length <= 1 {
+                            n.length = step_len;
+                        }
+                    }
+                }
+            }
+            app.state.raise(Win::PianoRoll);
+            crate::piano::center_keys(&mut app.state, app.piano_grid.map_or(700.0, |g| g.h));
+            return Some(format!("Sent {} to piano roll", channel_name(&app.state, r)));
         }
         RCmd::EventsInPiano(r, lane) => {
             app.focus_channel(r);
@@ -2602,7 +2637,8 @@ fn run_now(app: &mut App, c: RCmd) -> Option<String> {
         | RCmd::Through(_)
         | RCmd::Restretch
         | RCmd::Wrap(_)
-        | RCmd::BurnMidi(..) => None,
+        | RCmd::BurnMidi(..)
+        | RCmd::SendToPiano(_) => None,
     };
     // Channels let go without asking (`ask_delete`) are deleted now.
     let msg = match app.state.rack.delete_now.take() {
@@ -2779,6 +2815,7 @@ pub fn key(app: &mut App, key: &winit::keyboard::Key, ctrl: bool, alt: bool) -> 
             RCmd::SetFilter(all[j])
         }
         Key::Named(NamedKey::Delete) if alt => RCmd::DeleteSel,
+        Key::Named(NamedKey::F2) if !ctrl && !alt && !shift => RCmd::Rename(focus),
         Key::Named(NamedKey::Escape) => {
             s.hide(Win::ChannelRack);
             app.invalidate();

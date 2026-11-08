@@ -288,6 +288,12 @@ pub enum Action {
     PianoLaneMenu,
     /// Toolbar "Piano roll tools" button: the Tools menu (spec: ui/piano-roll.md §11).
     PianoToolsMenu,
+    /// Toolbar top-left arrow: full Piano roll options menu (File, Edit, View, Helpers, Tools).
+    PianoOptionsMenu,
+    /// Toolbar stamp tool button: chords and scales stamp picker.
+    PianoStampMenu,
+    /// Piano roll toolbar button & Ctrl+Alt+M: jump to channel's mixer track & signal chain dock.
+    PianoChannelMixer,
     /// Toolbar magnet: the Snap menu; right-click: Stock note lengths (spec: ui/piano-snap.md §1).
     PianoSnapMenu,
     /// The channel name in the title: the channel menu; right-click: channel settings; wheel: channels with notes
@@ -1452,6 +1458,8 @@ pub struct App {
     rack_click: Option<(Action, std::time::Instant)>,
     /// Last press on the CPU panel, for its double click (the Plugin performance monitor).
     cpu_click: Option<std::time::Instant>,
+    /// Last knob press (knob ID, time), for double-click reset to default.
+    knob_click: Option<(crate::knobs::KnobId, std::time::Instant)>,
     pub hint: Cow<'static, str>,
     pub mouse: (f32, f32),
     pub drag: Option<Drag>,
@@ -1739,6 +1747,7 @@ impl App {
             title_click: None,
             rack_click: None,
             cpu_click: None,
+            knob_click: None,
             hint: Cow::Borrowed(""),
             mouse: (-1.0, -1.0),
             drag: None,
@@ -8653,6 +8662,23 @@ impl App {
         if self.pl_focus() && crate::playlist::key(self, key, ctrl, alt) {
             return;
         }
+        // Plugin window in front: F2 renames the plugin's channel.
+        let s = &self.state;
+        if (s.z.last() == Some(&Win::Plugin) || matches!(s.z.last(), Some(Win::Hosted(_))))
+            && matches!(key, Key::Named(NamedKey::F2)) && !ctrl && !alt
+        {
+            let ch_idx = s.plugin_channel;
+            if ch_idx < s.project.channels.len() {
+                let at = self.mouse;
+                crate::rack::open_box(&mut self.state, crate::rack::RBox::Channel(ch_idx), at);
+                self.invalidate();
+                return;
+            }
+        }
+        if ctrl && alt && !self.shift && matches!(key, Key::Character(c) if c.eq_ignore_ascii_case("m")) {
+            self.act(Action::PianoChannelMixer);
+            return;
+        }
         if let Some(cmd) = pattern_shortcut(key, ctrl, self.shift) {
             if let Some(m) = self.pattern_cmd(cmd) {
                 self.state.message = Some(m);
@@ -9772,12 +9798,15 @@ impl App {
                 s.set_knob(id, if s.knob(id) >= 0.5 { 0.0 } else { 1.0 });
                 self.hint = Cow::Owned(s.knob_text(id));
             }
-            // Alt+click on a mixer track's pan or stereo separation knob: back to the default as one undo step, and no drag
-            // follows. Only that knob resets, whatever is selected, and the selection stays (spec: ui/mixer.md §4).
-            Action::Knob(id @ (crate::knobs::KnobId::MixPan(_) | crate::knobs::KnobId::MixSep(_))) if self.alt => {
-                self.reset_control(crate::knobs::Control::Knob(id));
-            }
+            // Alt+click or double-click on any knob: back to default as one undo step, and no drag follows (FL Studio standard).
             Action::Knob(id) => {
+                let now = std::time::Instant::now();
+                let double = self.knob_click.is_some_and(|(k, t)| k == id && now.duration_since(t).as_millis() < 400);
+                self.knob_click = if double { None } else { Some((id, now)) };
+                if self.alt || double {
+                    self.reset_control(crate::knobs::Control::Knob(id));
+                    return;
+                }
                 crate::history::knob(s, id, false);
                 self.drag = Some(Drag::Knob { id, y0: self.mouse.1, v0: s.knob(id) });
                 self.hint = Cow::Owned(s.knob_text(id));
@@ -9786,6 +9815,17 @@ impl App {
             Action::PianoToolsMenu => {
                 let (x, y) = self.mouse;
                 s.playlist.popup = Some(crate::piano_tools::tools_menu(s, x - 6.0, y + 10.0));
+            }
+            Action::PianoOptionsMenu => {
+                let (x, y) = self.mouse;
+                s.playlist.popup = Some(crate::piano_tools::options_menu(s, x - 6.0, y + 10.0));
+            }
+            Action::PianoStampMenu => {
+                let (x, y) = self.mouse;
+                s.playlist.popup = Some(crate::piano_tools::stamp_menu(s, x - 6.0, y + 10.0));
+            }
+            Action::PianoChannelMixer => {
+                self.piano_jump_to_mixer();
             }
             Action::PianoTarget => {
                 // Top-left 4 px left of the name, 11 px below the title text's centre (spec: ui/piano-target-channel.md §2).
@@ -9939,6 +9979,22 @@ impl App {
             | Action::PlPick(_)
             | Action::PlPopup(_)
             | Action::PlPopupSub(_) => {}
+        }
+    }
+
+    /// Jump to the focused channel's mixer track, dock bottom signal chain and raise mixer (spec: Ctrl+Alt+M).
+    pub fn piano_jump_to_mixer(&mut self) {
+        let s = &mut self.state;
+        if let Some(ch) = s.project.channels.get(s.selected_channel) {
+            let t = ch.mixer_track;
+            let ch_name = ch.name.as_deref().unwrap_or("Channel").to_string();
+            s.selected_mixer = t;
+            s.show_device_strip = true;
+            s.raise(Win::Mixer);
+            let name = crate::mixer::name(s, t);
+            self.say(format!("Channel '{ch_name}' -> Mixer Track {t} ({name})"));
+            self.damage_win(Win::Mixer);
+            self.invalidate();
         }
     }
 
@@ -20479,7 +20535,7 @@ mod tests {
         for (track, w) in [(1, (0.0, 3200.0)), (2, (1600.0, 4800.0))] {
             pl::arr_mut(&mut app.state).clips.push(Clip { window: Some(w), ..Clip::new(0, 1, track, src) });
         }
-        let mut check = |app: &mut App, stretch: [u32; 4], pitch: i32, tempo: f64, want: [u32; 3], what: &str| {
+        let check = |app: &mut App, stretch: [u32; 4], pitch: i32, tempo: f64, want: [u32; 3], what: &str| {
             app.state.project.channels[row].sound.stretch = stretch;
             app.state.project.channels[row].pitch_cents = pitch;
             app.state.tempo = tempo;
@@ -25345,7 +25401,7 @@ mod tests {
         assert!(!app.state.cmd_palette.open);
 
         // When nothing to dismiss, mouse back performs undo
-        let initial_msg = app.state.message.clone();
+        let _initial_msg = app.state.message.clone();
         app.mouse_back();
         // Mouse forward performs redo
         app.mouse_forward();
