@@ -366,6 +366,9 @@ pub enum Action {
     DeviceStripAddEffect { track: u16 },
     DeviceStripTab(u8),
     DeviceStripKey(u8),
+    DeviceStripToggleFold,
+    DeviceStripTogglePads,
+    DeviceStripStepClick(usize),
     DeviceStripArea,
     /// Omni Command Palette actions (Phase 4).
     ToggleCommandPalette,
@@ -1115,6 +1118,10 @@ pub struct State {
     pub device_strip_h: f32,
     pub device_strip_scroll_x: f32,
     pub device_strip_tab: u8,
+    pub device_strip_fold: bool,
+    pub device_strip_pads: bool,
+    /// Floating parameter HUD badge displayed during control drag: (x, y, text).
+    pub drag_hud: Option<(f32, f32, String)>,
     /// Omni Command Palette state (Phase 4).
     pub cmd_palette: crate::palette::Palette,
     pub spectral_progress: Option<(usize, bool)>,
@@ -1611,6 +1618,9 @@ impl App {
                 device_strip_h: 170.0,
                 device_strip_scroll_x: 0.0,
                 device_strip_tab: 2,
+                device_strip_fold: true,
+                device_strip_pads: false,
+                drag_hud: None,
                 cmd_palette: Default::default(),
                 spectral_progress: None,
                 rack_pos: crate::arrange::RACK_POS,
@@ -6634,20 +6644,25 @@ impl App {
                     if !others.is_empty() {
                         self.state.mixer.faders.moved = Some((track, v));
                     }
-                    self.hint = Cow::Owned(crate::mixer::level_text("Volume", v));
+                    let txt = crate::mixer::level_text("Volume", v);
+                    self.hint = Cow::Owned(txt.clone());
+                    self.state.drag_hud = Some((x, y, txt));
                     let col = self.hits.iter().rev().find(|h| h.action == Action::Fader(track)).map(|h| h.rect);
                     match col {
                         _ if !others.is_empty() => self.damage_win(Win::Mixer),
                         Some(r) => self.damage_rect(r.outset(10.0)),
                         None => self.invalidate(),
                     }
+                    self.damage_rect(Rect::new(x - 90.0, y - 50.0, 180.0, 40.0));
                     self.damage_band(HINT_RECT);
                 }
                 Drag::Knob { id, y0, v0 } => {
                     self.state.set_knob(id, v0 - (y - y0) * id.drag_rate());
                     self.record_knob(id);
                     self.multilink_knob(id.target());
-                    self.hint = Cow::Owned(self.state.knob_text(id));
+                    let txt = self.state.knob_text(id);
+                    self.hint = Cow::Owned(txt.clone());
+                    self.state.drag_hud = Some((x, y, txt));
                     match self.hits.iter().rev().find(|h| h.action == Action::Knob(id)).map(|h| h.rect) {
                         Some(r) => self.damage_rect(r.outset(6.0)),
                         None => self.invalidate(),
@@ -6655,6 +6670,7 @@ impl App {
                     if let crate::knobs::KnobId::Eq(..) = id {
                         self.damage_eq();
                     }
+                    self.damage_rect(Rect::new(x - 90.0, y - 50.0, 180.0, 40.0));
                     self.damage_band(HINT_RECT);
                 }
                 Drag::LimitKeys => {
@@ -7681,6 +7697,7 @@ impl App {
                 (Some(_), None) => self.invalidate(),
             }
             self.hold_key(None, false);
+        self.state.drag_hud = None;
             if self.state.piano.overlay.take().is_some() {
                 self.damage_piano();
             }
@@ -7690,6 +7707,7 @@ impl App {
             self.invalidate();
         }
         self.hold_key(None, false);
+        self.state.drag_hud = None;
         if matches!(self.drag, Some(Drag::Velocity { .. })) {
             self.state.piano.dirty = true;
         }
@@ -9705,6 +9723,30 @@ impl App {
             Action::DeviceStripTab(tab) => {
                 self.state.device_strip_tab = tab;
                 self.invalidate();
+            }
+            Action::DeviceStripToggleFold => {
+                self.state.device_strip_fold = !self.state.device_strip_fold;
+                self.invalidate();
+            }
+            Action::DeviceStripTogglePads => {
+                self.state.device_strip_pads = !self.state.device_strip_pads;
+                self.invalidate();
+            }
+            Action::DeviceStripStepClick(step_idx) => {
+                let pat_num = self.state.pattern.max(1);
+                let ch_idx = if let Some(ch) = self.state.project.channels.get(self.state.selected_channel) { ch.index } else { 0 };
+                let ppq = u32::from(self.state.project.ppq.max(4));
+                let step_ticks = (ppq / 4).max(1);
+                let step_pos = (step_idx as u32) * step_ticks;
+                if let Some(pat) = self.state.project.patterns.iter_mut().find(|p| p.number == pat_num) {
+                    if let Some(pos) = pat.notes.iter().position(|n| n.channel == ch_idx && (n.position / step_ticks) == (step_idx as u32)) {
+                        pat.notes.remove(pos);
+                    } else {
+                        pat.notes.push(os_model::Note { length: step_ticks, key: 60, ..os_model::Note::step(ch_idx, step_pos) });
+                    }
+                    self.state.piano.dirty = true;
+                    self.invalidate();
+                }
             }
             Action::DeviceStripKey(k) => {
                 let play = self.audition();

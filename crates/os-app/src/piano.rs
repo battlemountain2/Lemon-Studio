@@ -700,11 +700,22 @@ pub fn copy_controls(from: &Note, to: &mut Note) {
 pub fn delete(s: &mut State, mut idx: Vec<usize>) {
     idx.sort_unstable();
     idx.dedup();
-    let p = pattern_mut(s);
-    for &i in idx.iter().rev() {
-        if i < p.notes.len() {
-            p.notes.remove(i);
+    let pat_num = s.pattern;
+    let ch = channel(s);
+    let sel = s.piano.selection(pat_num, ch);
+    let mut deleted = Vec::new();
+    {
+        let p = pattern_mut(s);
+        for &i in idx.iter().rev() {
+            if i < p.notes.len() {
+                let n = p.notes.remove(i);
+                let selected = sel.contains(&i);
+                deleted.push((n, selected));
+            }
         }
+    }
+    for (n, selected) in deleted {
+        s.motion.borrow_mut().note_ripple(n, selected, pat_num);
     }
     s.piano.clear_selection();
 }

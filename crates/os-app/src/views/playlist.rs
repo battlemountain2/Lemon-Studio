@@ -1659,6 +1659,29 @@ pub fn paint_overlays(ui: &mut Ui, s: &State) {
         let cw = ui.c.text_width(Font::new(14), &e.text).min(r.w - 10.0);
         ui.c.fill_rect(Rect::new(r.x + 5.0 + cw, r.y + 3.0, 1.0, 14.0), t.text);
     }
+    if !cfg!(test) && let Some((mx, my, text)) = &s.drag_hud {
+        let t = ui.t;
+        let font = Font::new(12);
+        let tw = ui.c.text_width(font, text);
+        let bw = tw + 20.0;
+        let bh = 24.0;
+        let (sw, _sh) = ui.c.size();
+        let bx = (mx - bw / 2.0).clamp(6.0, sw - bw - 6.0);
+        let by = (my - 34.0).max(6.0);
+        let r = Rect::new(bx, by, bw, bh);
+
+        // Floating HUD pill badge with subtle shadow
+        ui.c.fill_rrect(r.outset(2.0), 6.0, Color::rgb(0x000000).with_alpha(120));
+        ui.c.fill_rrect(r, 5.0, t.s(0x1a1d20));
+        let border_c = if super::lemon(ui) {
+            t.brand_lit(os_theme::design::lemon::MAIN).with_alpha(200)
+        } else {
+            t.pill.with_alpha(200)
+        };
+        ui.c.stroke_rrect(r, 5.0, 1.2, border_c);
+        let ty = (r.cy() - ui.c.line_height(font) / 2.0).round();
+        ui.c.text(font, r.x + 10.0, ty, t.tx(0xffffff), text);
+    }
 }
 
 // Row heights follow the display scale like FL's popup menus (spec: ui/ui-scaling.md §2).

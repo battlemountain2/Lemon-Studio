@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
-use os_model::Clip;
+use os_model::{Clip, Note};
 use os_ui::{Canvas, Layer, Rect, Sprite};
 
 use crate::anim::{self, Level, Pendulum, Spring, Tween};
@@ -123,6 +123,15 @@ const RIPPLE_GROW_TAU: f64 = 0.145;
 pub const RIPPLE_REACH: f32 = RIPPLE_GROW + 2.0;
 /// Ripples at once, past which further deleted clips simply go (only a bound, for thousands deleted together).
 const RIPPLE_MAX: usize = 256;
+
+/// A deleted note's ripple / dissolution in the piano roll.
+pub const NOTE_RIPPLE_TIME: f64 = 0.300;
+pub const NOTE_RIPPLE_FILL: f32 = 0.45;
+pub const NOTE_RIPPLE_FILL_TIME: f64 = 0.140;
+pub const NOTE_RIPPLE_LINE: f32 = 0.85;
+pub const NOTE_RIPPLE_LINE_TAU: f64 = 0.110;
+pub const NOTE_RIPPLE_GROW: f32 = 5.0;
+pub const NOTE_RIPPLE_MAX: usize = 128;
 /// A clip the magnet moved is drawn on its way there with this time constant: the step is felt rather than seen
 /// (§4.10). Lemon Studio's own: FL's clip jumps. The one number to change if it should be more or less.
 const SNAP_TAU: f64 = 0.024;
@@ -163,6 +172,7 @@ pub struct Motion {
     sweeps: Option<Instant>,
     /// Deleted clips rippling away.
     ripples: Vec<Ripple>,
+    note_ripples: Vec<NoteRipple>,
     /// Clips on their way to where the magnet put them, by what they are known by (a whole selection can be).
     clip_glides: HashMap<u64, ClipGlide>,
 }
@@ -180,6 +190,24 @@ pub struct RippleDraw {
     pub clip: Clip,
     pub selected: bool,
     pub arrangement: Option<u16>,
+    pub grow: f32,
+    pub fill: f32,
+    pub line: f32,
+}
+
+/// A deleted note rippling away in the piano roll.
+struct NoteRipple {
+    note: Note,
+    selected: bool,
+    pattern: u16,
+    at: Instant,
+}
+
+/// One frame of a note deletion ripple.
+pub struct NoteRippleDraw {
+    pub note: Note,
+    pub selected: bool,
+    pub pattern: u16,
     pub grow: f32,
     pub fill: f32,
     pub line: f32,
@@ -400,6 +428,7 @@ impl Motion {
         self.takes.retain(|t| since(now, t.noted) < 1.0);
         self.ghosts.retain(|g| since(now, g.at) < 1.0);
         self.ripples.retain(|r| since(now, r.at) < RIPPLE_TIME);
+        self.note_ripples.retain(|r| since(now, r.at) < NOTE_RIPPLE_TIME);
         self.clip_glides.retain(|_, g| since(now, g.at) < SNAP_REST);
     }
 
@@ -426,6 +455,7 @@ impl Motion {
             || self.fall.as_ref().is_some_and(|f| f.win == win)
             || (win.is_none() && !self.glows.is_empty())
             || !self.ripples.is_empty()
+            || !self.note_ripples.is_empty()
             || !self.clip_glides.is_empty()
     }
 
@@ -1003,6 +1033,34 @@ impl Motion {
     /// Clips came back or changed (an undo or a redo): what was rippling away has no place over them.
     pub fn ripples_over(&mut self) {
         self.ripples.clear();
+        self.note_ripples.clear();
+    }
+
+    /// `note` was deleted in `pattern`: it ripples/dissolves away in the piano roll.
+    pub fn note_ripple(&mut self, note: Note, selected: bool, pattern: u16) {
+        if glides() && self.note_ripples.len() < NOTE_RIPPLE_MAX {
+            self.note_ripples.push(NoteRipple { note, selected, pattern, at: anim::now() });
+        }
+    }
+
+    /// The note ripples to draw this frame.
+    pub fn note_ripples(&mut self) -> Vec<NoteRippleDraw> {
+        let now = anim::now();
+        self.note_ripples.retain(|r| since(now, r.at) < NOTE_RIPPLE_TIME);
+        self.note_ripples
+            .iter()
+            .map(|r| {
+                let t = since(now, r.at);
+                NoteRippleDraw {
+                    note: r.note,
+                    selected: r.selected,
+                    pattern: r.pattern,
+                    grow: NOTE_RIPPLE_GROW * (1.0 - (-t / NOTE_RIPPLE_LINE_TAU).exp()) as f32,
+                    fill: NOTE_RIPPLE_FILL * (1.0 - t / NOTE_RIPPLE_FILL_TIME).max(0.0) as f32,
+                    line: NOTE_RIPPLE_LINE * (-t / NOTE_RIPPLE_LINE_TAU).exp() as f32,
+                }
+            })
+            .collect()
     }
 
     /// The ripples to draw this frame.

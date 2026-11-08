@@ -283,6 +283,8 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, f: &FrameInfo) {
         ui.c.fill_rrect(nr, rad, t.note_rim);
         ui.c.fill_rect_gradient(body, t.note_top, t.note_bottom, (rad - 1.0).max(0.0));
     }
+    // Dissolving ripple & particle poof animation for deleted notes
+    note_ripples(ui, s, &g, &l);
     // Tool overlays (§9): marquee and zoom box (orange, rounded), slice and scrub lines.
     match s.piano.overlay {
         Some(Overlay::Marquee(m) | Overlay::ZoomBox(m)) => {
@@ -365,6 +367,60 @@ fn corner_button(ui: &mut Ui, b: Rect) {
     ui.veil(b, ui.t.scrollbar);
 }
 
+/// Dissolution / ripple animation for notes removed from the piano roll.
+fn note_ripples(ui: &mut Ui, s: &State, g: &Geom, l: &Layout) {
+    let list = s.motion.borrow_mut().note_ripples();
+    if list.is_empty() {
+        return;
+    }
+    let t = ui.t;
+    let ch = piano::channel(s);
+    for d in list {
+        if d.pattern != s.pattern || Some(d.note.channel) != ch {
+            continue;
+        }
+        let Some(nr) = g.note_rect(&d.note) else { continue };
+        let reach = nr.outset(16.0).intersect(&l.grid);
+        s.motion.borrow_mut().live(reach);
+        if reach.w <= 0.0 || reach.h <= 0.0 || !ui.c.visible(reach) {
+            continue;
+        }
+        let base_col = if d.selected {
+            t.note_sel_top
+        } else {
+            t.note_top
+        };
+        let col = base_col.mix(t.tx(0xffffff), 0.35);
+        let r = nr.outset(d.grow * 1.5);
+        let radius = (3.5 + d.grow).min(r.w / 2.0).min(r.h / 2.0);
+        if d.fill > 0.0 {
+            ui.c.fill_rrect(r, radius, col.with_alpha((d.fill * 220.0).round() as u8));
+        }
+        ui.c.stroke_rrect(r, radius, (1.8 - d.grow * 0.15).max(0.8), col.with_alpha((d.line * 255.0).round() as u8));
+
+        // Playful particle poof sparks radiating outward
+        if d.fill > 0.03 {
+            let cx = nr.cx();
+            let cy = nr.cy();
+            let dist = d.grow * 2.8;
+            let spark_alpha = (d.line * 200.0).round() as u8;
+            let spark_col = t.tx(0xffffff).with_alpha(spark_alpha);
+            let offsets = [
+                (-1.0, 0.0), (1.0, 0.0), (0.0, -0.6), (0.0, 0.6),
+                (-0.7, -0.5), (0.7, 0.5), (-0.7, 0.5), (0.7, -0.5),
+            ];
+            for (ox, oy) in offsets {
+                let px = cx + ox * dist;
+                let py = cy + oy * dist;
+                let sp = Rect::new(px - 1.5, py - 1.5, 3.0, 3.0);
+                if l.grid.contains(sp.x, sp.y) {
+                    ui.c.fill_rrect(sp, 1.0, spark_col);
+                }
+            }
+        }
+    }
+}
+
 /// Toolbar icons in the title bar (§2): the editing tools and undo; the menus and helpers that are not available yet
 /// are greyed out. `shift` moves the icons (the floating window draws them 4 px further left, §1a).
 fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
@@ -372,11 +428,11 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
     let active = s.piano.tool;
     let ox = r.x - 209.0 + shift;
     let items: [(f32, Icon, &'static str, Option<Action>); 16] = [
-        (222.0, Icon::ArrowRight, "Piano roll options", Some(Action::PianoOptionsMenu)),
-        (242.0, Icon::MidiControl, "Piano roll tools: quantize, chop, glue, strum, arpeggiate, randomize...", Some(Action::PianoToolsMenu)),
+        (222.0, Icon::ArrowRight, "Piano roll options (File, Edit, Helpers, View)", Some(Action::PianoOptionsMenu)),
+        (242.0, Icon::MidiControl, "Piano roll tools: quantize, chop, strum, arpeggiate, 808 generate...", Some(Action::PianoToolsMenu)),
         (263.0, Icon::Magnet, "", Some(Action::PianoSnapMenu)),
         (283.0, Icon::Note, "Note properties", None),
-        (305.0, Icon::Blend, "Scale and chord stamps (Stamp tool)", Some(Action::PianoStampMenu)),
+        (305.0, Icon::Blend, "Stamp tool: chords & scale stamps (click note grid to stamp)", Some(Action::PianoStampMenu)),
         (327.0, Icon::Undo, "Undo (Ctrl+Z)", Some(Action::PianoUndo)),
         (360.0, Icon::Pencil, "Draw (P)", Some(Action::PianoTool(Tool::Draw))),
         (380.0, Icon::Brush, "Paint (B): drag to paint notes along the row", Some(Action::PianoTool(Tool::Paint))),
@@ -416,7 +472,11 @@ fn toolbar(ui: &mut Ui, s: &State, r: Rect, shift: f32) {
         } else {
             t.glyph
         };
-        icons::draw(ui.c, icon, b, c);
+        if x == 222.0 {
+            os_ui::kit::triangle(ui.c, b.cx(), b.cy(), 4.0, os_ui::kit::Dir::Down, c);
+        } else {
+            icons::draw(ui.c, icon, b, c);
+        }
     }
     // Subtle FL Studio style group dividers
     let sep_col = t.splitter_dark.with_alpha(160);

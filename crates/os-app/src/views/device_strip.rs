@@ -320,7 +320,9 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, _f: &FrameInfo) {
     }
 }
 
-/// Paint an inline mini Piano Roll inside the device strip dock (Ableton / Bitwig style clip integration).
+/// Paint an inline mini Piano Roll / Clip Editor inside the device strip dock.
+/// Supports Fold mode (only active pitches displayed), 16-step pad sequencer mode,
+/// top Ableton-style time ruler, and velocity stems lane.
 pub fn paint_mini_piano_roll(ui: &mut Ui, s: &State, r: Rect, ch_idx: usize, f: &FrameInfo) {
     let t = ui.t;
     lk::outlined(ui.c, r, 4.0, t.s(0x1a1c1e), t.s(0x141617));
@@ -330,51 +332,172 @@ pub fn paint_mini_piano_roll(ui: &mut Ui, s: &State, r: Rect, ch_idx: usize, f: 
     let pat = s.project.patterns.iter().find(|p| p.number == pat_idx);
 
     // Mini Title Bar
-    let title_h = 18.0;
+    let title_h = 22.0;
     let title_r = Rect::new(r.x, r.y, r.w, title_h);
     ui.c.fill_rrect(title_r, 4.0, t.s(0x1a1c1e));
     ui.c.fill_rect(Rect::new(r.x, title_r.bottom() - 3.0, r.w, 3.0), t.s(0x1a1c1e));
     ui.c.fill_rect(Rect::new(r.x, title_r.bottom() - 1.0, r.w, 1.0), t.s(0x121314));
 
-    icons::draw(ui.c, Icon::PianoRoll, Rect::new(r.x + 6.0, r.y + 2.0, 14.0, 14.0), t.tx(0xffb020));
-    let pat_name = pat.and_then(|p| p.name.as_deref()).unwrap_or("Current Pattern");
-    let title_str = format!("PIANO ROLL • Pattern: {pat_name} • {}", ch.name.as_deref().unwrap_or("Untitled"));
-    ui.c.text(Font::new(10), r.x + 24.0, r.y + 3.0, t.text_dim, &title_str);
+    icons::draw(ui.c, Icon::PianoRoll, Rect::new(r.x + 6.0, r.y + 4.0, 14.0, 14.0), t.tx(0xffb020));
+    let pat_name = pat.and_then(|p| p.name.as_deref()).unwrap_or("Pattern 1");
+    let title_str = format!("CLIP • {pat_name} • {}", ch.name.as_deref().unwrap_or("Untitled"));
+    ui.c.text(Font::new(11), r.x + 24.0, r.y + 4.0, t.text, &title_str);
 
-    let double_hint = "Double-click to open full Piano Roll window";
-    let open_btn_r = Rect::new(r.right() - 120.0, r.y + 2.0, 115.0, 14.0);
+    // Middle toggle buttons: [ Fold: On/Off ] [ Mode: Roll / 16 Pads ]
+    let fold_lbl = if s.device_strip_fold { "Fold: ON" } else { "Fold: OFF" };
+    let fold_btn_r = Rect::new(r.right() - 250.0, r.y + 2.0, 68.0, 18.0);
+    let hov_fold = ui.hit(fold_btn_r, Action::DeviceStripToggleFold, "Fold mode: only show used notes");
+    let fold_bg = if s.device_strip_fold { t.s(0x383e44) } else if hov_fold { t.s(0x282c2f) } else { t.s(0x1e2124) };
+    lk::outlined(ui.c, fold_btn_r, 3.0, t.s(0x2a2e32), fold_bg);
+    ui.c.text_center(Font::new(10), fold_btn_r, if s.device_strip_fold { t.tx(0xffffff) } else { t.text_dim }, fold_lbl);
+
+    let mode_lbl = if s.device_strip_pads { "16 Pads" } else { "Piano Roll" };
+    let mode_btn_r = Rect::new(r.right() - 176.0, r.y + 2.0, 74.0, 18.0);
+    let hov_mode = ui.hit(mode_btn_r, Action::DeviceStripTogglePads, "Toggle between Piano Roll and 16-Step Pad Sequencer");
+    let mode_bg = if s.device_strip_pads { t.brand_lit(os_theme::design::lemon::MAIN).mix(t.s(0x1a1c1e), 0.7) } else if hov_mode { t.s(0x282c2f) } else { t.s(0x1e2124) };
+    lk::outlined(ui.c, mode_btn_r, 3.0, t.s(0x2a2e32), mode_bg);
+    ui.c.text_center(Font::new(10), mode_btn_r, if s.device_strip_pads { t.tx(0xffffff) } else { t.text_dim }, mode_lbl);
+
+    let double_hint = "Open full Piano Roll window";
+    let open_btn_r = Rect::new(r.right() - 96.0, r.y + 2.0, 92.0, 18.0);
     let hov_open = ui.hit(open_btn_r, Action::ShowMax(crate::app::Win::PianoRoll), double_hint);
-    ui.c.text_right(Font::new(10), open_btn_r.right(), r.y + 3.0, if hov_open { t.tx(0xffffff) } else { t.tx(0x6a7279) }, "Open Full Window ↗");
+    lk::outlined(ui.c, open_btn_r, 3.0, t.s(0x2a2e32), if hov_open { t.s(0x32373c) } else { t.s(0x1e2124) });
+    ui.c.text_center(Font::new(10), open_btn_r, if hov_open { t.tx(0xffffff) } else { t.tx(0x8e969d) }, "Open Window ↗");
 
-    // Piano Roll Body
+    // Body Area
     let body_r = Rect::new(r.x + 1.0, r.y + title_h, r.w - 2.0, (r.h - title_h - 1.0).max(0.0));
     ui.c.push_clip(body_r);
 
-    let key_col_w = 34.0;
-    let grid_x = body_r.x + key_col_w;
-    let grid_w = (body_r.w - key_col_w).max(10.0);
-    let grid_y = body_r.y;
-    let grid_h = body_r.h;
+    let ppq = s.project.ppq.max(4) as f32;
+    let ticks_per_bar = ppq * 4.0;
+    let total_ticks = (ticks_per_bar * 4.0).max(1.0);
+    let step_ticks = ppq / 4.0;
 
     let notes: Vec<&os_model::Note> = pat.map_or(Vec::new(), |p| {
         p.notes.iter().filter(|n| n.channel == ch.index).collect()
     });
+    let key_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    let note_c = ch.color.map_or(Color::rgb(0x42a5f5), rgb);
 
-    let num_rows = 20usize;
-    let avg_pitch = if notes.is_empty() {
-        60
+    // MODE 1: 16-Step Pad Sequencer Mode
+    if s.device_strip_pads {
+        let pad_margin = 4.0;
+        let pad_y = body_r.y + 12.0;
+        let pad_h = (body_r.h - 24.0).max(20.0);
+        let avail_w = body_r.w - 16.0;
+        let pad_w = ((avail_w - (15.0 * pad_margin)) / 16.0).max(8.0);
+
+        // Header for Step Sequencer
+        ui.c.text(Font::new(10), body_r.x + 8.0, body_r.y + 2.0, t.text_dim, "16-STEP SEQUENCER (click pad to toggle step)");
+
+        for step in 0..16 {
+            let px = body_r.x + 8.0 + (step as f32) * (pad_w + pad_margin);
+            let pad_r = Rect::new(px, pad_y, pad_w, pad_h);
+
+            // Check if note is active at this step
+            let is_active = notes.iter().any(|n| (n.position as f32 / step_ticks).floor() as usize == step);
+            let beat_group = step / 4;
+            let is_beat_start = step % 4 == 0;
+            let group_base = if beat_group % 2 == 0 { t.s(0x232629) } else { t.s(0x191b1c) };
+
+            let hov = ui.hit(pad_r, Action::DeviceStripStepClick(step), format!("Step {}: toggle note", step + 1));
+            let fill = if is_active {
+                if hov { note_c.shade(0.15) } else { note_c }
+            } else if hov {
+                t.s(0x353a3f)
+            } else {
+                group_base
+            };
+
+            lk::outlined(ui.c, pad_r, 4.0, if is_active { note_c.shade(-0.2) } else if is_beat_start { t.s(0x383e44) } else { t.s(0x1c1e20) }, fill);
+
+            // Step number label
+            let num_lbl = format!("{}", step + 1);
+            let num_c = if is_active { Color::rgb(0x10151a) } else if is_beat_start { t.tx(0xffb020) } else { t.tx(0x656c73) };
+            ui.c.text_center(Font::new(10), Rect::new(pad_r.x, pad_r.y + 4.0, pad_r.w, 12.0), num_c, &num_lbl);
+
+            // LED indicator inside pad
+            let led_r = Rect::new(pad_r.cx() - 4.0, pad_r.bottom() - 10.0, 8.0, 4.0);
+            ui.c.fill_rrect(led_r, 1.0, if is_active { Color::rgb(0xffffff) } else { Color::rgb(0x000000).with_alpha(80) });
+        }
+
+        // Playhead for Pads
+        if f.playing {
+            let cur_step = ((f.tick as f32 % total_ticks) / step_ticks).floor() as usize;
+            if cur_step < 16 {
+                let px = body_r.x + 8.0 + (cur_step as f32) * (pad_w + pad_margin);
+                let head_r = Rect::new(px - 1.0, pad_y - 2.0, pad_w + 2.0, pad_h + 4.0);
+                ui.c.stroke_rrect(head_r, 5.0, 1.5, Color::rgb(0xffffff).with_alpha(200));
+            }
+        }
+
+        ui.c.pop_clip();
+        return;
+    }
+
+    // MODE 2: Piano Roll / Clip View (Folded or Semitones)
+    let ruler_h = 16.0;
+    let vel_h = 22.0;
+
+    let key_col_w = 40.0;
+    let grid_x = body_r.x + key_col_w;
+    let grid_w = (body_r.w - key_col_w).max(10.0);
+    let grid_y = body_r.y + ruler_h;
+    let grid_h = (body_r.h - ruler_h - vel_h).max(20.0);
+    let vel_y = grid_y + grid_h;
+
+    // Time Ruler
+    let ruler_r = Rect::new(grid_x, body_r.y, grid_w, ruler_h);
+    ui.c.fill_rect(ruler_r, t.s(0x181a1c));
+    ui.c.fill_rect(Rect::new(ruler_r.x, ruler_r.bottom() - 1.0, ruler_r.w, 1.0), t.s(0x202428));
+
+    for bar in 0..4 {
+        let bx = grid_x + ((bar as f32) * ticks_per_bar / total_ticks) * grid_w;
+        let bar_num = bar + 1;
+        ui.c.text(Font::new(9), bx + 4.0, body_r.y + 2.0, t.tx(0x9098a0), &format!("{bar_num}"));
+        for beat in 1..4 {
+            let bex = grid_x + (((bar as f32) * ticks_per_bar + (beat as f32) * ppq) / total_ticks) * grid_w;
+            ui.c.fill_rect(Rect::new(bex, body_r.y + 8.0, 1.0, 6.0), t.s(0x30353a));
+        }
+    }
+
+    // Loop Brace indicator bar across top
+    let loop_bar_h = 2.0;
+    ui.c.fill_rect(Rect::new(grid_x, body_r.y, grid_w, loop_bar_h), t.brand_lit(os_theme::design::lemon::MAIN));
+
+    // Determine Pitches / Rows to show
+    let pitches_to_show: Vec<u8> = if s.device_strip_fold && !notes.is_empty() {
+        let mut uniq: Vec<u8> = notes.iter().map(|n| n.key as u8).collect();
+        uniq.sort_unstable();
+        uniq.dedup();
+        uniq.reverse(); // Highest pitch on top
+        if uniq.len() < 4 {
+            let base = uniq[0];
+            let mut padded = Vec::new();
+            for offset in 0..6 {
+                padded.push(base.saturating_sub(offset));
+            }
+            padded
+        } else {
+            uniq
+        }
     } else {
-        (notes.iter().map(|n| n.key as usize).sum::<usize>() / notes.len()).clamp(30, 90) as u8
+        let avg_pitch = if notes.is_empty() {
+            60
+        } else {
+            (notes.iter().map(|n| n.key as usize).sum::<usize>() / notes.len()).clamp(30, 90) as u8
+        };
+        let num_rows = 16usize;
+        let base_key = avg_pitch.saturating_sub(8).clamp(12, 110);
+        (0..num_rows).map(|row| (base_key as usize + (num_rows - 1 - row)) as u8).collect()
     };
-    let base_key = avg_pitch.saturating_sub(10).clamp(12, 107);
+
+    let num_rows = pitches_to_show.len().max(1);
     let rh = grid_h / (num_rows as f32);
 
-    let key_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-
     // Draw Keys & Grid Rows
-    for row in 0..num_rows {
-        let k = (base_key as usize + (num_rows - 1 - row)) as u8;
-        let y = grid_y + (row as f32) * rh;
+    for (row_idx, &k) in pitches_to_show.iter().enumerate() {
+        let y = grid_y + (row_idx as f32) * rh;
         let is_black = [1, 3, 6, 8, 10].contains(&(k % 12));
         let is_c = (k % 12) == 0;
 
@@ -386,11 +509,10 @@ pub fn paint_mini_piano_roll(ui: &mut Ui, s: &State, r: Rect, ch_idx: usize, f: 
         ui.c.fill_rect(key_r, fill);
         ui.c.fill_rect(Rect::new(key_r.x, key_r.bottom() - 1.0, key_r.w, 1.0), t.s(0x141617));
 
-        if is_c || k % 12 == 9 {
-            let oct = (k / 12).saturating_sub(1);
-            let lbl = format!("{}{oct}", key_names[(k % 12) as usize]);
-            ui.c.text(Font::new(9), key_r.x + 3.0, y + 1.0, if is_c { t.tx(0xffb020) } else { t.tx(0x757d85) }, &lbl);
-        }
+        let oct = (k / 12).saturating_sub(1);
+        let lbl = format!("{}{oct}", key_names[(k % 12) as usize]);
+        let lbl_col = if is_c { t.tx(0xffb020) } else if is_black { t.tx(0x808890) } else { t.tx(0xb0b6be) };
+        ui.c.text(Font::new(10), key_r.x + 4.0, y + (rh - 12.0) / 2.0, lbl_col, &lbl);
 
         // Grid Row
         let row_r = Rect::new(grid_x, y, grid_w, rh);
@@ -400,51 +522,64 @@ pub fn paint_mini_piano_roll(ui: &mut Ui, s: &State, r: Rect, ch_idx: usize, f: 
     }
 
     // Grid Columns (Bars & Beats)
-    let ppq = s.project.ppq.max(4) as f32;
-    let ticks_per_bar = ppq * 4.0;
-    let total_ticks = (ticks_per_bar * 4.0).max(1.0);
-
     for bar in 0..=4 {
         let bx = grid_x + ((bar as f32) * ticks_per_bar / total_ticks) * grid_w;
-        ui.c.fill_rect(Rect::new(bx, grid_y, 1.0, grid_h), t.s(0x282c30));
+        ui.c.fill_rect(Rect::new(bx, grid_y, 1.0, grid_h + vel_h), t.s(0x282c30));
         if bar < 4 {
             for beat in 1..4 {
                 let bex = grid_x + (((bar as f32) * ticks_per_bar + (beat as f32) * ppq) / total_ticks) * grid_w;
-                ui.c.fill_rect(Rect::new(bex, grid_y, 1.0, grid_h), t.s(0x1c1e21));
+                ui.c.fill_rect(Rect::new(bex, grid_y, 1.0, grid_h + vel_h), t.s(0x1c1e21));
             }
         }
     }
 
-    // Draw Notes
-    let note_c = ch.color.map_or(Color::rgb(0x42a5f5), rgb);
+    // Velocity Lane Background
+    let vel_r = Rect::new(grid_x, vel_y, grid_w, vel_h);
+    ui.c.fill_rect(vel_r, t.s(0x111314));
+    ui.c.fill_rect(Rect::new(vel_r.x, vel_r.y, vel_r.w, 1.0), t.s(0x24282c));
+    ui.c.text(Font::new(8), body_r.x + 4.0, vel_y + 4.0, t.tx(0x606870), "VEL");
+
+    // Draw Notes and Velocity Stems
     for n in &notes {
-        if n.key < base_key as u16 || n.key >= (base_key as u16 + num_rows as u16) {
-            continue;
-        }
-        let row = (num_rows - 1) - (n.key as usize - base_key as usize);
-        let ny = grid_y + (row as f32) * rh + 1.0;
+        let Some(row_pos) = pitches_to_show.iter().position(|&p| p == n.key as u8) else { continue };
+        let ny = grid_y + (row_pos as f32) * rh + 1.0;
         let nx = grid_x + ((n.position as f32) / total_ticks) * grid_w;
         let nw = (((n.length as f32) / total_ticks) * grid_w).max(4.0);
 
         let nr = Rect::new(nx, ny, nw, (rh - 2.0).max(2.0));
-        ui.c.fill_rrect(nr, 2.0, note_c);
-        ui.c.fill_rect(Rect::new(nr.x, nr.bottom() - 1.0, nr.w, 1.0), note_c.shade(-0.25));
+        ui.c.fill_rrect(nr, 2.5, note_c);
+        ui.c.fill_rect(Rect::new(nr.x, nr.bottom() - 1.0, nr.w, 1.0), note_c.shade(-0.3));
 
-        if nw > 24.0 {
+        if nw > 20.0 {
             let kname = key_names[(n.key % 12) as usize];
-            ui.c.text(Font::new(9), nr.x + 3.0, nr.y + 0.5, Color::rgb(0x10151a), kname);
+            ui.c.text(Font::new(9), nr.x + 3.0, nr.y + (rh - 12.0) / 2.0, Color::rgb(0x10151a), kname);
         }
+
+        // Velocity stem in bottom velocity lane
+        let vel_frac = (n.velocity as f32 / 127.0).clamp(0.05, 1.0);
+        let stem_h = (vel_h - 4.0) * vel_frac;
+        let stem_x = nx + 2.0;
+        let stem_y = vel_r.bottom() - stem_h;
+        let stem_col = if vel_frac > 0.8 {
+            Color::rgb(0xff6060)
+        } else if vel_frac > 0.5 {
+            note_c
+        } else {
+            Color::rgb(0x40c080)
+        };
+        ui.c.fill_rect(Rect::new(stem_x, stem_y, 1.5, stem_h), stem_col.with_alpha(190));
+        ui.c.fill_circle(stem_x + 0.75, stem_y, 2.0, stem_col);
     }
 
     // Playhead line
     if f.playing {
         let cur_tick = f.tick as f32 % total_ticks;
         let px = grid_x + (cur_tick / total_ticks) * grid_w;
-        ui.c.fill_rect(Rect::new(px, grid_y, 2.0, grid_h), t.tx(0xffffff));
+        ui.c.fill_rect(Rect::new(px, body_r.y, 2.0, body_r.h), Color::rgb(0xffffff));
     }
 
     // Grid Hit to open / focus
-    ui.hit(Rect::new(grid_x, grid_y, grid_w, grid_h), Action::ShowMax(crate::app::Win::PianoRoll), "Click to open Piano Roll");
+    ui.hit(Rect::new(grid_x, grid_y, grid_w, grid_h), Action::ShowMax(crate::app::Win::PianoRoll), "Double-click to open full Piano Roll");
 
     ui.c.pop_clip();
 }
