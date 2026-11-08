@@ -364,6 +364,8 @@ pub enum Action {
     DeviceStripSlotArrow { track: u16, slot: u8 },
     DeviceStripSlotLed { track: u16, slot: u8 },
     DeviceStripAddEffect { track: u16 },
+    DeviceStripTab(u8),
+    DeviceStripKey(u8),
     DeviceStripArea,
     /// Omni Command Palette actions (Phase 4).
     ToggleCommandPalette,
@@ -1112,6 +1114,7 @@ pub struct State {
     pub show_device_strip: bool,
     pub device_strip_h: f32,
     pub device_strip_scroll_x: f32,
+    pub device_strip_tab: u8,
     /// Omni Command Palette state (Phase 4).
     pub cmd_palette: crate::palette::Palette,
     pub spectral_progress: Option<(usize, bool)>,
@@ -1605,8 +1608,9 @@ impl App {
                 no_focus: false,
                 show_browser: true,
                 show_device_strip: false,
-                device_strip_h: 160.0,
+                device_strip_h: 170.0,
                 device_strip_scroll_x: 0.0,
+                device_strip_tab: 2,
                 cmd_palette: Default::default(),
                 spectral_progress: None,
                 rack_pos: crate::arrange::RACK_POS,
@@ -7582,8 +7586,10 @@ impl App {
             return;
         }
         if let Some(Action::PianoGhostNote(channel)) = action {
-            self.state.selected_channel = channel as usize;
-            self.state.message = Some(format!("Switched to channel {}", channel + 1));
+            let row = self.state.project.channels.iter().position(|c| c.index == channel).unwrap_or(channel as usize);
+            self.focus_channel(row);
+            let name = crate::rack::channel_name(&self.state, row);
+            self.state.message = Some(format!("Switched to channel {}: {name}", row + 1));
             self.damage_piano();
             self.invalidate();
             return;
@@ -9192,6 +9198,15 @@ impl App {
         }
         let s = &mut self.state;
         match *a {
+            Action::PianoGhostNote(channel) if self.alt => {
+                let row = s.project.channels.iter().position(|c| c.index == channel).unwrap_or(channel as usize);
+                self.focus_channel(row);
+                let name = crate::rack::channel_name(&self.state, row);
+                self.state.message = Some(format!("Switched to channel {}: {name}", row + 1));
+                self.damage_piano();
+                self.invalidate();
+                return;
+            }
             Action::PianoGrid | Action::PianoGhostNote(_) => {
                 let start = crate::piano_snap::place(s, &g, g.tick_at(x), self.alt);
                 let key = g.key_at(y).clamp(0, views::piano::TOP_KEY);
@@ -9686,6 +9701,15 @@ impl App {
                 self.focus_channel(i);
                 self.open_channel_window(i);
                 self.invalidate();
+            }
+            Action::DeviceStripTab(tab) => {
+                self.state.device_strip_tab = tab;
+                self.invalidate();
+            }
+            Action::DeviceStripKey(k) => {
+                let play = self.audition();
+                self.hold_key(Some(k as i32), play);
+                self.damage_piano();
             }
             Action::DeviceStripSlotClick { track, slot } => {
                 self.state.selected_mixer = track;

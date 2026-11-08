@@ -37,6 +37,20 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, _f: &FrameInfo) {
     ui.c.text(Font::new(13), r.x + 28.0, r.y + 4.5, t.text_dim, "DEVICE STRIP");
     ui.c.text(Font::new(11), r.x + 104.0, r.y + 6.0, t.tx(0x606870), "SIGNAL CHAIN");
 
+    // View Switcher Tabs: [ Chain ] [ Piano Roll ] [ Split ]
+    let tab_x = r.x + 185.0;
+    let tabs = [("Chain", 0), ("Piano Roll", 1), ("Split", 2)];
+    for (idx, &(label, tab_val)) in tabs.iter().enumerate() {
+        let tab_r = Rect::new(tab_x + (idx as f32) * 62.0, r.y + 3.0, 58.0, 18.0);
+        let is_active = s.device_strip_tab == tab_val;
+        let hov_tab = ui.hit(tab_r, Action::DeviceStripTab(tab_val), format!("Switch dock view to {label}"));
+        let bg_c = if is_active { t.s(0x353a3e) } else if hov_tab { t.s(0x282c2f) } else { t.s(0x1c1e20) };
+        let border_c = if is_active { t.s(0x485056) } else { t.s(0x222527) };
+        lk::outlined(ui.c, tab_r, 3.0, border_c, bg_c);
+        let text_c = if is_active { t.tx(0xffffff) } else if hov_tab { t.text } else { t.text_dim };
+        ui.c.text_center(Font::new(10), tab_r, text_c, label);
+    }
+
     let num_chans = s.project.channels.len();
     if num_chans > 0 {
         let ch_idx = s.selected_channel.min(num_chans - 1);
@@ -89,7 +103,21 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, _f: &FrameInfo) {
     let ch = &s.project.channels[ch_idx];
     let target_mixer = ch.mixer_track;
 
-    ui.c.push_clip(body_r);
+    if s.device_strip_tab == 1 {
+        paint_mini_piano_roll(ui, s, body_r.inset(4.0), ch_idx, _f);
+        return;
+    }
+
+    let (devices_area, mini_area) = if s.device_strip_tab == 2 {
+        let mini_w = (body_r.w * 0.46).clamp(240.0, 560.0);
+        let mini_r = Rect::new(body_r.right() - mini_w - 4.0, body_r.y + 4.0, mini_w, (body_r.h - 8.0).max(0.0));
+        let dev_r = Rect::new(body_r.x, body_r.y, (mini_r.x - body_r.x - 4.0).max(10.0), body_r.h);
+        (dev_r, Some(mini_r))
+    } else {
+        (body_r, None)
+    };
+
+    ui.c.push_clip(devices_area);
 
     let card_y = body_r.y + CARD_MARGIN;
     let card_h = (body_r.h - 2.0 * CARD_MARGIN).max(0.0);
@@ -284,6 +312,139 @@ pub fn paint(ui: &mut Ui, s: &State, r: Rect, _f: &FrameInfo) {
     let text_c = if hov_add { t.tx(0xffffff) } else { t.tx(0x848c92) };
     ui.c.text_center(Font::new(18), Rect::new(add_r.x, add_r.cy() - 18.0, add_r.w, 20.0), text_c, "+");
     ui.c.text_center(Font::new(11), Rect::new(add_r.x, add_r.cy() + 4.0, add_r.w, 14.0), text_c, "ADD EFFECT");
+
+    ui.c.pop_clip();
+
+    if let Some(mini_r) = mini_area {
+        paint_mini_piano_roll(ui, s, mini_r, ch_idx, _f);
+    }
+}
+
+/// Paint an inline mini Piano Roll inside the device strip dock (Ableton / Bitwig style clip integration).
+pub fn paint_mini_piano_roll(ui: &mut Ui, s: &State, r: Rect, ch_idx: usize, f: &FrameInfo) {
+    let t = ui.t;
+    lk::outlined(ui.c, r, 4.0, t.s(0x1a1c1e), t.s(0x141617));
+
+    let Some(ch) = s.project.channels.get(ch_idx) else { return };
+    let pat_idx = s.pattern.max(1);
+    let pat = s.project.patterns.iter().find(|p| p.number == pat_idx);
+
+    // Mini Title Bar
+    let title_h = 18.0;
+    let title_r = Rect::new(r.x, r.y, r.w, title_h);
+    ui.c.fill_rrect(title_r, 4.0, t.s(0x1a1c1e));
+    ui.c.fill_rect(Rect::new(r.x, title_r.bottom() - 3.0, r.w, 3.0), t.s(0x1a1c1e));
+    ui.c.fill_rect(Rect::new(r.x, title_r.bottom() - 1.0, r.w, 1.0), t.s(0x121314));
+
+    icons::draw(ui.c, Icon::PianoRoll, Rect::new(r.x + 6.0, r.y + 2.0, 14.0, 14.0), t.tx(0xffb020));
+    let pat_name = pat.and_then(|p| p.name.as_deref()).unwrap_or("Current Pattern");
+    let title_str = format!("PIANO ROLL • Pattern: {pat_name} • {}", ch.name.as_deref().unwrap_or("Untitled"));
+    ui.c.text(Font::new(10), r.x + 24.0, r.y + 3.0, t.text_dim, &title_str);
+
+    let double_hint = "Double-click to open full Piano Roll window";
+    let open_btn_r = Rect::new(r.right() - 120.0, r.y + 2.0, 115.0, 14.0);
+    let hov_open = ui.hit(open_btn_r, Action::ShowMax(crate::app::Win::PianoRoll), double_hint);
+    ui.c.text_right(Font::new(10), open_btn_r.right(), r.y + 3.0, if hov_open { t.tx(0xffffff) } else { t.tx(0x6a7279) }, "Open Full Window ↗");
+
+    // Piano Roll Body
+    let body_r = Rect::new(r.x + 1.0, r.y + title_h, r.w - 2.0, (r.h - title_h - 1.0).max(0.0));
+    ui.c.push_clip(body_r);
+
+    let key_col_w = 34.0;
+    let grid_x = body_r.x + key_col_w;
+    let grid_w = (body_r.w - key_col_w).max(10.0);
+    let grid_y = body_r.y;
+    let grid_h = body_r.h;
+
+    let notes: Vec<&os_model::Note> = pat.map_or(Vec::new(), |p| {
+        p.notes.iter().filter(|n| n.channel == ch.index).collect()
+    });
+
+    let num_rows = 20usize;
+    let avg_pitch = if notes.is_empty() {
+        60
+    } else {
+        (notes.iter().map(|n| n.key as usize).sum::<usize>() / notes.len()).clamp(30, 90) as u8
+    };
+    let base_key = avg_pitch.saturating_sub(10).clamp(12, 107);
+    let rh = grid_h / (num_rows as f32);
+
+    let key_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+    // Draw Keys & Grid Rows
+    for row in 0..num_rows {
+        let k = (base_key as usize + (num_rows - 1 - row)) as u8;
+        let y = grid_y + (row as f32) * rh;
+        let is_black = [1, 3, 6, 8, 10].contains(&(k % 12));
+        let is_c = (k % 12) == 0;
+
+        // Piano Key
+        let key_r = Rect::new(body_r.x, y, key_col_w, rh);
+        let key_bg = if is_black { t.s(0x181a1b) } else { t.s(0x2a2d30) };
+        let hov_key = ui.hit(key_r, Action::DeviceStripKey(k), format!("Play {}", key_names[(k % 12) as usize]));
+        let fill = if hov_key { t.s(0x404449) } else { key_bg };
+        ui.c.fill_rect(key_r, fill);
+        ui.c.fill_rect(Rect::new(key_r.x, key_r.bottom() - 1.0, key_r.w, 1.0), t.s(0x141617));
+
+        if is_c || k % 12 == 9 {
+            let oct = (k / 12).saturating_sub(1);
+            let lbl = format!("{}{oct}", key_names[(k % 12) as usize]);
+            ui.c.text(Font::new(9), key_r.x + 3.0, y + 1.0, if is_c { t.tx(0xffb020) } else { t.tx(0x757d85) }, &lbl);
+        }
+
+        // Grid Row
+        let row_r = Rect::new(grid_x, y, grid_w, rh);
+        let row_bg = if is_black { t.s(0x121415) } else { t.s(0x16181a) };
+        ui.c.fill_rect(row_r, row_bg);
+        ui.c.fill_rect(Rect::new(grid_x, y + rh - 1.0, grid_w, 1.0), t.s(0x101112));
+    }
+
+    // Grid Columns (Bars & Beats)
+    let ppq = s.project.ppq.max(4) as f32;
+    let ticks_per_bar = ppq * 4.0;
+    let total_ticks = (ticks_per_bar * 4.0).max(1.0);
+
+    for bar in 0..=4 {
+        let bx = grid_x + ((bar as f32) * ticks_per_bar / total_ticks) * grid_w;
+        ui.c.fill_rect(Rect::new(bx, grid_y, 1.0, grid_h), t.s(0x282c30));
+        if bar < 4 {
+            for beat in 1..4 {
+                let bex = grid_x + (((bar as f32) * ticks_per_bar + (beat as f32) * ppq) / total_ticks) * grid_w;
+                ui.c.fill_rect(Rect::new(bex, grid_y, 1.0, grid_h), t.s(0x1c1e21));
+            }
+        }
+    }
+
+    // Draw Notes
+    let note_c = ch.color.map_or(Color::rgb(0x42a5f5), rgb);
+    for n in &notes {
+        if n.key < base_key as u16 || n.key >= (base_key as u16 + num_rows as u16) {
+            continue;
+        }
+        let row = (num_rows - 1) - (n.key as usize - base_key as usize);
+        let ny = grid_y + (row as f32) * rh + 1.0;
+        let nx = grid_x + ((n.position as f32) / total_ticks) * grid_w;
+        let nw = (((n.length as f32) / total_ticks) * grid_w).max(4.0);
+
+        let nr = Rect::new(nx, ny, nw, (rh - 2.0).max(2.0));
+        ui.c.fill_rrect(nr, 2.0, note_c);
+        ui.c.fill_rect(Rect::new(nr.x, nr.bottom() - 1.0, nr.w, 1.0), note_c.shade(-0.25));
+
+        if nw > 24.0 {
+            let kname = key_names[(n.key % 12) as usize];
+            ui.c.text(Font::new(9), nr.x + 3.0, nr.y + 0.5, Color::rgb(0x10151a), kname);
+        }
+    }
+
+    // Playhead line
+    if f.playing {
+        let cur_tick = f.tick as f32 % total_ticks;
+        let px = grid_x + (cur_tick / total_ticks) * grid_w;
+        ui.c.fill_rect(Rect::new(px, grid_y, 2.0, grid_h), t.tx(0xffffff));
+    }
+
+    // Grid Hit to open / focus
+    ui.hit(Rect::new(grid_x, grid_y, grid_w, grid_h), Action::ShowMax(crate::app::Win::PianoRoll), "Click to open Piano Roll");
 
     ui.c.pop_clip();
 }

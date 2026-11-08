@@ -25,6 +25,7 @@ pub enum PlugCmd {
     Replace { index: usize, row: usize },
     /// Effect `index` (into `Plugins::effects`) into the selected mixer track: slot `slot`, else its first empty slot.
     Effect { index: usize, slot: Option<u8> },
+    Palette(Target),
     /// Find new plugins (a background scan).
     Find,
     /// Settings > Plugins.
@@ -130,11 +131,17 @@ fn section(s: &State, effect: bool, target: Target, nested: bool) -> Vec<PItem> 
 pub const VIEWS: &[(&str, MenuView)] = &[("Categories", MenuView::Categories), ("Simple", MenuView::Simple), ("By vendor", MenuView::Vendor)];
 
 /// After the lists (spec §2): Find new plugins, Manage plugins..., the display modes.
-fn footer(s: &State) -> Vec<PItem> {
+fn footer(s: &State, target: Target) -> Vec<PItem> {
     let view = s.plugdb.prefs.menu_view;
     let scanning = s.plugdb.progress.is_some();
     let find = PItem::new(if scanning { "Scan for new plugins (scanning...)" } else { "Scan for new plugins" }, Cmd::Plugin(PlugCmd::Find));
-    let mut v = vec![PItem::sep(), if scanning { find.off() } else { find }, PItem::new("Manage plugins...", Cmd::Plugin(PlugCmd::Manage)), PItem::sep()];
+    let mut v = vec![
+        PItem::sep(),
+        PItem::new("More plugins... (Plugin Picker)", Cmd::Plugin(PlugCmd::Palette(target))),
+        if scanning { find.off() } else { find },
+        PItem::new("Manage plugins...", Cmd::Plugin(PlugCmd::Manage)),
+        PItem::sep(),
+    ];
     v.extend(VIEWS.iter().map(|&(label, m)| PItem::new(label, Cmd::Plugin(PlugCmd::View(m))).mark(Mark::Radio(view == m))));
     v
 }
@@ -161,7 +168,7 @@ pub fn items(s: &State, target: Target, nested: bool) -> Vec<PItem> {
         Target::Gen(_) | Target::Replace(_) | Target::MemberInst(..) | Target::Track(_) => v.extend(section(s, false, target, nested)),
         Target::Fx(_) | Target::Container(_) | Target::Member(..) => v.extend(section(s, true, target, nested)),
     }
-    v.extend(footer(s));
+    v.extend(footer(s, target));
     v
 }
 
@@ -177,6 +184,10 @@ pub fn run(app: &mut App, c: PlugCmd) -> Option<String> {
         PlugCmd::Generator { index, after } => add_generator(app, index, after),
         PlugCmd::Replace { index, row } => replace_generator(app, index, row),
         PlugCmd::Effect { index, slot } => add_effect(app, index, slot),
+        PlugCmd::Palette(target) => {
+            app.open_plugin_palette(target, app.mouse, None);
+            None
+        }
         PlugCmd::Find => {
             app.start_scan(Mode::Changed);
             None

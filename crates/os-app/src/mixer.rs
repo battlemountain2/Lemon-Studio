@@ -1923,6 +1923,7 @@ pub fn slot_menu(app: &App, slot: u8, x: f32, y: f32) -> Popup {
     let key = crate::plugins::fx_key(s.selected_mixer, slot);
     let cpu = crate::playlist::plugin_cpu(s, key).unwrap_or_default();
     let items = vec![
+        PItem::new("Choose / Replace plugin... (F8)", Cmd::Plugin(crate::plugin_menu::PlugCmd::Palette(crate::plugin_menu::Target::Fx(Some(slot))))),
         PItem::sub("Replace", replace),
         PItem::new("Delete...", mx(MCmd::SlotDelete(slot))),
         PItem::sep(),

@@ -50,20 +50,60 @@ pub enum NCmd {
     Generate808,
     GoToMixer,
     Stamp(Option<usize>),
+    ToggleScaleHighlight,
+    SetScaleRoot(u8),
+    SetScale(usize),
+    DetectScale,
 }
 
 fn item(label: &'static str, c: NCmd) -> PItem {
     PItem::new(label, Cmd::Piano(c))
 }
 
-/// The toolbar's Tools menu (§11).
-pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
+/// Auto-detect root note and scale from notes in the current pattern.
+pub fn detect_scale_from_notes(s: &mut State) -> String {
+    let pat_num = s.pattern.max(1);
+    let ch_idx = if let Some(ch) = s.project.channels.get(s.selected_channel) { ch.index } else { 0 };
+    let Some(pat) = s.project.patterns.iter().find(|p| p.number == pat_num) else {
+        return "No pattern found".into();
+    };
+    let pitches: Vec<i32> = pat.notes.iter().filter(|n| n.channel == ch_idx).map(|n| n.key as i32).collect();
+    if pitches.is_empty() {
+        return "No notes in pattern to detect scale from".into();
+    }
+    let mut best_score = -1;
+    let mut best_root = 0;
+    let mut best_scale = crate::chords::FIRST_SCALE;
+    for r in 0..12u8 {
+        for sc in 67..=88usize {
+            let mut matches = 0;
+            for &p in &pitches {
+                if crate::chords::in_scale(r, sc, p) {
+                    matches += 1;
+                }
+            }
+            if matches > best_score {
+                best_score = matches;
+                best_root = r;
+                best_scale = sc;
+            }
+        }
+    }
+    s.piano.scale_highlight.root = best_root;
+    s.piano.scale_highlight.scale_idx = best_scale;
+    s.piano.scale_highlight.enabled = true;
+    s.piano.dirty = true;
+    let root_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    let root_name = root_names[best_root as usize % 12];
+    let scale_name = crate::chords::label(best_scale);
+    format!("Detected: {root_name} {scale_name} ({best_score}/{} notes in key)", pitches.len())
+}
+
+/// The toolbar's Tools menu (§11): quick tools & generator algorithms.
+pub fn tools_menu(_s: &State, x: f32, y: f32) -> Popup {
     use crate::piano_dlg::Tool;
     use NCmd::*;
     let items = vec![
-        PItem::head("File"),
-        PItem::new("Import MIDI file...", Cmd::MidiImport(true)),
-        PItem::new("Export as MIDI file...", Cmd::MidiExport(true)),
         PItem::head("Edit"),
         item("Duplicate", Duplicate).key("Ctrl+B"),
         item("Glue", Glue).key("Ctrl+G"),
@@ -90,35 +130,58 @@ pub fn tools_menu(s: &State, x: f32, y: f32) -> Popup {
         item("Add octave slide-up glide", AddOctaveSlide),
         item("Humanize notes (timing & velocity)", Humanize).key("Alt+H"),
         item("Snap notes to scale (key quantize)", SnapToScale),
-        PItem::head("View"),
-        item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
-        item("Add time marker", AddMarker).key("Alt+T"),
     ];
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
-/// The toolbar's Options menu (top-left arrow).
+/// The toolbar's Options menu (top-left arrow): hierarchical menus matching FL Studio.
 pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
     use crate::piano_dlg::Tool;
     use NCmd::*;
-    let items = vec![
-        PItem::head("File"),
+    let root_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    let cur_root = s.piano.scale_highlight.root;
+    let cur_scale = s.piano.scale_highlight.scale_idx;
+
+    let mut root_items = Vec::new();
+    for (r, &name) in root_names.iter().enumerate() {
+        root_items.push(item(name, SetScaleRoot(r as u8)).mark(Mark::Radio(cur_root == r as u8)));
+    }
+
+    let mut scale_items = Vec::new();
+    for sc in 67..=88usize {
+        let name = crate::chords::label(sc);
+        scale_items.push(item(name, SetScale(sc)).mark(Mark::Radio(cur_scale == sc)));
+    }
+
+    let helpers_items = vec![
+        item("Scale highlighting", ToggleScaleHighlight).key("Alt+H").mark(Mark::Check(s.piano.scale_highlight.enabled)),
+        item("Detect scale from notes", DetectScale),
+        PItem::sep(),
+        PItem::sub("Root note", root_items),
+        PItem::sub("Scale", scale_items),
+    ];
+
+    let file_items = vec![
         PItem::new("Import MIDI file...", Cmd::MidiImport(true)),
         PItem::new("Export as MIDI file...", Cmd::MidiExport(true)),
-        PItem::head("Edit"),
+    ];
+
+    let edit_items = vec![
         PItem::new("Cut", Cmd::Cut).key("Ctrl+X"),
         PItem::new("Copy", Cmd::Copy).key("Ctrl+C"),
         PItem::new("Paste", Cmd::Paste).key("Ctrl+V"),
         PItem::new("Delete", Cmd::Delete).key("Del"),
         item("Duplicate", Duplicate).key("Ctrl+B"),
         item("Quick legato", Legato).key("Ctrl+L"),
+        item("Quick chop", QuickChop).key("Ctrl+U"),
         item("Glue", Glue).key("Ctrl+G"),
         item("Discard lengths", DiscardLengths).key("Shift+D"),
-        PItem::head("Tools"),
+    ];
+
+    let tools_items = vec![
         item("Quick quantize", Quantize { strength: 100, starts_only: false }).key("Ctrl+Q"),
         item("Quick quantize start times", Quantize { strength: 100, starts_only: true }).key("Shift+Q"),
         item("Quantize...", Dialog(Tool::Quantize)).key("Alt+Q"),
-        item("Quick chop", QuickChop).key("Ctrl+U"),
         item("Chop...", Dialog(Tool::Chop)).key("Alt+U"),
         item("Strum...", Strum).key("Alt+S"),
         item("Arpeggiate...", Arpeggiate).key("Alt+A"),
@@ -129,17 +192,28 @@ pub fn options_menu(s: &State, x: f32, y: f32) -> Popup {
         item("Randomize...", Dialog(Tool::Randomize)).key("Alt+R"),
         item("Scale levels...", Dialog(Tool::Levels)).key("Alt+X"),
         item("LFO...", Dialog(Tool::Lfo)).key("Alt+O"),
-        PItem::head("Smart MIDI"),
         item("Auto-generate 808 bassline from chords", Generate808),
         item("Toggle slide notes (808 glide)", ToggleSlide),
         item("Add octave slide-up glide", AddOctaveSlide),
-        item("Humanize notes (timing & velocity)", Humanize).key("Alt+H"),
+        item("Humanize notes (timing & velocity)", Humanize),
         item("Snap notes to scale (key quantize)", SnapToScale),
-        PItem::head("View"),
+    ];
+
+    let view_items = vec![
         item("Ghost channels", Ghosts).key("Alt+V").mark(Mark::Check(s.piano.ghosts)),
         item("Add time marker", AddMarker).key("Alt+T"),
+    ];
+
+    let items = vec![
+        PItem::sub("File", file_items),
+        PItem::sub("Edit", edit_items),
+        PItem::sub("Tools", tools_items),
+        PItem::sub("Helpers (Scale highlighting)", helpers_items),
+        PItem::sub("View", view_items),
+        PItem::sep(),
         item("Go to Mixer Track & Signal Chain", GoToMixer).key("Ctrl+Alt+M"),
     ];
+
     Popup { x, y, items, sub: None, scroll: [0; 2] }
 }
 
@@ -455,6 +529,30 @@ pub fn run(app: &mut App, cmd: NCmd) -> Option<String> {
                 None => "Stamp tool cleared".into(),
             };
             return Some(m);
+        }
+        NCmd::ToggleScaleHighlight => {
+            let sh = &mut app.state.piano.scale_highlight;
+            sh.enabled = !sh.enabled;
+            app.state.piano.dirty = true;
+            return Some(format!("Scale highlighting: {}", if sh.enabled { "on" } else { "off" }));
+        }
+        NCmd::SetScaleRoot(r) => {
+            app.state.piano.scale_highlight.root = r;
+            app.state.piano.scale_highlight.enabled = true;
+            app.state.piano.dirty = true;
+            let root_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+            let name = root_names[r as usize % 12];
+            return Some(format!("Scale root set to {}", name));
+        }
+        NCmd::SetScale(sc) => {
+            app.state.piano.scale_highlight.scale_idx = sc;
+            app.state.piano.scale_highlight.enabled = true;
+            app.state.piano.dirty = true;
+            return Some(format!("Scale set to {}", crate::chords::label(sc)));
+        }
+        NCmd::DetectScale => {
+            let msg = detect_scale_from_notes(&mut app.state);
+            return Some(msg);
         }
     };
     s.piano.dirty = true;

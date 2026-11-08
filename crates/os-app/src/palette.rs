@@ -93,6 +93,7 @@ pub enum PaletteAction {
     SnapNotesToScale,
     TransposeClips(i16),
     GenerateArrangement(crate::grooves::ArrangementStyle),
+    SplitByChannel,
 }
 
 /// A single item searchable within the command palette.
@@ -767,6 +768,14 @@ pub fn items(s: &State) -> Vec<PaletteItem> {
         });
     }
 
+    list.push(PaletteItem {
+        title: "Split Pattern by Channel / Instrument".into(),
+        subtitle: "Explode combined pattern into separate patterns for each instrument".into(),
+        category: Category::Arrangement,
+        shortcut: None,
+        action: PaletteAction::SplitByChannel,
+    });
+
     // Clip Pitch Manipulation & Transposition
     list.push(PaletteItem {
         title: "Transpose Selected Clips +1 Semitone".into(),
@@ -1177,6 +1186,10 @@ pub fn execute(app: &mut App, item: &PaletteItem) {
             if let Some(msg) = crate::playlist::run(app, crate::playlist::Cmd::Arrangement(*style)) {
                 app.state.message = Some(msg);
             }
+        }
+        PaletteAction::SplitByChannel => {
+            crate::patterns::split_by_channel(&mut app.state);
+            app.state.message = Some("Split pattern by channel / instrument".into());
         }
     }
     app.invalidate();
