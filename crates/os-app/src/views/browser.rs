@@ -106,6 +106,9 @@ pub enum Item {
     Generator(usize),
     /// An effect (index into `Plugins::effects`).
     Effect(usize),
+    /// A plugin file in the files tree (a `.dll`, `.vst`, `.vst3` or `.clap`): clicked or dropped, it is hosted and
+    /// added (a generator as a channel, an effect on the selected mixer track).
+    PlugFile(String),
     /// A non-audio file in a dropped folder (not draggable, spec §6).
     File(String),
     /// A parameter of a hosted plugin: hosted key, parameter index (spec: plugins/plugin-parameters.md §6).
@@ -382,15 +385,22 @@ pub fn file_icon(name: &str) -> Icon {
         "txt" | "url" | "pdf" | "nfo" | "rtf" | "htm" | "html" | "md" => Icon::FileText,
         "fxp" | "fxb" | "fst" | "vstpreset" | "nmsv" | "spf" | "h2p" | "clap-preset" | "ospreset" | "oschannel" => Icon::FilePreset,
         "zip" | "rar" | "7z" => Icon::FileZip,
+        // Plugin files: clicked or dropped, they are hosted and added (spec §6, "Plugin files").
+        "vst3" | "vst" | "clap" | "dll" => Icon::Plug,
         _ => Icon::FileBlank,
     }
 }
 
 /// What a file row stands for (spec §6): an audio file a sample, a preset file a preset, anything else a file.
 fn file_item(name: &str, path: &str) -> Item {
-    if file_icon(name) == Icon::FileAudio {
+    let p = Path::new(path);
+    // A plugin file of this platform is a row of its own: clicked or dropped, it is hosted and added. A `.dll`
+    // that is not a plugin (an installer, a runtime library beside one) stays a plain file.
+    if crate::plugin_db::format_of_file(p).is_some() {
+        Item::PlugFile(path.into())
+    } else if file_icon(name) == Icon::FileAudio {
         Item::Sample(path.into())
-    } else if crate::presets::is_preset_file(Path::new(path)) || crate::presets::is_factory(Path::new(path)) || crate::channel_states::is_state_file(Path::new(path)) {
+    } else if crate::presets::is_preset_file(p) || crate::presets::is_factory(p) || crate::channel_states::is_state_file(p) {
         Item::Preset(path.into())
     } else {
         Item::File(path.into())

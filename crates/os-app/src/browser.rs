@@ -652,7 +652,7 @@ impl App {
                 Win::Mixer => slot(),
                 _ => grid.or(rack),
             },
-            Item::None | Item::File(_) | Item::History(_) | Item::Preset(_) | Item::FreesoundSearch | Item::Freesound(_) => None,
+            Item::None | Item::File(_) | Item::History(_) | Item::Preset(_) | Item::PlugFile(_) | Item::FreesoundSearch | Item::Freesound(_) => None,
         }?;
         Some((win, r))
     }
@@ -682,6 +682,13 @@ impl App {
         self.state.drag_on = None;
         self.state.drop_on = None;
         self.invalidate();
+        // A plugin file in the files tree: a click or a drop anywhere hosts it and adds it (a generator as a channel,
+        // an effect on the selected mixer track). The scan runs in the scanner child, so a broken file is only a message.
+        if let Item::PlugFile(path) = &item {
+            self.state.message = crate::plugin_menu::add_plugin_file(self, std::path::Path::new(path));
+            self.invalidate();
+            return;
+        }
         if !started {
             return;
         }
@@ -798,7 +805,8 @@ impl App {
                     self.state.message = Some(m);
                 }
             }
-            Item::None | Item::File(_) | Item::History(_) | Item::Preset(_) | Item::FreesoundSearch | Item::Freesound(_) => {}
+            // A plugin file was handled before this match (a click or a drop adds it wherever it lands).
+            Item::None | Item::File(_) | Item::History(_) | Item::Preset(_) | Item::PlugFile(_) | Item::FreesoundSearch | Item::Freesound(_) => {}
         }
     }
 
@@ -884,6 +892,7 @@ impl App {
             RowCmd::Preview => self.preview_sample(&sample?),
             RowCmd::Send => return send_sample(s, &sample?, &row.label),
             RowCmd::NewChannel => self.sample_to_channel(sample?, None),
+            RowCmd::PlugFile => return crate::plugin_menu::add_plugin_file(self, &row.path?),
             RowCmd::OpenFolder => open_folder(&row.path?),
             RowCmd::ShowInFolder => crate::theme_library::show_in_folder(&row.path?),
             // File ▸ Browser extra search folders, the root's Browser name selected for typing.
@@ -1143,6 +1152,9 @@ pub enum RowCmd {
     /// A dropped folder root: its Browser name typed in File ▸ Browser extra search folders; out of the browser.
     Rename,
     Remove,
+    /// A plugin file in the files tree: hosted and added (a generator as a channel, an effect on the selected mixer
+    /// track).
+    PlugFile,
     /// The row's Favorite check: a plugin's star, a file in or out of the favorites (spec §10).
     Favorite,
 }
@@ -1206,6 +1218,7 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
         }
         Item::Generator(index) => items.push(PItem::new("Add to instrument rack", Cmd::Plugin(crate::plugin_menu::PlugCmd::Generator { index, after: None }))),
         Item::Effect(index) => items.push(PItem::new("Add to selected mixer track", Cmd::Plugin(crate::plugin_menu::PlugCmd::Effect { index, slot: None }))),
+        Item::PlugFile(_) => items.push(r("Add to the project", RowCmd::PlugFile)),
         Item::History(_) => items.push(r("Go to this step", RowCmd::Activate)),
         Item::Freesound(_) => items.push(r("Preview", RowCmd::Activate)),
         // Into the selected channel's plugin (spec: plugins/presets.md "Browser").
@@ -1227,7 +1240,7 @@ pub fn row_menu(s: &crate::app::State, row: &view::Row) -> Vec<PItem> {
         }
     }
     // Files and plugins can be favorites (§10; folders cannot).
-    if matches!(row.item, Item::Sample(_) | Item::Preset(_) | Item::File(_) | Item::Generator(_) | Item::Effect(_)) {
+    if matches!(row.item, Item::Sample(_) | Item::Preset(_) | Item::File(_) | Item::Generator(_) | Item::Effect(_) | Item::PlugFile(_)) {
         sep(&mut items);
         items.push(r("Favorite", RowCmd::Favorite).mark(Mark::Check(view::is_favorite(s, row))));
     }

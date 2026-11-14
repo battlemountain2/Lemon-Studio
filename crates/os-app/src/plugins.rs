@@ -357,6 +357,7 @@ pub fn builtin() -> Vec<Available> {
     static LIB: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static OSC3: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static CITRUS: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
+    static SMITH: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static RAY: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static WAVETABLE: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
     static SLICER: OnceLock<Option<Arc<os_clap::Library>>> = OnceLock::new();
@@ -365,6 +366,7 @@ pub fn builtin() -> Vec<Available> {
     let mut v = linked(&LIB, &lemon_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, LEMON_SAMPLER);
     v.extend(linked(&OSC3, &lemon_3x_osc::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::osc3::LEMON_TRIO));
     v.extend(linked(&CITRUS, &citrus::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::citrus::CITRUS));
+    v.extend(linked(&SMITH, &smith::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::smith::SMITH));
     v.extend(linked(&SLICER, &lemon_slicer::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::slicer::LEMON_SLICER));
     v.extend(linked(&DRUMS, &lemon_drum_sampler::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, crate::drums::LEMON_DRUMS));
     v.extend(linked(&RAY, &lemon_ray::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void, "Lemon Ray"));
@@ -406,6 +408,7 @@ pub fn builtin_effects() -> Vec<Available> {
         &lemon_peak_controller::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_formula_controller::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
         &lemon_vocoder::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
+        &lemon_drop::LINKED_CLAP_ENTRY as *const _ as *const std::ffi::c_void,
     ];
     let names = FILE_MAPPED.into_iter().chain(LINKED_EFFECTS);
     LIBS.iter().zip(entries).zip(names).flat_map(|((lib, entry), name)| linked(lib, entry, name)).collect()
@@ -558,6 +561,42 @@ impl Plugins {
     fn native_ready(&mut self, dll: &std::path::Path) -> bool {
         let (Some(checks), Ok(program)) = (&mut self.native_checks, std::env::current_exe()) else { return true };
         checks.ready(&program, dll)
+    }
+
+    /// A plugin file the user picked anywhere (the browser's files tree): one the scans already know joins its list at
+    /// once; the others are scanned now, in the scanner child, so a broken file never takes the program down, and the
+    /// plugins it names join the instrument or effect lists (a shell file joins every plugin it offers). The plugin
+    /// plays from the file on first use, the way a scanned one does. `Err` is what to tell the user.
+    pub fn host_file(&mut self, path: &Path) -> Result<(), String> {
+        let Some(format) = crate::plugin_db::format_of_file(path) else {
+            return Err("is not a plugin file this program hosts (.clap, .vst3, .vst)".into());
+        };
+        if self.available.iter().chain(&self.effects).any(|a| crate::plugin_db::same_path(&a.desc.path, path)) {
+            return Ok(());
+        }
+        if format == os_host::Format::Vst2 {
+            if let Some(why) = os_vst2::unsupported(path) {
+                return Err(why);
+            }
+        }
+        // Tests scan in this process (a test program is no scanner).
+        let scanned = if cfg!(test) { crate::plugin_scan::scan_here(path, format) } else { crate::plugin_scan::scan_in_child(path, format) };
+        if scanned.status != crate::plugin_db::Status::Ok {
+            return Err(if scanned.error.is_empty() { "the scan could not read it".into() } else { scanned.error });
+        }
+        let descs: Vec<Descriptor> = scanned.plugins.iter().map(|r| r.descriptor(format, path)).collect();
+        if descs.is_empty() {
+            return Err("the scan found no plugin in it".into());
+        }
+        let lib: Arc<dyn Library> = Arc::new(LazyLibrary { path: path.to_path_buf(), format, plugins: descs.clone(), real: OnceLock::new() });
+        for d in descs {
+            match d.kind {
+                os_host::Kind::Instrument => self.available.push(Available { lib: lib.clone(), desc: d }),
+                os_host::Kind::Effect => self.effects.push(Available { lib: lib.clone(), desc: d }),
+                os_host::Kind::Other => {}
+            }
+        }
+        Ok(())
     }
 
     /// The built-in plugins plus every plugin file in the standard folders, scanned in this process at once (tests).
@@ -1562,7 +1601,7 @@ pub const LEMON_WAVETABLE: &str = "Lemon Wavetable";
 /// Lemon Studio's effects compiled in besides the EQ (`builtin_effects`, in this order). They have no file plugin of
 /// their own to be stored as, so a project stores them wrapped, as it stored their plugin files
 /// (`project_plugins::is_wrapped`).
-pub const LINKED_EFFECTS: [&str; 18] = [
+pub const LINKED_EFFECTS: [&str; 19] = [
     "Lemon Limiter",
     "Lemon Reverb",
     "Lemon Delay",
@@ -1581,6 +1620,7 @@ pub const LINKED_EFFECTS: [&str; 18] = [
     LEMON_PEAK_CONTROLLER,
     LEMON_FORMULA_CONTROLLER,
     LEMON_VOCODER,
+    LEMON_DROP,
 ];
 /// Lemon Studio's effects compiled in that a project stores under the FL plugin they recreate, with that plugin's
 /// state (`new_slot`, `store_builtin_states`), so they are never saved wrapped.
@@ -1596,6 +1636,11 @@ pub const LEMON_VOCODER: &str = "Lemon Vocoder";
 /// The plugin name a project file stores for Vocodex (file-format identifier, kept for interop): slots with it are
 /// played and edited by Lemon Vocoder (spec: plugins/lemon-vocoder.md §6).
 pub const VOCODEX_FILE_NAME: &str = "Vocodex";
+/// Name of Lemon Drop, Lemon Studio's audio visualizer (spec: plugins/lemon-drop.md).
+pub const LEMON_DROP: &str = lemon_drop::NAME;
+/// The plugin name a project file stores for Wave Candy (file-format identifier, kept for interop): slots with it are
+/// shown by Lemon Drop (spec: plugins/lemon-drop.md "Projects").
+pub const WAVE_CANDY_FILE_NAME: &str = "Wave Candy";
 /// Name of Tesla, Lemon Studio's audio editor and recorder (spec: plugins/tesla/README.md).
 pub const TESLA: &str = "Tesla";
 /// Name of Pulp Filter, Lemon Studio's pattern-controlled multi-filter (spec: plugins/lemon-pulp-filter.md).
@@ -1631,7 +1676,7 @@ pub const OLD_NAMES: [(&str, &str); 5] = [
 /// (`App::sync_effects`, `App::store_builtin_states`; spec: plugins/lemon-small-effects.md "Opened projects' slots").
 /// Not Lemon Stereo Shaper: the difference output is the mixer slot's alone (spec: plugins/lemon-stereo-shaper.md §5),
 /// so the engine's own Stereo Shaper keeps playing those slots.
-pub const FL_RECREATIONS: [(&str, &str); 15] = [
+pub const FL_RECREATIONS: [(&str, &str); 16] = [
     ("Fruity Limiter", "Lemon Limiter"),
     ("Fruity Reeverb 2", "Lemon Reverb"),
     ("Fruity Delay 3", "Lemon Delay"),
@@ -1647,6 +1692,7 @@ pub const FL_RECREATIONS: [(&str, &str); 15] = [
     ("Fruity Peak Controller", LEMON_PEAK_CONTROLLER),
     ("Fruity Formula Controller", LEMON_FORMULA_CONTROLLER),
     (VOCODEX_FILE_NAME, LEMON_VOCODER),
+    (WAVE_CANDY_FILE_NAME, LEMON_DROP),
 ];
 
 /// The Lemon effect of `FL_RECREATIONS` that plays slots stored as `file` (any case: files may spell the id
@@ -1675,6 +1721,7 @@ pub fn recreation_state_from_fl(lemon: &str, fl: &[u8]) -> Option<Vec<u8>> {
         LEMON_PEAK_CONTROLLER => small(lemon_small_fx::peak_controller::SPEC, fl),
         LEMON_FORMULA_CONTROLLER => small(lemon_small_fx::formula_controller::SPEC, fl),
         LEMON_VOCODER => small(lemon_small_fx::vocoder::SPEC, fl),
+        LEMON_DROP => lemon_drop::plugin_state_from_fl(fl),
         _ => return None,
     })
 }
@@ -1700,6 +1747,7 @@ pub fn fl_from_recreation_state(lemon: &str, blob: &[u8]) -> Option<Vec<u8>> {
         LEMON_PEAK_CONTROLLER => small(lemon_small_fx::peak_controller::SPEC, blob),
         LEMON_FORMULA_CONTROLLER => small(lemon_small_fx::formula_controller::SPEC, blob),
         LEMON_VOCODER => small(lemon_small_fx::vocoder::SPEC, blob),
+        LEMON_DROP => lemon_drop::fl_from_plugin_state(blob),
         _ => None,
     }
 }
